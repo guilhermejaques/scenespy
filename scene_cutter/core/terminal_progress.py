@@ -1,37 +1,42 @@
 import time
 import sys
+import threading
 
 
 class TerminalProgressReporter:
-    def __init__(self, update_interval=1.5):
-        self.update_interval = update_interval
-        self._last = 0
-        self._start = time.time()
+    def __init__(self):
+        self.start_time = time.time()
+        self.last_len = 0
+        self._lock = threading.Lock()
 
-    def update(self, phase, current, total):
-        now = time.time()
-        if now - self._last < self.update_interval:
-            return
+    def _fmt(self, sec):
+        m = int(sec // 60)
+        s = int(sec % 60)
+        return f"{m:02d}:{s:02d}"
 
-        self._last = now
+    def update(self, current=0, total=0, detected=None, phase=None):
+        with self._lock:
+            elapsed = time.time() - self.start_time
 
-        elapsed = now - self._start
-        avg = elapsed / max(current, 1)
-        eta = avg * (total - current)
+            parts = []
+            if phase:
+                parts.append(f"[{phase.upper()}]")
+            if detected is not None:
+                parts.append(f"Detected: {detected}")
+            if total:
+                parts.append(f"Progress: {current}/{total}")
+            else:
+                parts.append(f"Progress: {current}")
+            parts.append(f"Time: {self._fmt(elapsed)}")
 
-        pct = (current / total) * 100
-        eta_min = eta / 60
+            msg = " | ".join(parts)
 
-        msg = (
-            f"[{phase.upper():>4}] "
-            f"{current}/{total} | "
-            f"{pct:5.1f}% | "
-            f"ETA ~{eta_min:4.1f} min"
-        )
-
-        sys.stdout.write("\r" + msg)
-        sys.stdout.flush()
+            pad = max(0, self.last_len - len(msg))
+            sys.stdout.write("\r" + msg + (" " * pad))
+            sys.stdout.flush()
+            self.last_len = len(msg)
 
     def finish(self):
-        sys.stdout.write("\n")
-        sys.stdout.flush()
+        with self._lock:
+            sys.stdout.write("\n")
+            sys.stdout.flush()

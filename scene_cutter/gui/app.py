@@ -2,9 +2,9 @@ import os
 import time
 import threading
 import customtkinter as ctk
+from PIL import Image
 
 from core.engine import SceneEngine
-from core.preview_ffmpeg import FFmpegPreview
 from gui.theme import COLORS
 from gui.widgets import (
     Section,
@@ -18,7 +18,6 @@ from gui.widgets import (
 
 # ========================== Configurações ==========================
 ENABLE_PREVIEW = True
-PREVIEW_EVERY_N_SCENES = 5
 
 PROFILES = {
     "menos_cortes": {
@@ -44,7 +43,7 @@ PROFILES = {
     },
 }
 
-# ========================== Aplicativo ==========================
+# ========================== App ==========================
 class SceneCutterApp(ctk.CTk):
 
     def __init__(self):
@@ -56,11 +55,10 @@ class SceneCutterApp(ctk.CTk):
         self.engine = None
         self.running = False
 
-        self._log_buffer = []
-        self._last_preview_time = 0
+        self._last_preview_time = 0.0
+        self._preview_min_interval = 0.12
 
         self._build_ui()
-        self.after(200, self._flush_logs)
 
     # ========================== UI ==========================
     def _build_ui(self):
@@ -79,6 +77,7 @@ class SceneCutterApp(ctk.CTk):
 
         self.video_selector = FileSelector(files, "Vídeo de origem")
         self.video_selector.pack(fill="x", padx=12)
+
         self.output_selector = DirectorySelector(files)
         self.output_selector.pack(fill="x", padx=12)
 
@@ -127,6 +126,14 @@ class SceneCutterApp(ctk.CTk):
         )
         self.start_btn.pack(pady=20)
 
+        self.status_label = ctk.CTkLabel(
+            self.left,
+            text="Aguardando início...",
+            anchor="w",
+            font=("Segoe UI", 11)
+        )
+        self.status_label.pack(fill="x", padx=12, pady=(0, 6))
+
         self.log = LogBox(self.left, height=200)
         self.log.pack(fill="x", padx=10, pady=10)
 
@@ -151,13 +158,16 @@ class SceneCutterApp(ctk.CTk):
 
     def set_ui_state(self, running: bool):
         state = "disabled" if running else "normal"
+
         for widget in [
             self.video_selector.entry, self.video_selector.button,
             self.output_selector.entry, self.output_selector.button
         ]:
             widget.configure(state=state)
+
         for rb in self.mode_radios + self.profile_radios:
             rb.configure(state=state)
+
         self.interval_entry.entry.configure(state=state)
 
     # ========================== Controle ==========================
@@ -170,21 +180,20 @@ class SceneCutterApp(ctk.CTk):
     def start_process(self):
         video = self.video_selector.get()
         output = self.output_selector.get()
+
         if not os.path.isfile(video) or not os.path.isdir(output):
             self.log.write("❌ Caminhos inválidos", color="red")
             return
 
-        # Limpeza visual
-        self.preview_frame.label.configure(image=None)
         self.progress.update(0)
+        self.status_label.configure(text="Iniciando...")
 
         self.running = True
         self.set_ui_state(True)
-        self.start_btn.configure(text="Parar", fg_color="#dc2626", hover_color="#b91c1c")
+        self.start_btn.configure(text="Parar", fg_color="#dc2626")
 
         cfg = PROFILES[self.profile.get()].copy()
         cfg["ENABLE_PREVIEW"] = ENABLE_PREVIEW
-        cfg["PREVIEW_EVERY_N_SCENES"] = PREVIEW_EVERY_N_SCENES
 
         scene_mode = self.cut_mode.get() == "scene"
         if not scene_mode:
@@ -196,48 +205,53 @@ class SceneCutterApp(ctk.CTk):
                 return
 
         self.engine = SceneEngine(video, output, cfg, self.progress_callback)
-        threading.Thread(target=self.run_engine, args=(scene_mode,), daemon=True).start()
+
+        threading.Thread(
+            target=self.run_engine,
+            args=(scene_mode,),
+            daemon=True
+        ).start()
 
     def stop_process(self):
         self.running = False
         if self.engine:
             self.engine.stop()
-        # Limpa preview imediatamente
-        self.preview_frame.label.configure(image=None)
+
+        self.clear_preview()
+        self.status_label.configure(text="Processo interrompido")
         self.log.write("⛔ Processo interrompido", color="#facc15")
         self.reset_ui()
 
     def run_engine(self, scene_mode):
         result = self.engine.run(scene_mode=scene_mode)
-        self.after(0, lambda: self.finish_process() if result else self.reset_ui())
+        if result:
+            self.after(0, self.finish_process)
+        else:
+            self.after(0, self.reset_ui)
 
-    # ========================== Callback ==========================
-    def progress_callback(self, msg, pct=None, img=None):
+    # ========================== CALLBACK ==========================
+    def progress_callback(self, msg=None, pct=None, img=None):
         if not self.running:
             return
-        if msg:
-            self._log_buffer.append(msg)
+
+        if msg is not None:
+            self.after(0, lambda m=msg: self.status_label.configure(text=m))
+
         if pct is not None:
             self.after(0, lambda v=pct: self.progress.update(v / 100))
-        if ENABLE_PREVIEW and img:
+
+        if ENABLE_PREVIEW and isinstance(img, Image.Image):
             now = time.time()
-            if now - self._last_preview_time > 0.15:
+            if now - self._last_preview_time >= self._preview_min_interval:
                 self._last_preview_time = now
                 self.after(0, lambda i=img: self.preview_frame.update_image(i))
 
-    # ========================== Logs ==========================
-    def _flush_logs(self):
-        if self._log_buffer:
-            for msg in self._log_buffer:
-                self.log.write(msg)
-            self._log_buffer.clear()
-        self.after(200, self._flush_logs)
-
     # ========================== Finalização ==========================
     def finish_process(self):
-        if not self.running:
-            return
+        self.running = False
+        self.clear_preview()
         self.progress.update(1.0, finished=True)
+        self.status_label.configure(text="Finalizado com sucesso")
         self.log.write("✅ Finalizado com sucesso", color="#22c55e")
         self.reset_ui(finished=True)
 
@@ -246,20 +260,17 @@ class SceneCutterApp(ctk.CTk):
         if self.engine:
             self.engine.stop()
             self.engine = None
+
         self.set_ui_state(False)
-        self.start_btn.configure(text="Iniciar", fg_color="#3b82f6", hover_color="#2563eb")
-        self.preview_frame.label.configure(image=None)
+        self.start_btn.configure(text="Iniciar", fg_color="#3b82f6")
+
         if not finished:
             self.progress.update(0)
+            self.status_label.configure(text="Aguardando início...")
 
-    # ========================== Limpeza logs ==========================
-    def clear_log(self):
-        try:
-            self.log.clear()
-        except AttributeError:
-            self.log.configure(state="normal")
-            self.log.delete("1.0", "end")
-            self.log.configure(state="disabled")
+    # ========================== Preview ==========================
+    def clear_preview(self):
+        self.preview_frame.clear()
 
 
 if __name__ == "__main__":
