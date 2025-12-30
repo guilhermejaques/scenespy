@@ -1,217 +1,175 @@
 import os
-import shutil
 import subprocess
-import datetime
-import time
 import threading
-import concurrent.futures
+import time
+import datetime
 
 from scenedetect import open_video, SceneManager
 from scenedetect.detectors import ContentDetector
 
-from core.preview_ffmpeg import FFmpegPreview
 
-
-# ============================================================
-# ENGINE (GUI-SAFE | ALTO DESEMPENHO)
-# ============================================================
 class SceneEngine:
-    def __init__(
-        self,
-        video_path,
-        output_dir,
-        profile_cfg,
-        progress_cb=None,
-        enable_terminal=False
-    ):
-        self.video_path = video_path
-        self.output_dir = output_dir
-        self.cfg = profile_cfg
+    def __init__(self, video, output, cfg, progress_cb=None):
+        self.video = video
+        self.output = output
+        self.cfg = cfg
+        self.progress_cb = progress_cb or (lambda **_: None)
 
-        self.progress_cb = progress_cb or (lambda msg, pct=None, img=None: None)
+        self._stop = False
+        self._lock = threading.Lock()
 
-        self._stop_flag = False
-        self._stop_event = threading.Event()
+        self.detected = 0
+        self.total = 0
+        self.done = 0
+
         self._start_time = None
+        self._end_time = None
 
-        self._detected_scenes = 0
-        self._last_preview_time = 0.0
-        self._preview_interval = 0.8
-
-        self._enable_terminal = enable_terminal
-
-    # ========================== CONTROLE ==========================
     def stop(self):
-        self._stop_flag = True
-        self._stop_event.set()
+        self._stop = True
 
-    def _emit(self, msg=None, pct=None, img=None):
-        if self._stop_flag:
-            return
-        self.progress_cb(msg, pct, img)
+    def run(self, scene_mode=True):
+        self._start_time = time.time()
 
-    # ========================== VALIDAÇÃO ==========================
-    def validate(self):
-        if not os.path.isfile(self.video_path):
-            raise FileNotFoundError("Vídeo não encontrado")
+        try:
+            if scene_mode:
+                scenes = self._detect_scenes()
+            else:
+                scenes = self._fixed_interval()
 
-        if not shutil.which("ffmpeg"):
-            raise EnvironmentError("FFmpeg não encontrado no PATH")
+            if not scenes or self._stop:
+                return False
 
-    def create_output_directory(self):
-        name = os.path.splitext(os.path.basename(self.video_path))[0]
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(self.output_dir, f"{name}_{ts}")
-        os.makedirs(path, exist_ok=True)
-        return path
+            self._cut_scenes(scenes)
+            self._end_time = time.time()
+            return not self._stop
 
-    # ========================== DETECÇÃO ==========================
-    def detect_scenes(self):
-        self._emit("🔍 Detectando cenas...", 5)
+        except Exception as e:
+            self.progress_cb(msg=f"Erro: {e}")
+            self._end_time = time.time()
+            return False
 
-        video = open_video(self.video_path)
+    def _detect_scenes(self):
+        self.progress_cb(msg="🔍 Detectando cenas...")
+        video = open_video(self.video)
         video.downscale = self.cfg["DOWNSCALE"]
 
-        manager = SceneManager()
-        manager.add_detector(
-            ContentDetector(
-                threshold=self.cfg["THRESHOLD"],
-                min_scene_len=self.cfg["MIN_SCENE_LEN_FRAMES"],
-            )
-        )
-
-        manager.detect_scenes(video)
-        scenes = manager.get_scene_list()
-
-        self._detected_scenes = len(scenes)
-        self._emit(f"🎬 {self._detected_scenes} cenas detectadas", 25)
-
-        return scenes
-
-    # ========================== NORMALIZAÇÃO ======================
-    def normalize_scenes(self, scenes):
-        self._emit("✨ Normalizando timeline...", 40)
+        sm = SceneManager()
+        sm.add_detector(ContentDetector(
+            threshold=self.cfg["THRESHOLD"],
+            min_scene_len=self.cfg["MIN_SCENE_LEN_FRAMES"]
+        ))
+        sm.detect_scenes(video)
+        scenes = sm.get_scene_list()
+        self.detected = len(scenes)
+        self.progress_cb(msg=f"🎬 Cenas detectadas: {self.detected}")
 
         min_dur = self.cfg["MIN_FINAL_DURATION"]
-        normalized = []
+        result = []
 
-        buffer_start = None
-        buffer_end = None
+        buf_s = None
+        buf_e = None
+        for s, e in scenes:
+            start = s.get_seconds()
+            end = e.get_seconds()
 
-        for s in scenes:
-            if self._stop_flag:
-                return []
+            if buf_s is None:
+                buf_s = start
+            buf_e = end
 
-            start = s[0].get_seconds()
-            end = s[1].get_seconds()
+            if buf_e - buf_s >= min_dur:
+                result.append((buf_s, buf_e))
+                buf_s = None
+        if buf_s is not None:
+            result.append((buf_s, buf_e))
+        return result
 
-            if buffer_start is None:
-                buffer_start = start
-                buffer_end = end
-            else:
-                buffer_end = end
+    def _fixed_interval(self):
+        interval = self.cfg["FIXED_INTERVAL"]
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            self.video
+        ]
+        duration = float(subprocess.check_output(cmd).decode().strip())
 
-            if (buffer_end - buffer_start) >= min_dur:
-                normalized.append((buffer_start, buffer_end))
-                buffer_start = None
-                buffer_end = None
+        scenes = []
+        t = 0.0
+        while t < duration:
+            scenes.append((t, min(t + interval, duration)))
+            t += interval
 
-        if buffer_start is not None:
-            normalized.append((buffer_start, buffer_end))
+        self.detected = len(scenes)
+        return scenes
 
-        self._emit(f"🎞 {len(normalized)} cenas finais", 55)
-        return normalized
+    def _cut_scenes(self, scenes):
+        outdir = os.path.join(
+            self.output,
+            datetime.datetime.now().strftime("scenes_%Y%m%d_%H%M%S")
+        )
+        os.makedirs(outdir, exist_ok=True)
 
-    # ========================== CORTE ==============================
-    def cut_scenes(self, scenes, out_dir, preview=None):
-        total = len(scenes)
-        max_workers = min(4, os.cpu_count() or 1)
+        self.total = len(scenes)
+        self.done = 0
 
-        progress_lock = threading.Lock()
-        completed = 0
-
-        def cut_scene_task(index_scene):
-            nonlocal completed
-
-            i, (start, end) = index_scene
-            if self._stop_flag:
+        for idx, (start, end) in enumerate(scenes, 1):
+            if self._stop:
                 return
 
-            duration = end - start
-            output = os.path.join(out_dir, f"scene_{i:03d}.mp4")
+            elapsed = int(time.time() - self._start_time)
+            m, s = divmod(elapsed, 60)
+            h, m = divmod(m, 60)
+            elapsed_str = f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
+            pct_done = (idx - 1) / self.total
+            eta_str = "--:--"
+            if pct_done > 0:
+                total_est = elapsed / pct_done
+                rem = int(total_est - elapsed)
+                mh, ms = divmod(rem, 60)
+                hh, mh = divmod(mh, 60)
+                eta_str = f"{hh:02d}:{mh:02d}:{ms:02d}" if hh else f"{mh:02d}:{ms:02d}"
+
+            self.progress_cb(
+                status={
+                    "detectadas": self.detected,
+                    "cortadas": idx-1,
+                    "eta": eta_str,
+                    "corrido": elapsed_str
+                },
+                pct=pct_done*100,
+                idx=idx,
+                sec=start
+            )
+
+            outfile = os.path.join(outdir, f"scene_{idx:03d}.mp4")
             subprocess.run(
                 [
                     "ffmpeg", "-y",
-                    "-i", self.video_path,
                     "-ss", f"{start:.3f}",
-                    "-t", f"{duration:.3f}",
+                    "-i", self.video,
+                    "-t", f"{end - start:.3f}",
                     "-c:v", "libx264",
                     "-preset", "veryfast",
                     "-crf", "23",
                     "-c:a", "copy",
-                    output,
+                    outfile
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
 
-            with progress_lock:
-                completed += 1
-                pct = (completed / total) * 100 if total else 0
-                self._emit(
-                    msg=f"Cortando cenas: {completed}/{total} | Detectadas: {self._detected_scenes}",
-                    pct=pct
-                )
+            self.done += 1
+            self.progress_cb(pct=(self.done / self.total) * 100)
 
-            if preview:
-                now = time.time()
-                if now - self._last_preview_time >= self._preview_interval:
-                    img = preview.get_frame_at(start + duration / 2)
-                    if img:
-                        self._last_preview_time = now
-                        self._emit(img=img)
+        self.progress_cb(msg="✔ Corte finalizado", pct=100)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            list(executor.map(cut_scene_task, enumerate(scenes, start=1)))
-
-    # ========================== RUN ===============================
-    def run(self, scene_mode=True):
-        self.validate()
-        self._start_time = time.time()
-
-        out_dir = self.create_output_directory()
-        preview = FFmpegPreview(self.video_path) if self.cfg.get("ENABLE_PREVIEW") else None
-
-        try:
-            if scene_mode:
-                scenes = self.detect_scenes()
-                if self._stop_flag:
-                    return None
-
-                scenes = self.normalize_scenes(scenes)
-                if self._stop_flag:
-                    return None
-            else:
-                duration = open_video(self.video_path).duration.get_seconds()
-                interval = self.cfg.get("FIXED_INTERVAL", 10)
-                scenes = [
-                    (t, min(t + interval, duration))
-                    for t in self._frange(0, duration, interval)
-                ]
-
-            self.cut_scenes(scenes, out_dir, preview)
-
-        finally:
-            if preview:
-                preview.release()
-
-        return None if self._stop_flag else out_dir
-
-    # ========================== UTIL ===============================
-    @staticmethod
-    def _frange(start, stop, step):
-        t = start
-        while t < stop:
-            yield t
-            t += step
+    def total_time(self):
+        if not self._start_time:
+            return "--:--"
+        end = self._end_time or time.time()
+        elapsed = int(end - self._start_time)
+        m, s = divmod(elapsed, 60)
+        h, m = divmod(m, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"

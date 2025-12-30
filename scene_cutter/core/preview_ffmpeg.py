@@ -6,9 +6,7 @@ import time
 
 
 class FFmpegPreview:
-    """
-    Preview via FFmpeg (rápido, estável e GUI-safe)
-    """
+    """Preview via FFmpeg (rápido, estável e GUI-safe)"""
 
     def __init__(self, video_path, min_interval=0.15):
         self.video_path = video_path
@@ -47,7 +45,6 @@ class FFmpegPreview:
                 stderr=subprocess.DEVNULL,
                 check=True
             )
-
             if not proc.stdout:
                 return None
 
