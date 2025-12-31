@@ -18,7 +18,6 @@ ACCEL_OPTIONS = ["cpu", "nvidia", "amd", "intel"]
 ENABLE_PREVIEW_DEFAULT = True
 PREVIEW_INTERVAL = 0.15
 PREVIEW_FPS = 1  # apenas 1 frame a cada N segundos para preview
-FOCUS_TIMEOUT = 10  # desativa preview após 10s sem foco
 
 # ======================= Widgets =======================
 class Section(ctk.CTkFrame):
@@ -103,10 +102,13 @@ class PreviewFrame(ctk.CTkFrame):
         self.label.configure(image=self._img_ref)
     def update_info(self,text):
         self.info_label.configure(text=text)
-    def clear(self):
+    def clear_image(self):
         self.label.configure(image=None)
         self._img_ref = None
+    def clear_all(self):
+        self.clear_image()
         self.info_label.configure(text="")
+
 
 class FileSelector(ctk.CTkFrame):
     def __init__(self, master, label="Arquivo", width=420):
@@ -246,6 +248,14 @@ class SceneEngine:
         accel=self.cfg.get("ACCEL","cpu")
         for idx,(start,end) in enumerate(scenes,1):
             if self._stop: break
+
+            # --- PREVIEW DURANTE CORTE (miniatura) ---
+            if self.previewer and self.preview_enabled:
+                mid_time = (start + end) / 2
+                thumb = self._generate_thumbnail(mid_time)
+                if thumb:
+                    self.previewer.update_image(thumb)
+
             cmd=["ffmpeg","-y","-ss",f"{start:.3f}","-i",self.video,"-t",f"{end-start:.3f}"]
             if accel=="nvidia": cmd+=["-c:v","h264_nvenc"]
             elif accel=="amd": cmd+=["-c:v","h264_amf"]
@@ -259,6 +269,22 @@ class SceneEngine:
             if self.progress:
                 self.progress.update(self.done/self.total)
 
+
+
+    def _generate_thumbnail(self, timestamp):
+        try:
+            container = av.open(self.video)
+            stream = container.streams.video[0]
+            container.seek(int(timestamp * av.time_base))
+
+            for frame in container.decode(video=0):
+                img = frame.to_image()
+                img = img.resize((420, int(420 * frame.height / frame.width)))
+                return img
+        except Exception:
+            return None
+
+
 # ======================= App =======================
 class SceneCutterApp(ctk.CTk):
     def __init__(self):
@@ -268,10 +294,7 @@ class SceneCutterApp(ctk.CTk):
         self.engine = None
         self.running = False
         self.preview_enabled = ENABLE_PREVIEW_DEFAULT
-        self._last_focus = time.time()
         self._build_ui()
-        self.bind("<FocusIn>", lambda e: setattr(self,'_last_focus',time.time()))
-        threading.Thread(target=self._focus_watchdog,daemon=True).start()
 
     def _build_ui(self):
         # Lateral esquerda
@@ -284,17 +307,43 @@ class SceneCutterApp(ctk.CTk):
         self.output_selector=DirectorySelector(files)
         self.output_selector.pack(fill="x", padx=12)
 
-        mode = Section(self.left,"Modo de corte")
+        mode = Section(self.left, "Modo de corte")
         mode.pack(fill="x", padx=10, pady=8)
-        self.cut_mode=ctk.StringVar(value="scene")
-        row=ctk.CTkFrame(mode, fg_color="transparent")
-        row.pack(fill="x", padx=12)
-        self.mode_radios=[]
-        for text,value in [("Detecção de cenas","scene"),("A cada X segundos","interval")]:
-            rb=ctk.CTkRadioButton(row,text=text,variable=self.cut_mode,value=value)
-            rb.pack(side="left", padx=6)
-            self.mode_radios.append(rb)
-        self.interval_entry=LabeledEntry(mode,"Intervalo (segundos)","Ex:10")
+
+        self.cut_mode = ctk.StringVar(value="scene")
+        self.cut_mode.trace_add("write", self._on_cut_mode_change)
+
+        row = ctk.CTkFrame(mode, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=4)
+
+        self.mode_radios = []
+
+        # Radio: Detecção de cenas (primeiro)
+        rb_scene = ctk.CTkRadioButton(
+            row,
+            text="Detecção de cenas",
+            variable=self.cut_mode,
+            value="scene"
+        )
+        rb_scene.pack(side="left", padx=(0, 16))
+        self.mode_radios.append(rb_scene)
+
+        # Radio: A cada X segundos
+        rb_interval = ctk.CTkRadioButton(
+            row,
+            text="A cada X segundos",
+            variable=self.cut_mode,
+            value="interval"
+        )
+        rb_interval.pack(side="left")
+        self.mode_radios.append(rb_interval)
+
+        # Entry pequena ao lado (≈ 6 dígitos)
+        self.interval_entry = ctk.CTkEntry(
+            row,
+            width=80,
+            placeholder_text="seg"
+        )
 
         profile=Section(self.left,"Perfil de detecção")
         profile.pack(fill="x", padx=10, pady=8)
@@ -312,9 +361,17 @@ class SceneCutterApp(ctk.CTk):
         self.accel=ctk.StringVar(value="cpu")
         row=ctk.CTkFrame(accel_section, fg_color="transparent")
         row.pack(fill="x", padx=12)
+        self.accel_radios = []
+
         for val in ACCEL_OPTIONS:
-            rb=ctk.CTkRadioButton(row,text=val.upper(),variable=self.accel,value=val)
+            rb = ctk.CTkRadioButton(
+                row,
+                text=val.upper(),
+                variable=self.accel,
+                value=val
+            )
             rb.pack(side="left", padx=6)
+            self.accel_radios.append(rb)
 
         self.start_btn=ctk.CTkButton(self.left,text="Iniciar",command=self.toggle_start)
         self.start_btn.pack(pady=20)
@@ -327,29 +384,27 @@ class SceneCutterApp(ctk.CTk):
         section=Section(self.right,"Preview")
         section.pack(fill="x")
         # switch preview
-        self.preview_switch=ctk.CTkSwitch(section,text="Preview", command=self.toggle_preview)
+        self.preview_switch = ctk.CTkSwitch(
+            section,
+            text="Preview",
+            command=self.toggle_preview
+        )
         self.preview_switch.pack(anchor="e", padx=10)
+
+        # garante que o preview inicia ligado visualmente
+        if self.preview_enabled:
+            self.preview_switch.select()
+            self.toggle_preview()
         self.preview_frame=PreviewFrame(self.right)
         self.preview_frame.pack(fill="both", expand=True, padx=10, pady=10)
         self.progress=ProgressBar(self.right)
         self.progress.pack(fill="x", padx=20, pady=10)
+        self._on_cut_mode_change()
 
     def toggle_preview(self):
         self.preview_enabled=self.preview_switch.get()
         if not self.preview_enabled:
-            self.preview_frame.clear()
-
-    def _focus_watchdog(self):
-        while True:
-            if self.running and (time.time()-self._last_focus)>FOCUS_TIMEOUT and self.preview_enabled:
-                self.preview_enabled=False
-                self.after(0,self.preview_frame.clear)
-                self.preview_switch.deselect()
-            elif self.running and not self.preview_enabled and (time.time()-self._last_focus)<=FOCUS_TIMEOUT:
-                self.preview_enabled=True
-                self.after(0,self.preview_frame.update_info, self.preview_frame.info_label.cget("text"))
-                self.preview_switch.select()
-            time.sleep(1)
+            self.preview_frame.clear_image()
 
     def toggle_start(self):
         if self.running:
@@ -384,8 +439,7 @@ class SceneCutterApp(ctk.CTk):
     def stop_process(self):
         self.running=False
         if self.engine: self.engine.stop()
-        self.preview_enabled=False
-        self.preview_frame.clear()
+        self.preview_frame.clear_all()
         self.log.clear_status()
         self.log.write_message("⛔ Processo interrompido",color="#facc15")
         self.reset_ui()
@@ -409,11 +463,25 @@ class SceneCutterApp(ctk.CTk):
 
     def set_ui_state(self,disabled):
         state="disabled" if disabled else "normal"
-        for widget in [self.video_selector.button,self.output_selector.button,*self.mode_radios,*self.profile_radios]:
+        for widget in [
+            self.video_selector.button,
+            self.output_selector.button,
+            *self.mode_radios,
+            *self.profile_radios,
+            *self.accel_radios
+        ]:
             widget.configure(state=state)
-        if self.cut_mode.get()=="interval":
-            self.interval_entry.entry.configure(state=state)
+
+        if self.cut_mode.get() == "interval":
+            self.interval_entry.configure(state=state)
         self.preview_switch.configure(state="disabled" if self.running else "normal")
+
+    def _on_cut_mode_change(self, *args):
+        if self.cut_mode.get() == "interval":
+            self.interval_entry.pack(side="left", padx=(8, 0))
+        else:
+            self.interval_entry.pack_forget()
+
 
 # ======================= Main =======================
 if __name__=="__main__":
