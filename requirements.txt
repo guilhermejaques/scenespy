@@ -1,2 +1,4 @@
-scenedetect==0.6.4
-tqdm>=4.66.0
+customtkinter
+pillow
+av
+darkdetect
