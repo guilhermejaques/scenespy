@@ -1,11 +1,9 @@
 import customtkinter as ctk
 
-
 class Section(ctk.CTkFrame):
     def __init__(self, master, title, **kwargs):
         super().__init__(master, fg_color="#16161e", corner_radius=10, **kwargs)
         ctk.CTkLabel(self, text=title, font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=12, pady=(8,4))
-
 
 class LabeledEntry(ctk.CTkFrame):
     def __init__(self, master, label, placeholder="", width=160):
@@ -15,7 +13,6 @@ class LabeledEntry(ctk.CTkFrame):
         self.entry.pack(pady=(2,8), fill="x")
     def get(self):
         return self.entry.get()
-
 
 class LogBox(ctk.CTkTextbox):
     def __init__(self, master, height=140):
@@ -27,7 +24,7 @@ class LogBox(ctk.CTkTextbox):
     def write_status(self, detectadas=None, cortadas=None, eta=None, corrido=None):
         self.configure(state="normal")
         if detectadas is not None:
-            self.status_lines[0] = f"Detectando cenas: {detectadas}"
+            self.status_lines[0] = f"Analisando cenas: {detectadas}"
         if cortadas is not None:
             self.status_lines[1] = f"Cenas cortadas: {cortadas}"
         if eta is not None:
@@ -41,7 +38,6 @@ class LogBox(ctk.CTkTextbox):
         self.configure(state="disabled")
 
     def write_message(self, text, color=None):
-        """Escreve mensagem adicional abaixo das 4 linhas de status."""
         self.configure(state="normal")
         self.insert("end", text + "\n")
         if color:
@@ -65,7 +61,6 @@ class LogBox(ctk.CTkTextbox):
             self.insert("end","\n")
         self.configure(state="disabled")
 
-
 class ProgressBar(ctk.CTkFrame):
     def __init__(self, master):
         super().__init__(master, fg_color="transparent")
@@ -78,7 +73,6 @@ class ProgressBar(ctk.CTkFrame):
         self.bar.set(value)
         self.label.configure(text=f"{int(value*100)}%")
 
-
 class PreviewFrame(ctk.CTkFrame):
     def __init__(self, master):
         super().__init__(master, fg_color="#0f0f14", corner_radius=10)
@@ -86,12 +80,12 @@ class PreviewFrame(ctk.CTkFrame):
         self.label.pack(expand=True)
         self._img_ref = None
     def update_image(self,image):
-        self._img_ref = ctk.CTkImage(light_image=image,size=image.size)
+        from customtkinter import CTkImage
+        self._img_ref = CTkImage(light_image=image,size=image.size)
         self.label.configure(image=self._img_ref)
     def clear(self):
         self.label.configure(image=None)
         self._img_ref = None
-
 
 class FileSelector(ctk.CTkFrame):
     def __init__(self, master, label="Arquivo", width=420):
@@ -114,7 +108,6 @@ class FileSelector(ctk.CTkFrame):
             self.entry.configure(state="disabled")
     def get(self):
         return self.entry.get()
-
 
 class DirectorySelector(FileSelector):
     def select(self):

@@ -1,25 +1,13 @@
 import os
 import threading
-import time
 import customtkinter as ctk
-from PIL import Image
-
 from core.engine import SceneEngine
 from core.preview_ffmpeg import FFmpegPreview
-from gui.widgets import (
-    Section,
-    LabeledEntry,
-    LogBox,
-    ProgressBar,
-    PreviewFrame,
-    FileSelector,
-    DirectorySelector
-)
+from gui.widgets import Section, LabeledEntry, LogBox, ProgressBar, PreviewFrame, FileSelector, DirectorySelector
 
 # ========================== Configurações ==========================
 ENABLE_PREVIEW = True
-PREVIEW_LIMIT = 5  # Quantas imagens mostrar durante o processo
-PREVIEW_INTERVAL = 0.15  # Intervalo mínimo entre previews
+PREVIEW_INTERVAL = 0.15
 
 PROFILES = {
     "menos_cortes": {"label": "Menos cortes", "THRESHOLD": 45.0, "MIN_SCENE_LEN_FRAMES": 10, "DOWNSCALE": 4, "MIN_FINAL_DURATION": 5.5},
@@ -88,7 +76,7 @@ class SceneCutterApp(ctk.CTk):
         self.log.pack(fill="x", padx=10, pady=10)
 
     def _build_preview(self):
-        section = Section(self.right, "Processo")
+        section = Section(self.right, "Preview")
         section.pack(fill="both", expand=True)
         self.preview_frame = PreviewFrame(section)
         self.preview_frame.pack(fill="both", expand=True, padx=10, pady=10)
@@ -121,7 +109,8 @@ class SceneCutterApp(ctk.CTk):
             return
 
         self.progress.update(0)
-        self.log.write_message("▶ Iniciando processamento...")
+        self.log.write_message("▶ Iniciando processo...")
+        self.log.write_message("🔍 Analisando vídeo...")
 
         self.running = True
         self.set_ui_state(True)
@@ -130,8 +119,7 @@ class SceneCutterApp(ctk.CTk):
         cfg = PROFILES[self.profile.get()].copy()
         cfg["ENABLE_PREVIEW"] = ENABLE_PREVIEW
 
-        scene_mode = self.cut_mode.get() == "scene"
-        if not scene_mode:
+        if self.cut_mode.get() != "scene":
             try:
                 cfg["FIXED_INTERVAL"] = float(self.interval_entry.get())
             except ValueError:
@@ -139,11 +127,14 @@ class SceneCutterApp(ctk.CTk):
                 self.reset_ui()
                 return
 
-        self.engine = SceneEngine(video, output, cfg, self.progress_callback)
+        self.engine = SceneEngine(video, output, cfg,
+                                  logbox=self.log,
+                                  progressbar=self.progress,
+                                  previewer=self.preview_frame if ENABLE_PREVIEW else None)
         if ENABLE_PREVIEW:
             self.previewer = FFmpegPreview(video, min_interval=PREVIEW_INTERVAL)
 
-        threading.Thread(target=self.run_engine, args=(scene_mode,), daemon=True).start()
+        threading.Thread(target=self.run_engine, daemon=True).start()
 
     def stop_process(self):
         self.running = False
@@ -153,80 +144,21 @@ class SceneCutterApp(ctk.CTk):
             if self.previewer:
                 self.previewer.release()
             self.clear_preview()
-            self.log.clear_status()
-            self.log.write_message("⛔ Processo interrompido", color="#facc15")
+            self.log.write_message(f"⛔ Processo interrompido em {self.engine.total_time() if self.engine else '--:--'}", color="#facc15")
         except Exception as e:
             print("Erro stop_process:", e)
         finally:
-            self.reset_ui()
+            self.reset_ui(finished=True)
 
-    def run_engine(self, scene_mode):
+    def run_engine(self):
         try:
-            result = self.engine.run(scene_mode=scene_mode)
-            self.after(0, self.finish_process if result else self.reset_ui)
+            result = self.engine.run(scene_mode=self.cut_mode.get()=="scene")
+            if not result and self.running:
+                self.log.write_message("❌ Processo interrompido ou erro")
         except Exception as e:
             print("Erro run_engine:", e)
-            self.after(0, self.reset_ui)
-
-    # ========================== CALLBACK ==========================
-    def progress_callback(self, msg=None, pct=None, idx=None, sec=None, status=None, **_):
-        if not self.running:
-            return
-
-        # Atualiza linhas fixas do LogBox
-        if status:
-            try:
-                self.after(0, lambda s=status: self.log.write_status(
-                    detectadas=s.get("detectadas"),
-                    cortadas=s.get("cortadas"),
-                    eta=s.get("eta"),
-                    corrido=s.get("corrido")
-                ))
-            except Exception as e:
-                print("Erro atualizar status:", e)
-
-        # Atualiza barra de progresso
-        if pct is not None:
-            self.after(0, lambda v=pct: self.progress.update(v / 100))
-
-        # Atualiza preview limitado
-        if sec is not None and self.previewer:
-            try:
-                img = self.previewer.get_frame_at(sec)
-                if img:
-                    self.after(0, lambda i=img: self.preview_frame.update_image(i))
-            except Exception as e:
-                print("Erro atualizar preview:", e)
-
-    # ========================== Finalização ==========================
-    def finish_process(self):
-        self.running = False
-        if self.previewer:
-            self.previewer.release()
-        self.clear_preview()
-        self.log.clear_status()
-        self.progress.update(1.0)
-
-        elapsed = self.engine.total_time() if self.engine else "--:--"
-        self.log.write_message(f"✅ Processo finalizado em {elapsed}", color="#22c55e")
-
-        self.reset_ui(finished=True)
-
-    def reset_ui(self, finished=False):
-        self.running = False
-        try:
-            if self.engine:
-                self.engine.stop()
-                self.engine = None
-            if self.previewer:
-                self.previewer.release()
-                self.previewer = None
-        except Exception:
-            pass
-        self.set_ui_state(False)
-        self.start_btn.configure(text="Iniciar", fg_color="#3b82f6")
-        if not finished:
-            self.progress.update(0)
+        finally:
+            self.reset_ui(finished=True)
 
     # ========================== UI Helpers ==========================
     def set_ui_state(self, running: bool):
@@ -240,6 +172,21 @@ class SceneCutterApp(ctk.CTk):
 
     def clear_preview(self):
         self.preview_frame.clear()
+
+    def reset_ui(self, finished=False):
+        self.running = False
+        try:
+            if self.engine:
+                self.engine = None
+            if self.previewer:
+                self.previewer.release()
+                self.previewer = None
+        except Exception:
+            pass
+        self.set_ui_state(False)
+        self.start_btn.configure(text="Iniciar", fg_color="#3b82f6")
+        if not finished:
+            self.progress.update(0)
 
 
 if __name__ == "__main__":
