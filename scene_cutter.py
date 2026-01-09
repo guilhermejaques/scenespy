@@ -1,4 +1,6 @@
 import os
+import sys
+import socket
 import subprocess
 import threading
 import time
@@ -6,7 +8,7 @@ import datetime
 import customtkinter as ctk
 import av
 
-# ======================= Configuration =======================
+# Config
 PROFILES = {
     "Low": {"label": "Low", "THRESHOLD": 45.0, "MIN_FINAL_DURATION": 5.5},
     "Normal": {"label": "Normal", "THRESHOLD": 28.0, "MIN_FINAL_DURATION": 1.8},
@@ -17,8 +19,11 @@ ACCEL_OPTIONS = ["cpu", "nvidia", "amd", "intel"]
 ENABLE_PREVIEW_DEFAULT = True
 PREVIEW_INTERVAL = 0.15
 PREVIEW_FPS = 1
+INSTANCE_SOCKET = None
+INSTANCE_PORT = 54321
 
-# ======================= Widgets =======================
+
+# Widgets
 class Section(ctk.CTkFrame):
     def __init__(self, master, title, **kwargs):
         super().__init__(master, fg_color="#16161e", corner_radius=10, **kwargs)
@@ -166,7 +171,7 @@ class DirectorySelector(FileSelector):
             self.entry.configure(state="disabled")
 
 
-# ======================= Engine =======================
+# Engine
 class SceneEngine:
     def __init__(self, video, output, cfg, logbox=None, progressbar=None, previewer=None, preview_enabled=True):
         self.video = video
@@ -255,7 +260,7 @@ class SceneEngine:
                         img = frame.to_image().resize((420, int(420 * frame.height / frame.width)))
                         self.previewer.update_image(img)
 
-        # Group scenes
+        #
         result = []
         last = 0
         for t in scenes:
@@ -298,7 +303,6 @@ class SceneEngine:
             if self._stop:
                 break
 
-            # Preview during cutting (thumbnail)
             if self.previewer and self.preview_enabled:
                 mid_time = (start + end) / 2
                 thumb = self._generate_thumbnail(mid_time)
@@ -356,11 +360,11 @@ class SceneEngine:
         return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
-# ======================= App =======================
+# App
 class SceneCutterApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Scene Cutter Pro")
+        self.title("Scenespy - Scene Cutter")
         self.geometry("1000x650")
         self.engine = None
         self.running = False
@@ -381,7 +385,7 @@ class SceneCutterApp(ctk.CTk):
         self.output_selector = DirectorySelector(files, "Output folder")
         self.output_selector.pack(fill="x", padx=12)
 
-        mode = Section(self.left, "Cut mode")
+        mode = Section(self.left, "Cut Mode")
         mode.pack(fill="x", padx=10, pady=8)
 
         self.cut_mode = ctk.StringVar(value="scene")
@@ -403,7 +407,7 @@ class SceneCutterApp(ctk.CTk):
 
         rb_interval = ctk.CTkRadioButton(
             row,
-            text="Every X seconds",
+            text="Every seconds",
             variable=self.cut_mode,
             value="interval"
         )
@@ -412,7 +416,7 @@ class SceneCutterApp(ctk.CTk):
 
         self.interval_entry = ctk.CTkEntry(row, width=80, placeholder_text="sec")
 
-        profile = Section(self.left, "Detection sensitivity")
+        profile = Section(self.left, "Detection Sensitivity")
         profile.pack(fill="x", padx=10, pady=8)
 
         self.profile = ctk.StringVar(value="Normal")
@@ -425,7 +429,7 @@ class SceneCutterApp(ctk.CTk):
             rb.pack(side="left", padx=6)
             self.profile_radios.append(rb)
 
-        accel_section = Section(self.left, "Hardware acceleration")
+        accel_section = Section(self.left, "Hardware Acceleration")
         accel_section.pack(fill="x", padx=10, pady=8)
 
         self.accel = ctk.StringVar(value="cpu")
@@ -451,7 +455,7 @@ class SceneCutterApp(ctk.CTk):
         section = Section(self.right, "Preview")
         section.pack(fill="x")
 
-        self.preview_switch = ctk.CTkSwitch(section, text="Preview", command=self.toggle_preview)
+        self.preview_switch = ctk.CTkSwitch(section, text="Show Thumbnail", command=self.toggle_preview)
         self.preview_switch.pack(anchor="e", padx=10)
 
         if self.preview_enabled:
@@ -482,7 +486,7 @@ class SceneCutterApp(ctk.CTk):
         output = self.output_selector.get()
 
         if not os.path.isfile(video) or not os.path.isdir(output):
-            self.log.write_message("❌ Invalid paths", color="red")
+            self.log.write_message("Invalid paths!", color="red")
             return
 
         self.progress.update(0)
@@ -498,7 +502,7 @@ class SceneCutterApp(ctk.CTk):
             try:
                 cfg["FIXED_INTERVAL"] = float(self.interval_entry.get())
             except ValueError:
-                self.log.write_message("❌ Invalid interval", color="red")
+                self.log.write_message("Invalid interval!", color="red")
                 self.reset_ui()
                 return
 
@@ -520,7 +524,7 @@ class SceneCutterApp(ctk.CTk):
             self.engine.stop()
         self.preview_frame.clear_all()
         self.log.clear_status()
-        self.log.write_message("⛔ Process stopped", color="#facc15")
+        self.log.write_message("Process stopped", color="#facc15")
         self.reset_ui()
 
     def run_engine(self, scene_mode):
@@ -538,7 +542,7 @@ class SceneCutterApp(ctk.CTk):
         self.set_ui_state(False)
         if finished:
             self.log.write_message(
-                f"✅ Process finished in {self.engine.total_time()}",
+                f"Process finished [{self.engine.total_time()}]",
                 color="#22c55e"
             )
             self.progress.update(1.0)
@@ -565,9 +569,28 @@ class SceneCutterApp(ctk.CTk):
         else:
             self.interval_entry.pack_forget()
 
+def single_instance():
+    global INSTANCE_SOCKET
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", INSTANCE_PORT))
+        s.listen(1)
+        INSTANCE_SOCKET = s
+    except OSError:
+        return False
+    return True
 
-# ======================= Main =======================
+
+# Main
 if __name__ == "__main__":
+    if not single_instance():
+        import tkinter.messagebox as mb
+        mb.showerror(
+            "Aplicativo já em execução",
+            "Este aplicativo já está aberto."
+        )
+        sys.exit(0)
+
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("dark-blue")
     app = SceneCutterApp()
