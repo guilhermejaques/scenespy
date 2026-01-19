@@ -26,18 +26,15 @@ INSTANCE_PORT = 54321
 # Widgets
 class Section(ctk.CTkFrame):
     def __init__(self, master, title, **kwargs):
-        super().__init__(master, fg_color="#16161e", corner_radius=10, **kwargs)
+        super().__init__(master, fg_color="gray17", corner_radius=5, **kwargs)
         ctk.CTkLabel(
-            self,
-            text=title,
-            font=("Segoe UI", 14, "bold")
-        ).pack(anchor="w", padx=12, pady=(8, 4))
+            self, text=title, font=("Consolas", 14, "bold")).pack(anchor="w", padx=12, pady=(8, 4))
 
 
 class LabeledEntry(ctk.CTkFrame):
     def __init__(self, master, label, placeholder="", width=160):
         super().__init__(master, fg_color="transparent")
-        ctk.CTkLabel(self, text=label, font=("Segoe UI", 12)).pack(anchor="w")
+        ctk.CTkLabel(self, text=label, font=("Consolas", 12)).pack(anchor="w")
         self.entry = ctk.CTkEntry(self, placeholder_text=placeholder, width=width)
         self.entry.pack(pady=(2, 8), fill="x")
 
@@ -47,8 +44,8 @@ class LabeledEntry(ctk.CTkFrame):
 
 class LogBox(ctk.CTkTextbox):
     def __init__(self, master, height=140):
-        super().__init__(master, height=height, fg_color="#0f0f14", corner_radius=8)
-        self.configure(state="disabled", font=("Segoe UI", 11))
+        super().__init__(master, height=height, fg_color="#0f0f14", corner_radius=3)
+        self.configure(state="disabled", font=("Consolas", 11))
         self.status_lines = [""] * 3
         self._init_status_lines()
 
@@ -99,7 +96,7 @@ class ProgressBar(ctk.CTkFrame):
         self.bar = ctk.CTkProgressBar(self)
         self.bar.pack(fill="x", pady=4)
         self.bar.set(0)
-        self.label = ctk.CTkLabel(self, text="0%", font=("Segoe UI", 11))
+        self.label = ctk.CTkLabel(self, text="0%", font=("Consolas", 11))
         self.label.pack(anchor="e")
 
     def update(self, value):
@@ -109,8 +106,8 @@ class ProgressBar(ctk.CTkFrame):
 
 class PreviewFrame(ctk.CTkFrame):
     def __init__(self, master):
-        super().__init__(master, fg_color="#0f0f14", corner_radius=10)
-        self.info_label = ctk.CTkLabel(self, text="", font=("Segoe UI", 10))
+        super().__init__(master, fg_color="#0f0f14", corner_radius=3)
+        self.info_label = ctk.CTkLabel(self, text="", font=("Consolas", 10))
         self.info_label.pack(anchor="n", pady=4)
         self.label = ctk.CTkLabel(self, text="")
         self.label.pack(expand=True)
@@ -135,16 +132,17 @@ class PreviewFrame(ctk.CTkFrame):
 class FileSelector(ctk.CTkFrame):
     def __init__(self, master, label="File", width=420):
         super().__init__(master, fg_color="transparent")
-        ctk.CTkLabel(self, text=label, font=("Segoe UI", 12)).pack(anchor="w")
+        ctk.CTkLabel(self, text=label, font=("Consolas", 12)).pack(anchor="w")
 
         row = ctk.CTkFrame(self, fg_color="transparent")
         row.pack(fill="x", pady=(4, 8))
 
-        self.entry = ctk.CTkEntry(row, width=width)
+        self.entry = ctk.CTkEntry(row, width=width, corner_radius=2)
         self.entry.pack(side="left", fill="x", expand=True)
         self.entry.configure(state="disabled")
 
-        self.button = ctk.CTkButton(row, text="Browse", width=100, command=self.select)
+        self.button = ctk.CTkButton(row, text="...", width=30, command=self.select,
+                                    corner_radius=5, fg_color="gray25", hover_color="gray35")
         self.button.pack(side="right", padx=(6, 0))
 
     def select(self):
@@ -386,7 +384,7 @@ class SceneCutterApp(ctk.CTk):
         self.output_selector.pack(fill="x", padx=12)
 
         mode = Section(self.left, "Cut Mode")
-        mode.pack(fill="x", padx=10, pady=8)
+        mode.pack(fill="x", padx=12)
 
         self.cut_mode = ctk.StringVar(value="scene")
         self.cut_mode.trace_add("write", self._on_cut_mode_change)
@@ -414,10 +412,10 @@ class SceneCutterApp(ctk.CTk):
         rb_interval.pack(side="left")
         self.mode_radios.append(rb_interval)
 
-        self.interval_entry = ctk.CTkEntry(row, width=80, placeholder_text="sec")
+        self.interval_entry = ctk.CTkEntry(row, width=80, corner_radius=2, placeholder_text="sec")
 
         profile = Section(self.left, "Detection Sensitivity")
-        profile.pack(fill="x", padx=10, pady=8)
+        profile.pack(fill="x", padx=12, pady=8)
 
         self.profile = ctk.StringVar(value="Normal")
         row = ctk.CTkFrame(profile, fg_color="transparent")
@@ -430,7 +428,7 @@ class SceneCutterApp(ctk.CTk):
             self.profile_radios.append(rb)
 
         accel_section = Section(self.left, "Hardware Acceleration")
-        accel_section.pack(fill="x", padx=10, pady=8)
+        accel_section.pack(fill="x", padx=12)
 
         self.accel = ctk.StringVar(value="cpu")
         row = ctk.CTkFrame(accel_section, fg_color="transparent")
@@ -442,7 +440,7 @@ class SceneCutterApp(ctk.CTk):
             rb.pack(side="left", padx=6)
             self.accel_radios.append(rb)
 
-        self.start_btn = ctk.CTkButton(self.left, text="Start", command=self.toggle_start)
+        self.start_btn = ctk.CTkButton(self.left, text="Start", command=self.toggle_start, corner_radius=50, fg_color="#67679C")
         self.start_btn.pack(pady=20)
 
         self.log = LogBox(self.left, height=220)
