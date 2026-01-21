@@ -169,6 +169,45 @@ class DirectorySelector(FileSelector):
             self.entry.configure(state="disabled")
 
 
+class RadioGroup(ctk.CTkFrame):
+    def __init__(
+        self,
+        master,
+        variable,
+        options,
+        columns=4,
+        radio_width=120,
+        height=32
+    ):
+        super().__init__(master, fg_color="transparent", height=height)
+
+        self.grid_propagate(False)
+        self.radios = []
+
+        for i, (label, value) in enumerate(options):
+            rb = ctk.CTkRadioButton(
+                self,
+                text=label,
+                variable=variable,
+                value=value,
+                width=radio_width,
+                font=("Consolas", 12)
+            )
+
+            row = 0
+            col = i
+
+            rb.grid(
+                row=row,
+                column=col,
+                padx=(0, 12),
+                pady=0,
+                sticky="w"
+            )
+
+            self.radios.append(rb)
+
+
 # Engine
 class SceneEngine:
     def __init__(self, video, output, cfg, logbox=None, progressbar=None, previewer=None, preview_enabled=True):
@@ -389,56 +428,59 @@ class SceneCutterApp(ctk.CTk):
         self.cut_mode = ctk.StringVar(value="scene")
         self.cut_mode.trace_add("write", self._on_cut_mode_change)
 
-        row = ctk.CTkFrame(mode, fg_color="transparent")
-        row.pack(fill="x", padx=12, pady=4)
+        options = [
+            ("Scene detection", "scene"),
+            ("Every seconds", "interval"),
+        ]
 
-        self.mode_radios = []
-
-        rb_scene = ctk.CTkRadioButton(
-            row,
-            text="Scene detection",
-            variable=self.cut_mode,
-            value="scene"
+        group = RadioGroup(
+            mode,
+            self.cut_mode,
+            options,
+            radio_width=150
         )
-        rb_scene.pack(side="left", padx=(0, 16))
-        self.mode_radios.append(rb_scene)
+        group.pack(fill="x", padx=12, pady=(0, 6))
 
-        rb_interval = ctk.CTkRadioButton(
-            row,
-            text="Every seconds",
-            variable=self.cut_mode,
-            value="interval"
+        self.mode_radios = group.radios
+
+        self.interval_entry = ctk.CTkEntry(
+            mode,
+            width=80,
+            corner_radius=2,
+            placeholder_text="sec"
         )
-        rb_interval.pack(side="left")
-        self.mode_radios.append(rb_interval)
-
-        self.interval_entry = ctk.CTkEntry(row, width=80, corner_radius=2, placeholder_text="sec")
 
         profile = Section(self.left, "Detection Sensitivity")
         profile.pack(fill="x", padx=12, pady=8)
 
         self.profile = ctk.StringVar(value="Normal")
-        row = ctk.CTkFrame(profile, fg_color="transparent")
-        row.pack(fill="x", padx=12)
+        options = [(cfg["label"], key) for key, cfg in PROFILES.items()]
 
-        self.profile_radios = []
-        for key, cfg in PROFILES.items():
-            rb = ctk.CTkRadioButton(row, text=cfg["label"], variable=self.profile, value=key)
-            rb.pack(side="left", padx=6)
-            self.profile_radios.append(rb)
+        group = RadioGroup(
+            profile,
+            self.profile,
+            options,
+            radio_width=90,
+        )
+        group.pack(fill="x", padx=12)
+
+        self.profile_radios = group.radios
 
         accel_section = Section(self.left, "Hardware Acceleration")
         accel_section.pack(fill="x", padx=12)
 
         self.accel = ctk.StringVar(value="cpu")
-        row = ctk.CTkFrame(accel_section, fg_color="transparent")
-        row.pack(fill="x", padx=12)
+        options = [(val.upper(), val) for val in ACCEL_OPTIONS]
 
-        self.accel_radios = []
-        for val in ACCEL_OPTIONS:
-            rb = ctk.CTkRadioButton(row, text=val.upper(), variable=self.accel, value=val)
-            rb.pack(side="left", padx=6)
-            self.accel_radios.append(rb)
+        group = RadioGroup(
+            accel_section,
+            self.accel,
+            options,
+            radio_width=85
+        )
+        group.pack(fill="x", padx=12)
+
+        self.accel_radios = group.radios
 
         self.start_btn = ctk.CTkButton(self.left, text="Start", command=self.toggle_start, corner_radius=50, fg_color="#67679C")
         self.start_btn.pack(pady=20)
@@ -563,7 +605,7 @@ class SceneCutterApp(ctk.CTk):
 
     def _on_cut_mode_change(self, *args):
         if self.cut_mode.get() == "interval":
-            self.interval_entry.pack(side="left", padx=(8, 0))
+            self.interval_entry.pack(anchor="w", padx=24, pady=(0, 6))
         else:
             self.interval_entry.pack_forget()
 
