@@ -106,7 +106,7 @@ class ProgressBar(ctk.CTkFrame):
 
 class PreviewFrame(ctk.CTkFrame):
     def __init__(self, master):
-        super().__init__(master, fg_color="#0f0f14", corner_radius=3)
+        super().__init__(master, fg_color="gray25", corner_radius=3)
         self.info_label = ctk.CTkLabel(self, text="", font=("Consolas", 10))
         self.info_label.pack(anchor="n", pady=4)
         self.label = ctk.CTkLabel(self, text="")
@@ -445,9 +445,9 @@ class SceneCutterApp(ctk.CTk):
 
         self.interval_entry = ctk.CTkEntry(
             mode,
-            width=80,
-            corner_radius=2,
-            placeholder_text="sec"
+            width=90,
+            corner_radius=15,
+            placeholder_text="Secounds"
         )
 
         profile = Section(self.left, "Detection Sensitivity")
@@ -493,10 +493,10 @@ class SceneCutterApp(ctk.CTk):
         self.right.pack(side="right", fill="both", expand=True, padx=10, pady=10)
 
         section = Section(self.right, "Preview")
-        section.pack(fill="x")
+        section.pack(padx=10, pady=10, fill="x")
 
         self.preview_switch = ctk.CTkSwitch(section, text="Show Thumbnail", command=self.toggle_preview)
-        self.preview_switch.pack(anchor="e", padx=10)
+        self.preview_switch.pack(anchor="e", padx=10, pady=8)
 
         if self.preview_enabled:
             self.preview_switch.select()
@@ -605,7 +605,7 @@ class SceneCutterApp(ctk.CTk):
 
     def _on_cut_mode_change(self, *args):
         if self.cut_mode.get() == "interval":
-            self.interval_entry.pack(anchor="w", padx=24, pady=(0, 6))
+            self.interval_entry.pack(anchor="n", padx=24, pady=(0, 6))
         else:
             self.interval_entry.pack_forget()
 
