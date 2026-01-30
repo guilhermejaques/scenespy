@@ -7,6 +7,10 @@ import time
 import datetime
 import customtkinter as ctk
 import av
+import cv2
+import numpy as np
+import csv
+from PIL import Image
 
 # Config
 PROFILES = {
@@ -397,6 +401,208 @@ class SceneEngine:
         return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
+class FaceDetectionEngine:
+    def __init__(self, video, output, logbox=None, progressbar=None, previewer=None):
+        self.video = video
+        self.output = output
+        self.log = logbox
+        self.progress = progressbar
+        self.previewer = previewer
+
+        self._stop = False
+        self._start_time = None
+        self._end_time = None
+
+        # === contrato igual ao SceneEngine ===
+        self.detected = 0   # "Scenes detected" → rostos válidos encontrados
+        self.done = 0       # "Scenes cut" → rostos salvos
+        self.total = 0
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        model_dir = os.path.join(base_dir, "models")
+
+        proto = os.path.join(model_dir, "deploy.prototxt")
+        weights = os.path.join(model_dir, "res10_300x300_ssd_iter_140000.caffemodel")
+
+        if not os.path.isfile(proto) or not os.path.isfile(weights):
+            raise RuntimeError(
+                "Face detection model not found.\n"
+                f"Expected:\n{proto}\n{weights}"
+            )
+
+        self.detector = cv2.dnn.readNetFromCaffe(proto, weights)
+
+    def stop(self):
+        self._stop = True
+
+    def total_time(self):
+        if not self._start_time:
+            return "--:--"
+        end = self._end_time or time.time()
+        elapsed = int(end - self._start_time)
+        m, s = divmod(elapsed, 60)
+        h, m = divmod(m, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+    def _is_sharp(self, img):
+        return cv2.Laplacian(img, cv2.CV_64F).var() > 120
+
+    # =========================
+    # PHASE 1 — ANALYSIS
+    # =========================
+    def _analyze_faces(self):
+        container = av.open(self.video)
+        stream = container.streams.video[0]
+        total_frames = stream.frames or 1
+        processed = 0
+
+        for frame in container.decode(video=0):
+            if self._stop:
+                break
+
+            processed += 1
+            img = frame.to_ndarray(format="bgr24")
+            h, w = img.shape[:2]
+
+            blob = cv2.dnn.blobFromImage(
+                cv2.resize(img, (300, 300)),
+                1.0,
+                (300, 300),
+                (104.0, 177.0, 123.0)
+            )
+
+            self.detector.setInput(blob)
+            detections = self.detector.forward()
+
+            for i in range(detections.shape[2]):
+                if detections[0, 0, i, 2] < 0.85:
+                    continue
+
+                box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+                x1, y1, x2, y2 = box.astype(int)
+                face = img[y1:y2, x1:x2]
+
+                if face.size == 0 or face.shape[0] < 80:
+                    continue
+                if not self._is_sharp(face):
+                    continue
+
+                self.detected += 1
+
+            if self.log:
+                self.log.write_status(
+                    detected=self.detected,
+                    cut=self.done
+                )
+
+            if self.previewer and processed % 5 == 0:
+                preview = frame.to_image().resize(
+                    (420, int(420 * frame.height / frame.width))
+                )
+                self.previewer.update_image(preview)
+
+            if self.progress:
+                self.progress.update(processed / total_frames)
+
+        self.total = self.detected
+
+    # =========================
+    # PHASE 2 — CUT & SAVE
+    # =========================
+    def _cut_faces(self):
+        outdir = os.path.join(
+            self.output,
+            datetime.datetime.now().strftime("faces_%Y%m%d_%H%M%S")
+        )
+        os.makedirs(outdir, exist_ok=True)
+
+        csv_path = os.path.join(outdir, "faces.csv")
+        with open(csv_path, "w", newline="") as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(["file", "id"])
+
+            container = av.open(self.video)
+            stream = container.streams.video[0]
+
+            for frame in container.decode(video=0):
+                if self._stop:
+                    break
+
+                img = frame.to_ndarray(format="bgr24")
+                h, w = img.shape[:2]
+
+                blob = cv2.dnn.blobFromImage(
+                    cv2.resize(img, (300, 300)),
+                    1.0,
+                    (300, 300),
+                    (104.0, 177.0, 123.0)
+                )
+
+                self.detector.setInput(blob)
+                detections = self.detector.forward()
+
+                for i in range(detections.shape[2]):
+                    if detections[0, 0, i, 2] < 0.85:
+                        continue
+
+                    box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+                    x1, y1, x2, y2 = box.astype(int)
+                    face = img[y1:y2, x1:x2]
+
+                    if face.size == 0 or face.shape[0] < 80:
+                        continue
+                    if not self._is_sharp(face):
+                        continue
+
+                    self.done += 1
+                    fname = f"face_{self.done:04d}.png"
+                    cv2.imwrite(os.path.join(outdir, fname), face)
+                    writer.writerow([fname, self.done])
+
+                    if self.previewer:
+                        rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+                        self.previewer.update_image(Image.fromarray(rgb))
+
+                    if self.log:
+                        self.log.write_status(
+                            detected=self.detected,
+                            cut=self.done,
+                            eta=self._calculate_eta()
+                        )
+
+                    if self.progress and self.total:
+                        self.progress.update(self.done / self.total)
+
+    def _calculate_eta(self):
+        if self.done == 0:
+            return "--:--"
+
+        elapsed = time.time() - self._start_time
+        avg = elapsed / self.done
+        remaining = max(self.total - self.done, 0)
+        eta_seconds = int(avg * remaining)
+
+        m, s = divmod(eta_seconds, 60)
+        h, m = divmod(m, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+    # =========================
+    # RUN
+    # =========================
+    def run(self):
+        self._start_time = time.time()
+
+        self._analyze_faces()
+        if self._stop:
+            return False
+
+        self._cut_faces()
+
+        self._end_time = time.time()
+        return not self._stop
+
+
+
 # App
 class SceneCutterApp(ctk.CTk):
     def __init__(self):
@@ -431,6 +637,7 @@ class SceneCutterApp(ctk.CTk):
         options = [
             ("Scene detection", "scene"),
             ("Every seconds", "interval"),
+            ("Detect faces", "faces"),
         ]
 
         group = RadioGroup(
@@ -537,8 +744,22 @@ class SceneCutterApp(ctk.CTk):
         cfg = PROFILES[self.profile.get()].copy()
         cfg["ACCEL"] = self.accel.get()
 
-        scene_mode = self.cut_mode.get() == "scene"
-        if not scene_mode:
+        mode = self.cut_mode.get()
+
+        if mode == "faces":
+            self.engine = FaceDetectionEngine(
+                video,
+                output,
+                logbox=self.log,
+                progressbar=self.progress,
+                previewer=self.preview_frame
+            )
+            threading.Thread(target=self.run_face_engine, daemon=True).start()
+            return
+
+        scene_mode = mode == "scene"
+
+        if mode == "interval":
             try:
                 cfg["FIXED_INTERVAL"] = float(self.interval_entry.get())
             except ValueError:
@@ -608,6 +829,16 @@ class SceneCutterApp(ctk.CTk):
             self.interval_entry.pack(anchor="n", padx=24, pady=(0, 6))
         else:
             self.interval_entry.pack_forget()
+
+    def run_face_engine(self):
+        result = False
+        try:
+            result = self.engine.run()
+        except Exception as e:
+            print("Face engine error:", e)
+        finally:
+            self.after(0, self.reset_ui if not result else lambda: self.reset_ui(finished=True))
+
 
 def single_instance():
     global INSTANCE_SOCKET
