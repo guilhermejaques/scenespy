@@ -8,9 +8,10 @@ import datetime
 import customtkinter as ctk
 import av
 import cv2
-import numpy as np
 import csv
 from PIL import Image
+from ultralytics import YOLO
+
 
 # Config
 PROFILES = {
@@ -402,35 +403,38 @@ class SceneEngine:
 
 
 class FaceDetectionEngine:
-    def __init__(self, video, output, logbox=None, progressbar=None, previewer=None):
+    def __init__(self, video, output, logbox=None, progressbar=None, previewer=None, profile="Normal", accel="cpu", preview_enabled=True):
         self.video = video
         self.output = output
         self.log = logbox
         self.progress = progressbar
         self.previewer = previewer
+        self.preview_enabled = preview_enabled
+
+        self.profile = profile
+        self.accel = accel
 
         self._stop = False
         self._start_time = None
         self._end_time = None
 
-        # === contrato igual ao SceneEngine ===
-        self.detected = 0   # "Scenes detected" → rostos válidos encontrados
-        self.done = 0       # "Scenes cut" → rostos salvos
+        self.detected = 0
+        self.done = 0
         self.total = 0
 
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        model_dir = os.path.join(base_dir, "models")
+        model_path = os.path.join(base_dir, "models", "yolov8n-face.pt")
+        self.model = YOLO(model_path)
 
-        proto = os.path.join(model_dir, "deploy.prototxt")
-        weights = os.path.join(model_dir, "res10_300x300_ssd_iter_140000.caffemodel")
+        self.device = 0 if accel == "nvidia" else "cpu"
 
-        if not os.path.isfile(proto) or not os.path.isfile(weights):
-            raise RuntimeError(
-                "Face detection model not found.\n"
-                f"Expected:\n{proto}\n{weights}"
-            )
+        self.profile_cfg = {
+            "Low":    {"conf": 0.40, "min_size": 48, "ttl": 0.6},
+            "Normal": {"conf": 0.25, "min_size": 32, "ttl": 1.2},
+            "High":   {"conf": 0.15, "min_size": 24, "ttl": 2.0},
+        }[profile]
 
-        self.detector = cv2.dnn.readNetFromCaffe(proto, weights)
+        self.last_preview = 0
 
     def stop(self):
         self._stop = True
@@ -444,72 +448,26 @@ class FaceDetectionEngine:
         h, m = divmod(m, 60)
         return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
-    def _is_sharp(self, img):
-        return cv2.Laplacian(img, cv2.CV_64F).var() > 120
+    def _iou(self, a, b):
+        x1 = max(a[0], b[0])
+        y1 = max(a[1], b[1])
+        x2 = min(a[2], b[2])
+        y2 = min(a[3], b[3])
+        inter = max(0, x2 - x1) * max(0, y2 - y1)
+        area_a = (a[2] - a[0]) * (a[3] - a[1])
+        area_b = (b[2] - b[0]) * (b[3] - b[1])
+        return inter / (area_a + area_b - inter + 1e-6)
 
-    # =========================
-    # PHASE 1 — ANALYSIS
-    # =========================
-    def _analyze_faces(self):
-        container = av.open(self.video)
-        stream = container.streams.video[0]
-        total_frames = stream.frames or 1
-        processed = 0
+    def run(self):
+        self._start_time = time.time()
 
-        for frame in container.decode(video=0):
-            if self._stop:
-                break
+        cap = cv2.VideoCapture(self.video)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
 
-            processed += 1
-            img = frame.to_ndarray(format="bgr24")
-            h, w = img.shape[:2]
+        ttl_frames = int(fps * self.profile_cfg["ttl"])
+        tracks = []
 
-            blob = cv2.dnn.blobFromImage(
-                cv2.resize(img, (300, 300)),
-                1.0,
-                (300, 300),
-                (104.0, 177.0, 123.0)
-            )
-
-            self.detector.setInput(blob)
-            detections = self.detector.forward()
-
-            for i in range(detections.shape[2]):
-                if detections[0, 0, i, 2] < 0.85:
-                    continue
-
-                box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-                x1, y1, x2, y2 = box.astype(int)
-                face = img[y1:y2, x1:x2]
-
-                if face.size == 0 or face.shape[0] < 80:
-                    continue
-                if not self._is_sharp(face):
-                    continue
-
-                self.detected += 1
-
-            if self.log:
-                self.log.write_status(
-                    detected=self.detected,
-                    cut=self.done
-                )
-
-            if self.previewer and processed % 5 == 0:
-                preview = frame.to_image().resize(
-                    (420, int(420 * frame.height / frame.width))
-                )
-                self.previewer.update_image(preview)
-
-            if self.progress:
-                self.progress.update(processed / total_frames)
-
-        self.total = self.detected
-
-    # =========================
-    # PHASE 2 — CUT & SAVE
-    # =========================
-    def _cut_faces(self):
         outdir = os.path.join(
             self.output,
             datetime.datetime.now().strftime("faces_%Y%m%d_%H%M%S")
@@ -517,89 +475,134 @@ class FaceDetectionEngine:
         os.makedirs(outdir, exist_ok=True)
 
         csv_path = os.path.join(outdir, "faces.csv")
-        with open(csv_path, "w", newline="") as csv_file:
-            writer = csv.writer(csv_file)
-            writer.writerow(["file", "id"])
+        csv_file = open(csv_path, "w", newline="")
+        writer = csv.writer(csv_file)
+        writer.writerow(["file", "track_id"])
 
-            container = av.open(self.video)
-            stream = container.streams.video[0]
+        frame_idx = 0
+        track_id = 0
 
-            for frame in container.decode(video=0):
-                if self._stop:
-                    break
+        while cap.isOpened():
+            if self._stop:
+                break
 
-                img = frame.to_ndarray(format="bgr24")
-                h, w = img.shape[:2]
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-                blob = cv2.dnn.blobFromImage(
-                    cv2.resize(img, (300, 300)),
-                    1.0,
-                    (300, 300),
-                    (104.0, 177.0, 123.0)
-                )
+            frame_idx += 1
 
-                self.detector.setInput(blob)
-                detections = self.detector.forward()
+            results = self.model.predict(
+                frame,
+                conf=self.profile_cfg["conf"],
+                iou=0.45,
+                imgsz=800,
+                device=self.device,
+                half=(self.device != "cpu"),
+                verbose=False
+            )[0]
 
-                for i in range(detections.shape[2]):
-                    if detections[0, 0, i, 2] < 0.85:
-                        continue
+            new_tracks = []
 
-                    box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-                    x1, y1, x2, y2 = box.astype(int)
-                    face = img[y1:y2, x1:x2]
+            for box in results.boxes.xyxy:
+                x1, y1, x2, y2 = map(int, box.tolist())
+                w, h = x2 - x1, y2 - y1
 
-                    if face.size == 0 or face.shape[0] < 80:
-                        continue
-                    if not self._is_sharp(face):
-                        continue
+                if w < self.profile_cfg["min_size"] or h < self.profile_cfg["min_size"]:
+                    continue
 
+                face = frame[y1:y2, x1:x2]
+                if face.size == 0:
+                    continue
+
+                matched = False
+
+                for t in tracks:
+                    if self._iou(t["box"], (x1, y1, x2, y2)) > 0.35:
+                        t["box"] = (x1, y1, x2, y2)
+                        t["ttl"] = ttl_frames
+
+                        sharp = cv2.Laplacian(face, cv2.CV_64F).var()
+                        if sharp > t["score"]:
+                            t["score"] = sharp
+                            t["face"] = face.copy()
+
+                        matched = True
+                        break
+
+                if not matched:
+                    track_id += 1
+                    self.detected += 1
+
+                    sharp = cv2.Laplacian(face, cv2.CV_64F).var()
+
+                    if sharp > 30:
+                        self.done += 1
+                        fname = f"face_{self.done:04d}.png"
+                        cv2.imwrite(os.path.join(outdir, fname), face)
+                        writer.writerow([fname, track_id])
+
+                    new_tracks.append({
+                        "id": track_id,
+                        "box": (x1, y1, x2, y2),
+                        "ttl": ttl_frames,
+                        "score": sharp,
+                        "face": face.copy()
+                    })
+
+            for t in tracks:
+                t["ttl"] -= 1
+                if t["ttl"] <= 0 and t["face"] is not None:
                     self.done += 1
                     fname = f"face_{self.done:04d}.png"
-                    cv2.imwrite(os.path.join(outdir, fname), face)
-                    writer.writerow([fname, self.done])
+                    cv2.imwrite(os.path.join(outdir, fname), t["face"])
+                    writer.writerow([fname, t["id"]])
 
-                    if self.previewer:
-                        rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-                        self.previewer.update_image(Image.fromarray(rgb))
+            tracks = [t for t in tracks if t["ttl"] > 0] + new_tracks
 
-                    if self.log:
-                        self.log.write_status(
-                            detected=self.detected,
-                            cut=self.done,
-                            eta=self._calculate_eta()
-                        )
+            if self.log:
+                self.log.write_status(
+                    detected=self.detected,
+                    cut=self.done,
+                    eta=self._calculate_eta()
+                )
 
-                    if self.progress and self.total:
-                        self.progress.update(self.done / self.total)
+            if self.progress:
+                self.progress.update(frame_idx / total_frames)
+
+            if self.previewer and self.preview_enabled:
+                now = time.time()
+                if now - self.last_preview >= PREVIEW_INTERVAL:
+                    draw = frame.copy()
+                    for t in tracks:
+                        x1, y1, x2, y2 = t["box"]
+                        cv2.rectangle(draw, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+                    h, w, _ = draw.shape
+                    h, w, _ = draw.shape
+                    draw = cv2.resize(draw, (420, int(420 * h / w)))
+                    img = Image.fromarray(cv2.cvtColor(draw, cv2.COLOR_BGR2RGB))
+                    self.previewer.update_image(img)
+
+                    self.previewer.update_image(img)
+
+                    self.last_preview = now
+
+        csv_file.close()
+        cap.release()
+        self._end_time = time.time()
+        return not self._stop
 
     def _calculate_eta(self):
         if self.done == 0:
             return "--:--"
-
         elapsed = time.time() - self._start_time
         avg = elapsed / self.done
-        remaining = max(self.total - self.done, 0)
-        eta_seconds = int(avg * remaining)
-
-        m, s = divmod(eta_seconds, 60)
+        remaining = max(self.detected - self.done, 0)
+        eta = int(avg * remaining)
+        m, s = divmod(eta, 60)
         h, m = divmod(m, 60)
         return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
-
-    # =========================
-    # RUN
-    # =========================
-    def run(self):
-        self._start_time = time.time()
-
-        self._analyze_faces()
-        if self._stop:
-            return False
-
-        self._cut_faces()
-
-        self._end_time = time.time()
-        return not self._stop
 
 
 
@@ -752,8 +755,12 @@ class SceneCutterApp(ctk.CTk):
                 output,
                 logbox=self.log,
                 progressbar=self.progress,
-                previewer=self.preview_frame
+                previewer=self.preview_frame,
+                profile=self.profile.get(),
+                accel=self.accel.get(),
+                preview_enabled=self.preview_enabled
             )
+
             threading.Thread(target=self.run_face_engine, daemon=True).start()
             return
 
