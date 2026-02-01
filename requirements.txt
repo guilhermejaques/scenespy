@@ -1,4 +1,6 @@
 customtkinter
-pillow
+opencv-python
 av
-darkdetect
+pillow
+ultralytics
+mediapipe==0.10.9

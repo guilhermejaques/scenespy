@@ -1,4 +1,3 @@
-import os
 import sys
 import socket
 import subprocess
@@ -9,6 +8,8 @@ import customtkinter as ctk
 import av
 import cv2
 import csv
+import os
+import mediapipe as mp
 from PIL import Image
 from ultralytics import YOLO
 
@@ -403,7 +404,9 @@ class SceneEngine:
 
 
 class FaceDetectionEngine:
-    def __init__(self, video, output, logbox=None, progressbar=None, previewer=None, profile="Normal", accel="cpu", preview_enabled=True):
+    def __init__(self, video, output, logbox=None, progressbar=None,
+                 previewer=None, profile="Normal", accel="cpu", preview_enabled=True):
+
         self.video = video
         self.output = output
         self.log = logbox
@@ -420,7 +423,6 @@ class FaceDetectionEngine:
 
         self.detected = 0
         self.done = 0
-        self.total = 0
 
         base_dir = os.path.dirname(os.path.abspath(__file__))
         model_path = os.path.join(base_dir, "models", "yolov8n-face.pt")
@@ -429,12 +431,21 @@ class FaceDetectionEngine:
         self.device = 0 if accel == "nvidia" else "cpu"
 
         self.profile_cfg = {
-            "Low":    {"conf": 0.40, "min_size": 48, "ttl": 0.6},
-            "Normal": {"conf": 0.25, "min_size": 32, "ttl": 1.2},
-            "High":   {"conf": 0.15, "min_size": 24, "ttl": 2.0},
+            "Low":    {"conf": 0.45, "min_size": 56, "ttl": 0.6},
+            "Normal": {"conf": 0.35, "min_size": 40, "ttl": 1.2},
+            "High":   {"conf": 0.25, "min_size": 32, "ttl": 2.0},
         }[profile]
 
         self.last_preview = 0
+
+        self.mp_face = mp.solutions.face_mesh.FaceMesh(
+            static_image_mode=False,
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+
 
     def stop(self):
         self._stop = True
@@ -457,6 +468,32 @@ class FaceDetectionEngine:
         area_a = (a[2] - a[0]) * (a[3] - a[1])
         area_b = (b[2] - b[0]) * (b[3] - b[1])
         return inter / (area_a + area_b - inter + 1e-6)
+
+    def _skin_ratio(self, face):
+        ycrcb = cv2.cvtColor(face, cv2.COLOR_BGR2YCrCb)
+        skin = cv2.inRange(ycrcb, (0, 133, 77), (255, 173, 127))
+        return skin.mean() / 255
+
+    def _valid_landmarks(self, face):
+        rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+        result = self.mp_face.process(rgb)
+
+        if not result.multi_face_landmarks:
+            return False
+
+        lm = result.multi_face_landmarks[0].landmark
+        left_eye = lm[33]
+        right_eye = lm[263]
+        nose = lm[1]
+        mouth = lm[13]
+
+        if not (left_eye.y < nose.y < mouth.y):
+            return False
+
+        if abs(left_eye.x - right_eye.x) < 0.035:
+            return False
+
+        return True
 
     def run(self):
         self._start_time = time.time()
@@ -511,8 +548,12 @@ class FaceDetectionEngine:
                 if w < self.profile_cfg["min_size"] or h < self.profile_cfg["min_size"]:
                     continue
 
+                aspect = w / h
+                if not (0.65 <= aspect <= 1.35):
+                    continue
+
                 face = frame[y1:y2, x1:x2]
-                if face.size == 0:
+                if face.size == 0 or self._skin_ratio(face) < 0.15:
                     continue
 
                 matched = False
@@ -521,11 +562,15 @@ class FaceDetectionEngine:
                     if self._iou(t["box"], (x1, y1, x2, y2)) > 0.35:
                         t["box"] = (x1, y1, x2, y2)
                         t["ttl"] = ttl_frames
+                        t["frames"] += 1
 
                         sharp = cv2.Laplacian(face, cv2.CV_64F).var()
                         if sharp > t["score"]:
                             t["score"] = sharp
                             t["face"] = face.copy()
+
+                        if t["frames"] >= 3 and self._valid_landmarks(face):
+                            t["valid"] += 1
 
                         matched = True
                         break
@@ -534,41 +579,30 @@ class FaceDetectionEngine:
                     track_id += 1
                     self.detected += 1
 
-                    sharp = cv2.Laplacian(face, cv2.CV_64F).var()
-
-                    if sharp > 30:
-                        self.done += 1
-                        fname = f"face_{self.done:04d}.png"
-                        cv2.imwrite(os.path.join(outdir, fname), face)
-                        writer.writerow([fname, track_id])
-
                     new_tracks.append({
                         "id": track_id,
                         "box": (x1, y1, x2, y2),
                         "ttl": ttl_frames,
-                        "score": sharp,
+                        "frames": 1,
+                        "valid": 0,
+                        "score": cv2.Laplacian(face, cv2.CV_64F).var(),
                         "face": face.copy()
                     })
 
             for t in tracks:
                 t["ttl"] -= 1
-                if t["ttl"] <= 0 and t["face"] is not None:
-                    self.done += 1
-                    fname = f"face_{self.done:04d}.png"
-                    cv2.imwrite(os.path.join(outdir, fname), t["face"])
-                    writer.writerow([fname, t["id"]])
+                if t["ttl"] <= 0:
+                    if (
+                        t["frames"] >= fps * 0.5 and
+                        (t["valid"] / max(t["frames"], 1)) >= 0.6 and
+                        t["score"] > 40
+                    ):
+                        self.done += 1
+                        fname = f"face_{self.done:04d}.png"
+                        cv2.imwrite(os.path.join(outdir, fname), t["face"])
+                        writer.writerow([fname, t["id"]])
 
             tracks = [t for t in tracks if t["ttl"] > 0] + new_tracks
-
-            if self.log:
-                self.log.write_status(
-                    detected=self.detected,
-                    cut=self.done,
-                    eta=self._calculate_eta()
-                )
-
-            if self.progress:
-                self.progress.update(frame_idx / total_frames)
 
             if self.previewer and self.preview_enabled:
                 now = time.time()
@@ -579,31 +613,37 @@ class FaceDetectionEngine:
                         cv2.rectangle(draw, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
                     h, w, _ = draw.shape
-                    h, w, _ = draw.shape
                     draw = cv2.resize(draw, (420, int(420 * h / w)))
                     img = Image.fromarray(cv2.cvtColor(draw, cv2.COLOR_BGR2RGB))
                     self.previewer.update_image(img)
-
-                    self.previewer.update_image(img)
-
                     self.last_preview = now
+
+            if self.log:
+                self.log.write_status(
+                    detected=self.detected,
+                    cut=self.done,
+                    eta=self._calculate_eta(frame_idx, total_frames)
+                )
+
+            if self.progress:
+                self.progress.update(frame_idx / total_frames)
 
         csv_file.close()
         cap.release()
         self._end_time = time.time()
+
         return not self._stop
 
-    def _calculate_eta(self):
-        if self.done == 0:
+    def _calculate_eta(self, frame_idx, total_frames):
+        if frame_idx == 0:
             return "--:--"
         elapsed = time.time() - self._start_time
-        avg = elapsed / self.done
-        remaining = max(self.detected - self.done, 0)
+        avg = elapsed / frame_idx
+        remaining = total_frames - frame_idx
         eta = int(avg * remaining)
         m, s = divmod(eta, 60)
         h, m = divmod(m, 60)
         return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
-
 
 
 # App
