@@ -12,6 +12,7 @@ import os
 import mediapipe as mp
 from PIL import Image
 from ultralytics import YOLO
+import torch
 
 
 # Config
@@ -27,6 +28,69 @@ PREVIEW_INTERVAL = 0.15
 PREVIEW_FPS = 1
 INSTANCE_SOCKET = None
 INSTANCE_PORT = 54321
+
+
+MODE_ACCEL_COMPAT = {
+    "scene": {
+        "encoder": {"cpu", "nvidia", "amd", "intel"},
+        "inference": {"cpu"}
+    },
+    "interval": {
+        "encoder": {"cpu"},
+        "inference": {"cpu"}
+    },
+    "faces": {
+        "encoder": {"cpu"},
+        "inference": {"cpu", "nvidia"}
+    },
+}
+
+
+def detect_available_accel():
+    available = {"cpu"}
+
+    # NVIDIA
+    try:
+        if torch.cuda.is_available():
+            available.add("nvidia")
+    except Exception:
+        pass
+
+    # AMD (AMF)
+    if test_ffmpeg_encoder("h264_amf"):
+        available.add("amd")
+
+    # Intel (QSV)
+    if test_ffmpeg_encoder("h264_qsv"):
+        available.add("intel")
+
+    return available
+
+
+
+def test_ffmpeg_encoder(encoder: str) -> bool:
+    try:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f", "lavfi",
+            "-i", "color=c=black:s=160x120:d=0.1",
+            "-c:v", encoder,
+            "-f", "null",
+            "-"
+        ]
+
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5
+        )
+
+        return result.returncode == 0
+    except Exception:
+        return False
 
 
 # Widgets
@@ -340,7 +404,8 @@ class SceneEngine:
         os.makedirs(outdir, exist_ok=True)
 
         self.total, self.done = len(scenes), 0
-        accel = self.cfg.get("ACCEL", "cpu")
+        encoder = self.cfg.get("ENCODER", "cpu")
+
 
         for idx, (start, end) in enumerate(scenes, 1):
             if self._stop:
@@ -354,11 +419,11 @@ class SceneEngine:
 
             cmd = ["ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", self.video, "-t", f"{end - start:.3f}"]
 
-            if accel == "nvidia":
+            if encoder == "nvidia":
                 cmd += ["-c:v", "h264_nvenc"]
-            elif accel == "amd":
+            elif encoder == "amd":
                 cmd += ["-c:v", "h264_amf"]
-            elif accel == "intel":
+            elif encoder == "intel":
                 cmd += ["-c:v", "h264_qsv"]
             else:
                 cmd += ["-c:v", "libx264", "-preset", "veryfast"]
@@ -416,6 +481,8 @@ class FaceDetectionEngine:
 
         self.profile = profile
         self.accel = accel
+        self.device = "cuda:0" if accel == "nvidia" and torch.cuda.is_available() else "cpu"
+
 
         self._stop = False
         self._start_time = None
@@ -427,8 +494,6 @@ class FaceDetectionEngine:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         model_path = os.path.join(base_dir, "models", "yolov8n-face.pt")
         self.model = YOLO(model_path)
-
-        self.device = 0 if accel == "nvidia" else "cpu"
 
         self.profile_cfg = {
             "Low":    {"conf": 0.45, "min_size": 56, "ttl": 0.6},
@@ -529,13 +594,16 @@ class FaceDetectionEngine:
 
             frame_idx += 1
 
+            use_cuda = self.device.startswith("cuda")
+
+
             results = self.model.predict(
                 frame,
                 conf=self.profile_cfg["conf"],
                 iou=0.45,
                 imgsz=800,
                 device=self.device,
-                half=(self.device != "cpu"),
+                half=use_cuda,
                 verbose=False
             )[0]
 
@@ -655,6 +723,7 @@ class SceneCutterApp(ctk.CTk):
         self.engine = None
         self.running = False
         self.preview_enabled = ENABLE_PREVIEW_DEFAULT
+        self.available_accel = detect_available_accel()
         self._build_ui()
 
     def _build_ui(self):
@@ -716,7 +785,7 @@ class SceneCutterApp(ctk.CTk):
 
         self.profile_radios = group.radios
 
-        accel_section = Section(self.left, "Hardware Acceleration")
+        accel_section = Section(self.left, "Hardware Acceleration (Inference)")
         accel_section.pack(fill="x", padx=12)
 
         self.accel = ctk.StringVar(value="cpu")
@@ -731,6 +800,7 @@ class SceneCutterApp(ctk.CTk):
         group.pack(fill="x", padx=12)
 
         self.accel_radios = group.radios
+        self.update_accel_radios()
 
         self.start_btn = ctk.CTkButton(self.left, text="Start", command=self.toggle_start, corner_radius=50, fg_color="#67679C")
         self.start_btn.pack(pady=20)
@@ -785,7 +855,18 @@ class SceneCutterApp(ctk.CTk):
         self.start_btn.configure(text="Stop", fg_color="#dc2626")
 
         cfg = PROFILES[self.profile.get()].copy()
-        cfg["ACCEL"] = self.accel.get()
+        requested = self.accel.get()
+        mode = self.cut_mode.get()
+        compat = MODE_ACCEL_COMPAT.get(mode, {})
+
+        encoder_allowed = compat.get("encoder", {"cpu"}) & self.available_accel
+        inference_allowed = compat.get("inference", {"cpu"}) & self.available_accel
+
+        encoder = requested if requested in encoder_allowed else "cpu"
+        inference = requested if requested in inference_allowed else "cpu"
+
+        cfg["ENCODER"] = encoder
+        cfg["INFERENCE"] = inference
 
         mode = self.cut_mode.get()
 
@@ -797,7 +878,7 @@ class SceneCutterApp(ctk.CTk):
                 progressbar=self.progress,
                 previewer=self.preview_frame,
                 profile=self.profile.get(),
-                accel=self.accel.get(),
+                accel=inference,
                 preview_enabled=self.preview_enabled
             )
 
@@ -877,6 +958,8 @@ class SceneCutterApp(ctk.CTk):
         else:
             self.interval_entry.pack_forget()
 
+        self.update_accel_radios()
+
     def run_face_engine(self):
         result = False
         try:
@@ -885,6 +968,25 @@ class SceneCutterApp(ctk.CTk):
             print("Face engine error:", e)
         finally:
             self.after(0, self.reset_ui if not result else lambda: self.reset_ui(finished=True))
+
+    def update_accel_radios(self):
+        mode = self.cut_mode.get()
+        compat = MODE_ACCEL_COMPAT.get(mode, {})
+
+        allowed = set()
+        allowed |= compat.get("encoder", set())
+        allowed |= compat.get("inference", set())
+
+        enabled = allowed & self.available_accel
+
+        enabled.add("cpu")
+
+        for rb in self.accel_radios:
+            value = rb.cget("value")
+            rb.configure(state="normal" if value in enabled else "disabled")
+
+        if self.accel.get() not in enabled:
+            self.accel.set("cpu")
 
 
 def single_instance():
@@ -897,7 +999,6 @@ def single_instance():
     except OSError:
         return False
     return True
-
 
 # Main
 if __name__ == "__main__":
