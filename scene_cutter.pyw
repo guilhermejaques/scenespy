@@ -10,16 +10,25 @@ import cv2
 import csv
 import os
 import mediapipe as mp
+import statistics
+from collections import deque
 from PIL import Image
 from ultralytics import YOLO
-import torch
+
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except Exception:
+    torch = None
+    TORCH_AVAILABLE = False
+
 
 
 # Config
 PROFILES = {
-    "Low": {"label": "Low", "THRESHOLD": 45.0, "MIN_FINAL_DURATION": 5.5},
-    "Normal": {"label": "Normal", "THRESHOLD": 28.0, "MIN_FINAL_DURATION": 1.8},
-    "High": {"label": "High", "THRESHOLD": 18.0, "MIN_FINAL_DURATION": 0.9},
+    "Low": {"label": "Low", "THRESHOLD": 45.0, "MIN_FINAL_DURATION": 5.0},
+    "Normal": {"label": "Normal", "THRESHOLD": 30.0, "MIN_FINAL_DURATION": 2.5},
+    "High": {"label": "High", "THRESHOLD": 20.0, "MIN_FINAL_DURATION": 1.0},
 }
 
 ACCEL_OPTIONS = ["cpu", "nvidia", "amd", "intel"]
@@ -348,35 +357,113 @@ class SceneEngine:
     def _detect_scenes_progressive(self):
         container = av.open(self.video)
         stream = container.streams.video[0]
+
+        threshold = self.cfg["THRESHOLD"]
         min_dur = self.cfg["MIN_FINAL_DURATION"]
 
+        diff_window = deque(maxlen=12)
+        adaptive_threshold = threshold
+        calibrated = False
+        calibration_time = 3.0  # segundos iniciais só para medir
+
         scenes = []
+        last_cut_time = 0.0
+        last_frame_time = 0.0
+
+        prev_hist = None
         frame_idx = 0
 
         for packet in container.demux(stream):
             if self._stop:
                 break
+
             for frame in packet.decode():
                 frame_idx += 1
-                if frame_idx % 10 == 0:
-                    scenes.append(frame.time)
-                    if self.log:
-                        self.log.write_status(detected=len(scenes), cut=self.done)
 
-                    if self.previewer and self.preview_enabled and frame_idx % int(PREVIEW_FPS / PREVIEW_INTERVAL) == 0:
-                        img = frame.to_image().resize((420, int(420 * frame.height / frame.width)))
-                        self.previewer.update_image(img)
+                # reduz custo: processa 1 frame a cada N
+                if frame_idx % 5 != 0:
+                    continue
 
-        #
-        result = []
-        last = 0
-        for t in scenes:
-            if t - last >= min_dur:
-                result.append((last, t))
-                last = t
+                # tempo do frame (PyAV pode retornar None)
+                t = frame.time
+                if t is None:
+                    continue
 
-        self.detected = len(result)
-        return result
+                last_frame_time = t
+
+                img = frame.to_ndarray(format="bgr24")
+                hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+                hist = cv2.calcHist(
+                    [hsv], [0, 1],
+                    None,
+                    [50, 60],
+                    [0, 180, 0, 256]
+                )
+                cv2.normalize(hist, hist)
+
+                if prev_hist is not None:
+                    diff = cv2.compareHist(
+                        prev_hist, hist,
+                        cv2.HISTCMP_CHISQR
+                    )
+
+                    diff_window.append(diff)
+
+                    # fase de calibração automática (início do vídeo)
+                    if not calibrated:
+                        if t >= calibration_time and len(diff_window) >= 8:
+                            mean = statistics.mean(diff_window)
+                            std = statistics.pstdev(diff_window)
+
+                            adaptive_threshold = mean + 2.2 * std
+
+                            # ancora no perfil (evita descontrole)
+                            adaptive_threshold = max(
+                                threshold * 0.7,
+                                min(adaptive_threshold, threshold * 1.3)
+                            )
+
+                            calibrated = True
+                        prev_hist = hist
+                        continue
+
+                    # gate estatístico local (anti falso positivo)
+                    local_mean = statistics.mean(diff_window)
+                    local_std = statistics.pstdev(diff_window)
+                    dynamic_gate = local_mean + max(1.8 * local_std, 0.05)
+
+
+                    if (
+                            diff > adaptive_threshold and
+                            diff > dynamic_gate and
+                            (t - last_cut_time) >= min_dur
+                    ):
+                        scenes.append((last_cut_time, t))
+                        last_cut_time = t
+
+                        if self.log:
+                            self.log.write_status(
+                                detected=len(scenes),
+                                cut=self.done
+                            )
+
+                prev_hist = hist
+
+                # preview
+                if self.previewer and self.preview_enabled:
+                    if frame_idx % int(PREVIEW_FPS / PREVIEW_INTERVAL) == 0:
+                        img_pil = frame.to_image().resize(
+                            (420, int(420 * frame.height / frame.width))
+                        )
+                        self.previewer.update_image(img_pil)
+
+        # fecha a última cena com o último timestamp real
+        if last_cut_time < last_frame_time:
+            scenes.append((last_cut_time, last_frame_time))
+
+        self.detected = len(scenes)
+        return scenes
 
     def _fixed_interval(self):
         interval = self.cfg.get("FIXED_INTERVAL", 10)
@@ -406,10 +493,13 @@ class SceneEngine:
         self.total, self.done = len(scenes), 0
         encoder = self.cfg.get("ENCODER", "cpu")
 
-
         for idx, (start, end) in enumerate(scenes, 1):
             if self._stop:
                 break
+
+            # proteção contra cenas degeneradas
+            if end <= start:
+                continue
 
             if self.previewer and self.preview_enabled:
                 mid_time = (start + end) / 2
@@ -417,7 +507,15 @@ class SceneEngine:
                 if thumb:
                     self.previewer.update_image(thumb)
 
-            cmd = ["ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", self.video, "-t", f"{end - start:.3f}"]
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-i", self.video,
+                "-ss", f"{start:.3f}",
+                "-to", f"{end:.3f}",
+                "-reset_timestamps", "1",
+                "-avoid_negative_ts", "make_zero",
+            ]
 
             if encoder == "nvidia":
                 cmd += ["-c:v", "h264_nvenc"]
@@ -428,7 +526,14 @@ class SceneEngine:
             else:
                 cmd += ["-c:v", "libx264", "-preset", "veryfast"]
 
-            cmd += ["-crf", "23", "-c:a", "copy", os.path.join(outdir, f"scene_{idx:03d}.mp4")]
+            # NÃO copiar áudio para evitar drift temporal
+            cmd += [
+                "-crf", "23",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                os.path.join(outdir, f"scene_{idx:03d}.mp4")
+            ]
+
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             self.done += 1
@@ -478,6 +583,11 @@ class FaceDetectionEngine:
         self.progress = progressbar
         self.previewer = previewer
         self.preview_enabled = preview_enabled
+
+        if not TORCH_AVAILABLE:
+            raise RuntimeError(
+                "Face detection requires PyTorch, but it is not installed."
+            )
 
         self.profile = profile
         self.accel = accel
@@ -761,6 +871,11 @@ class SceneCutterApp(ctk.CTk):
         group.pack(fill="x", padx=12, pady=(0, 6))
 
         self.mode_radios = group.radios
+
+        if not TORCH_AVAILABLE:
+            for rb in self.mode_radios:
+                if rb.cget("value") == "faces":
+                    rb.configure(state="disabled")
 
         self.interval_entry = ctk.CTkEntry(
             mode,
