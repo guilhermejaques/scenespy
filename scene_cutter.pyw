@@ -364,11 +364,14 @@ class SceneEngine:
         diff_window = deque(maxlen=12)
         adaptive_threshold = threshold
         calibrated = False
+
+        HARD_CUT_MULT = 2.4
         calibration_time = 3.0  # segundos iniciais só para medir
 
         scenes = []
         last_cut_time = 0.0
         last_frame_time = 0.0
+        last_scene_change_time = None
 
         prev_hist = None
         frame_idx = 0
@@ -380,11 +383,14 @@ class SceneEngine:
             for frame in packet.decode():
                 frame_idx += 1
 
-                # reduz custo: processa 1 frame a cada N
-                if frame_idx % 5 != 0:
-                    continue
+                tail_window = 2.0  # segundos finais
 
-                # tempo do frame (PyAV pode retornar None)
+                if frame.time is not None and container.duration:
+                    video_end = container.duration / av.time_base
+                    if frame.time < video_end - tail_window:
+                        if frame_idx % 2 != 0:
+                            continue
+
                 t = frame.time
                 if t is None:
                     continue
@@ -410,37 +416,47 @@ class SceneEngine:
 
                     diff_window.append(diff)
 
-                    # fase de calibração automática (início do vídeo)
+                    # calibração inicial
                     if not calibrated:
                         if t >= calibration_time and len(diff_window) >= 8:
                             mean = statistics.mean(diff_window)
                             std = statistics.pstdev(diff_window)
 
                             adaptive_threshold = mean + 2.2 * std
-
-                            # ancora no perfil (evita descontrole)
                             adaptive_threshold = max(
                                 threshold * 0.7,
                                 min(adaptive_threshold, threshold * 1.3)
                             )
-
                             calibrated = True
+
                         prev_hist = hist
                         continue
 
-                    # gate estatístico local (anti falso positivo)
-                    local_mean = statistics.mean(diff_window)
-                    local_std = statistics.pstdev(diff_window)
-                    dynamic_gate = local_mean + max(1.8 * local_std, 0.05)
+                    # confirmação temporal
+                    strong_hits = sum(
+                        1 for d in diff_window
+                        if d > adaptive_threshold
+                    )
 
+                    hard_cut = diff > adaptive_threshold * HARD_CUT_MULT
 
+                    if hard_cut:
+                        last_scene_change_time = t
+                    elif strong_hits >= 2 and last_scene_change_time is None:
+                        last_scene_change_time = t
+
+                    # corte confirmado
                     if (
-                            diff > adaptive_threshold and
-                            diff > dynamic_gate and
-                            (t - last_cut_time) >= min_dur
+                            (hard_cut or strong_hits >= 2) and
+                            last_scene_change_time is not None and
+                            (last_scene_change_time - last_cut_time) >= min_dur
                     ):
-                        scenes.append((last_cut_time, t))
-                        last_cut_time = t
+                        cut_time = last_scene_change_time
+                        cut_time = max(cut_time, last_cut_time + 0.05)
+
+                        scenes.append((last_cut_time, cut_time))
+                        last_cut_time = cut_time
+                        last_scene_change_time = None
 
                         if self.log:
                             self.log.write_status(
@@ -458,9 +474,14 @@ class SceneEngine:
                         )
                         self.previewer.update_image(img_pil)
 
-        # fecha a última cena com o último timestamp real
-        if last_cut_time < last_frame_time:
-            scenes.append((last_cut_time, last_frame_time))
+        if last_scene_change_time and last_scene_change_time > last_cut_time:
+            cut = max(last_scene_change_time, last_cut_time + 0.05)
+            scenes.append((last_cut_time, cut))
+            if last_frame_time - cut >= 0.05:
+                scenes.append((cut, last_frame_time))
+        else:
+            if last_frame_time - last_cut_time >= 0.05:
+                scenes.append((last_cut_time, last_frame_time))
 
         self.detected = len(scenes)
         return scenes
@@ -507,24 +528,50 @@ class SceneEngine:
                 if thumb:
                     self.previewer.update_image(thumb)
 
+            epsilon = 0.001  # 1 ms real
+            safe_end = max(start, end - epsilon)
+
             cmd = [
                 "ffmpeg",
                 "-y",
                 "-i", self.video,
-                "-ss", f"{start:.3f}",
-                "-to", f"{end:.3f}",
+                "-filter_complex",
+                (
+                    f"[0:v]trim=start={start:.6f}:end={safe_end:.6f},"
+                    f"setpts=PTS-STARTPTS[v];"
+                    f"[0:a]atrim=start={start:.6f}:end={safe_end:.6f},"
+                    f"asetpts=PTS-STARTPTS[a]"
+
+                ),
+                "-map", "[v]",
+                "-map", "[a]",
                 "-reset_timestamps", "1",
-                "-avoid_negative_ts", "make_zero",
             ]
 
             if encoder == "nvidia":
-                cmd += ["-c:v", "h264_nvenc"]
+                cmd += [
+                    "-c:v", "h264_nvenc",
+                    "-g", "1",
+                    "-bf", "0"
+                ]
             elif encoder == "amd":
-                cmd += ["-c:v", "h264_amf"]
+                cmd += [
+                    "-c:v", "h264_amf",
+                    "-g", "1",
+                    "-bf", "0"
+                ]
             elif encoder == "intel":
-                cmd += ["-c:v", "h264_qsv"]
+                cmd += [
+                    "-c:v", "h264_qsv",
+                    "-g", "1",
+                    "-bf", "0"
+                ]
             else:
-                cmd += ["-c:v", "libx264", "-preset", "veryfast"]
+                cmd += [
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-x264-params", "keyint=1:no-scenecut=1"
+                ]
 
             # NÃO copiar áudio para evitar drift temporal
             cmd += [
@@ -533,6 +580,8 @@ class SceneEngine:
                 "-b:a", "128k",
                 os.path.join(outdir, f"scene_{idx:03d}.mp4")
             ]
+
+            cmd += ["-vsync", "0"]
 
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
