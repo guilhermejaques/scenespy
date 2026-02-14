@@ -304,6 +304,8 @@ class SceneEngine:
         self._start_time = None
         self._end_time = None
         self._video_info_shown = False
+        self._fps = None
+        self._thumb_container = None
 
     def stop(self):
         self._stop = True
@@ -360,6 +362,9 @@ class SceneEngine:
 
         threshold = self.cfg["THRESHOLD"]
         min_dur = self.cfg["MIN_FINAL_DURATION"]
+        fps = self._get_video_fps()
+
+        min_frames = int(min_dur * fps)
 
         diff_window = deque(maxlen=12)
         adaptive_threshold = threshold
@@ -369,12 +374,13 @@ class SceneEngine:
         calibration_time = 3.0  # segundos iniciais só para medir
 
         scenes = []
-        last_cut_time = 0.0
-        last_frame_time = 0.0
-        last_scene_change_time = None
+        last_scene_change_frame = None
+
 
         prev_hist = None
         frame_idx = 0
+        last_cut_frame = 1
+        preview_mod = max(1, int(PREVIEW_FPS / PREVIEW_INTERVAL))
 
         for packet in container.demux(stream):
             if self._stop:
@@ -382,20 +388,6 @@ class SceneEngine:
 
             for frame in packet.decode():
                 frame_idx += 1
-
-                tail_window = 2.0  # segundos finais
-
-                if frame.time is not None and container.duration:
-                    video_end = container.duration / av.time_base
-                    if frame.time < video_end - tail_window:
-                        if frame_idx % 2 != 0:
-                            continue
-
-                t = frame.time
-                if t is None:
-                    continue
-
-                last_frame_time = t
 
                 img = frame.to_ndarray(format="bgr24")
                 hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -418,7 +410,7 @@ class SceneEngine:
 
                     # calibração inicial
                     if not calibrated:
-                        if t >= calibration_time and len(diff_window) >= 8:
+                        if frame_idx >= int(calibration_time * fps) and len(diff_window) >= 8:
                             mean = statistics.mean(diff_window)
                             std = statistics.pstdev(diff_window)
 
@@ -440,23 +432,24 @@ class SceneEngine:
 
                     hard_cut = diff > adaptive_threshold * HARD_CUT_MULT
 
-                    if hard_cut:
-                        last_scene_change_time = t
-                    elif strong_hits >= 2 and last_scene_change_time is None:
-                        last_scene_change_time = t
+                    if hard_cut and last_scene_change_frame is None:
+                        last_scene_change_frame = frame_idx
+                    elif strong_hits >= 2 and last_scene_change_frame is None:
+                        last_scene_change_frame = frame_idx
 
                     # corte confirmado
                     if (
-                            (hard_cut or strong_hits >= 2) and
-                            last_scene_change_time is not None and
-                            (last_scene_change_time - last_cut_time) >= min_dur
+                            last_scene_change_frame is not None and
+                            (last_scene_change_frame - last_cut_frame) >= min_frames
                     ):
-                        cut_time = last_scene_change_time
-                        cut_time = max(cut_time, last_cut_time + 0.05)
 
-                        scenes.append((last_cut_time, cut_time))
-                        last_cut_time = cut_time
-                        last_scene_change_time = None
+                        cut_frame = last_scene_change_frame
+                        cut_frame = max(cut_frame, last_cut_frame + 1)
+
+                        scenes.append((last_cut_frame, cut_frame))
+                        last_cut_frame = cut_frame
+
+                        last_scene_change_frame = None
 
                         if self.log:
                             self.log.write_status(
@@ -468,20 +461,14 @@ class SceneEngine:
 
                 # preview
                 if self.previewer and self.preview_enabled:
-                    if frame_idx % int(PREVIEW_FPS / PREVIEW_INTERVAL) == 0:
+                    if frame_idx % preview_mod == 0:
                         img_pil = frame.to_image().resize(
                             (420, int(420 * frame.height / frame.width))
                         )
                         self.previewer.update_image(img_pil)
 
-        if last_scene_change_time and last_scene_change_time > last_cut_time:
-            cut = max(last_scene_change_time, last_cut_time + 0.05)
-            scenes.append((last_cut_time, cut))
-            if last_frame_time - cut >= 0.05:
-                scenes.append((cut, last_frame_time))
-        else:
-            if last_frame_time - last_cut_time >= 0.05:
-                scenes.append((last_cut_time, last_frame_time))
+        if frame_idx > last_cut_frame:
+            scenes.append((last_cut_frame, frame_idx))
 
         self.detected = len(scenes)
         return scenes
@@ -495,10 +482,16 @@ class SceneEngine:
             self.video
         ]
         duration = float(subprocess.check_output(cmd).decode().strip())
+        fps = self._get_video_fps()
 
         scenes, t = [], 0.0
+
         while t < duration:
-            scenes.append((t, min(t + interval, duration)))
+            scenes.append((
+                int(t * fps),
+                int(min(t + interval, duration) * fps)
+            ))
+
             t += interval
 
         self.detected = len(scenes)
@@ -514,75 +507,42 @@ class SceneEngine:
         self.total, self.done = len(scenes), 0
         encoder = self.cfg.get("ENCODER", "cpu")
 
-        for idx, (start, end) in enumerate(scenes, 1):
+        fps = self._get_video_fps()
+
+        for idx, (start_frame, end_frame) in enumerate(scenes, 1):
+
             if self._stop:
                 break
 
             # proteção contra cenas degeneradas
-            if end <= start:
+            if end_frame <= start_frame:
                 continue
 
             if self.previewer and self.preview_enabled:
-                mid_time = (start + end) / 2
+                mid_frame = (start_frame + end_frame) // 2
+                mid_time = mid_frame / fps
                 thumb = self._generate_thumbnail(mid_time)
+
                 if thumb:
                     self.previewer.update_image(thumb)
 
-            epsilon = 0.001  # 1 ms real
-            safe_end = max(start, end - epsilon)
+            start_time = start_frame / fps
+            end_time = end_frame / fps
+
+            duration = (end_frame - start_frame - 1) / fps
+
 
             cmd = [
                 "ffmpeg",
                 "-y",
                 "-i", self.video,
-                "-filter_complex",
-                (
-                    f"[0:v]trim=start={start:.6f}:end={safe_end:.6f},"
-                    f"setpts=PTS-STARTPTS[v];"
-                    f"[0:a]atrim=start={start:.6f}:end={safe_end:.6f},"
-                    f"asetpts=PTS-STARTPTS[a]"
-
-                ),
-                "-map", "[v]",
-                "-map", "[a]",
-                "-reset_timestamps", "1",
+                "-ss", f"{start_time:.6f}",
+                "-t", f"{duration:.6f}",
+                "-avoid_negative_ts", "make_zero",
             ]
 
-            if encoder == "nvidia":
-                cmd += [
-                    "-c:v", "h264_nvenc",
-                    "-g", "1",
-                    "-bf", "0"
-                ]
-            elif encoder == "amd":
-                cmd += [
-                    "-c:v", "h264_amf",
-                    "-g", "1",
-                    "-bf", "0"
-                ]
-            elif encoder == "intel":
-                cmd += [
-                    "-c:v", "h264_qsv",
-                    "-g", "1",
-                    "-bf", "0"
-                ]
-            else:
-                cmd += [
-                    "-c:v", "libx264",
-                    "-preset", "veryfast",
-                    "-x264-params", "keyint=1:no-scenecut=1"
-                ]
-
-            # NÃO copiar áudio para evitar drift temporal
-            cmd += [
-                "-crf", "23",
-                "-c:a", "aac",
-                "-b:a", "128k",
-                os.path.join(outdir, f"scene_{idx:03d}.mp4")
-            ]
-
-            cmd += ["-vsync", "0"]
-
+            outfile = os.path.join(outdir, f"scene_{idx:04d}.mp4")
+            cmd.append(outfile)
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             self.done += 1
@@ -599,9 +559,11 @@ class SceneEngine:
 
     def _generate_thumbnail(self, timestamp):
         try:
-            container = av.open(self.video)
-            container.seek(int(timestamp * av.time_base))
-            for frame in container.decode(video=0):
+            if self._thumb_container is None:
+                self._thumb_container = av.open(self.video)
+
+            self._thumb_container.seek(int(timestamp * av.time_base))
+            for frame in self._thumb_container.decode(video=0):
                 img = frame.to_image()
                 img = img.resize((420, int(420 * frame.height / frame.width)))
                 return img
@@ -620,6 +582,21 @@ class SceneEngine:
         m, s = divmod(eta_seconds, 60)
         h, m = divmod(m, 60)
         return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+    def _get_video_fps(self):
+        if self._fps is not None:
+            return self._fps
+
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=r_frame_rate",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            self.video
+        ]
+        num, den = subprocess.check_output(cmd).decode().strip().split("/")
+        self._fps = float(num) / float(den)
+        return self._fps
 
 
 class FaceDetectionEngine:
