@@ -178,9 +178,23 @@ class ProgressBar(ctk.CTkFrame):
         self.label = ctk.CTkLabel(self, text="0%", font=("Consolas", 11))
         self.label.pack(anchor="e")
 
+        self._normal_color = self.bar.cget("progress_color")
+
     def update(self, value):
+        value = max(0.0, min(1.0, value))
         self.bar.set(value)
         self.label.configure(text=f"{int(value * 100)}%")
+
+    def mark_finished(self):
+        self.bar.configure(progress_color="#22c55e")
+        self.bar.set(1.0)
+        self.label.configure(text="100%")
+
+    def reset(self):
+        self.bar.configure(progress_color=self._normal_color)
+        self.bar.set(0)
+        self.label.configure(text="0%")
+
 
 
 class PreviewFrame(ctk.CTkFrame):
@@ -306,6 +320,7 @@ class SceneEngine:
         self._video_info_shown = False
         self._fps = None
         self._thumb_container = None
+        self._total_frames = None
 
     def stop(self):
         self._stop = True
@@ -360,6 +375,14 @@ class SceneEngine:
         container = av.open(self.video)
         stream = container.streams.video[0]
 
+        if self._total_frames is None:
+            self._total_frames = stream.frames
+            if not self._total_frames or self._total_frames <= 0:
+                self._total_frames = int(
+                    self._get_video_fps() *
+                    container.duration / av.time_base
+                )
+
         threshold = self.cfg["THRESHOLD"]
         min_dur = self.cfg["MIN_FINAL_DURATION"]
         fps = self._get_video_fps()
@@ -388,6 +411,11 @@ class SceneEngine:
 
             for frame in packet.decode():
                 frame_idx += 1
+
+                if self.progress and self._total_frames:
+                    analysis_ratio = min(frame_idx / self._total_frames, 1.0)
+                    # 40% do progresso reservado à análise
+                    self.progress.update(analysis_ratio * 0.4)
 
                 img = frame.to_ndarray(format="bgr24")
                 hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -484,6 +512,8 @@ class SceneEngine:
         duration = float(subprocess.check_output(cmd).decode().strip())
         fps = self._get_video_fps()
 
+        self._total_frames = int(duration * fps)
+
         scenes, t = [], 0.0
 
         while t < duration:
@@ -554,8 +584,10 @@ class SceneEngine:
                     eta=self._calculate_eta()
                 )
 
-            if self.progress:
-                self.progress.update(self.done / self.total)
+            if self.progress and self.total:
+                cut_ratio = self.done / self.total
+                # análise = 40%, corte = 60%
+                self.progress.update(0.4 + cut_ratio * 0.6)
 
     def _generate_thumbnail(self, timestamp):
         try:
@@ -990,7 +1022,7 @@ class SceneCutterApp(ctk.CTk):
             self.log.write_message("Invalid paths!", color="red")
             return
 
-        self.progress.update(0)
+        self.progress.reset()
         self.running = True
         self.set_ui_state(True)
         self.start_btn.configure(text="Stop", fg_color="#dc2626")
@@ -1075,7 +1107,7 @@ class SceneCutterApp(ctk.CTk):
                 f"Process finished [{self.engine.total_time()}]",
                 color="#22c55e"
             )
-            self.progress.update(1.0)
+            self.progress.mark_finished()
 
     def set_ui_state(self, disabled):
         state = "disabled" if disabled else "normal"
