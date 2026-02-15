@@ -15,6 +15,11 @@ from collections import deque
 from PIL import Image
 from ultralytics import YOLO
 
+from scenedetect import open_video
+from scenedetect import SceneManager
+from scenedetect.detectors import ContentDetector
+from scenedetect.stats_manager import StatsManager
+
 try:
     import torch
     TORCH_AVAILABLE = True
@@ -100,6 +105,19 @@ def test_ffmpeg_encoder(encoder: str) -> bool:
         return result.returncode == 0
     except Exception:
         return False
+
+def _safe_frame_index(v):
+    if isinstance(v, (int, float)):
+        return int(v)
+    if hasattr(v, "get_frames"):
+        return v.get_frames()
+    try:
+        import numpy as np
+        if isinstance(v, np.ndarray):
+            return int(v.flat[0])
+    except Exception:
+        pass
+    return 0
 
 
 # Widgets
@@ -352,7 +370,9 @@ class SceneEngine:
 
         self._cut_scenes(scenes)
         self._end_time = time.time()
-        return not self._stop
+        return True
+
+
 
     def _get_video_info_text(self):
         cmd = [
@@ -372,131 +392,52 @@ class SceneEngine:
             return "Video info unavailable"
 
     def _detect_scenes_progressive(self):
-        container = av.open(self.video)
-        stream = container.streams.video[0]
-
-        if self._total_frames is None:
-            self._total_frames = stream.frames
-            if not self._total_frames or self._total_frames <= 0:
-                self._total_frames = int(
-                    self._get_video_fps() *
-                    container.duration / av.time_base
-                )
-
-        threshold = self.cfg["THRESHOLD"]
+        threshold = self._map_threshold()
         min_dur = self.cfg["MIN_FINAL_DURATION"]
         fps = self._get_video_fps()
 
-        min_frames = int(min_dur * fps)
+        video = open_video(self.video)
 
-        diff_window = deque(maxlen=12)
-        adaptive_threshold = threshold
-        calibrated = False
+        stats_manager = StatsManager()
+        scene_manager = SceneManager(stats_manager)
 
-        HARD_CUT_MULT = 2.4
-        calibration_time = 3.0  # segundos iniciais só para medir
+        scene_manager.add_detector(
+            ContentDetector(
+                threshold=threshold,
+                min_scene_len=int(min_dur * fps)
+            )
+        )
+
+        video_duration = video.duration.get_seconds()
+
+        def _progress_cb(frame_num, _):
+            if not self.progress:
+                return
+
+            frame_idx = _safe_frame_index(frame_num)
+            if frame_idx <= 0:
+                return
+
+            current_time = frame_idx / fps
+            ratio = min(current_time / video_duration, 1.0)
+
+            # análise ocupa 40% da barra
+            self.progress.update(ratio * 0.4)
+
+        # 🚨 ISTO ESTAVA FALTANDO
+        scene_manager.detect_scenes(
+            video=video,
+            callback=_progress_cb
+        )
+
+        scene_list = scene_manager.get_scene_list()
 
         scenes = []
-        last_scene_change_frame = None
-
-
-        prev_hist = None
-        frame_idx = 0
-        last_cut_frame = 1
-        preview_mod = max(1, int(PREVIEW_FPS / PREVIEW_INTERVAL))
-
-        for packet in container.demux(stream):
-            if self._stop:
-                break
-
-            for frame in packet.decode():
-                frame_idx += 1
-
-                if self.progress and self._total_frames:
-                    analysis_ratio = min(frame_idx / self._total_frames, 1.0)
-                    # 40% do progresso reservado à análise
-                    self.progress.update(analysis_ratio * 0.4)
-
-                img = frame.to_ndarray(format="bgr24")
-                hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-
-                hist = cv2.calcHist(
-                    [hsv], [0, 1],
-                    None,
-                    [50, 60],
-                    [0, 180, 0, 256]
-                )
-                cv2.normalize(hist, hist)
-
-                if prev_hist is not None:
-                    diff = cv2.compareHist(
-                        prev_hist, hist,
-                        cv2.HISTCMP_CHISQR
-                    )
-
-                    diff_window.append(diff)
-
-                    # calibração inicial
-                    if not calibrated:
-                        if frame_idx >= int(calibration_time * fps) and len(diff_window) >= 8:
-                            mean = statistics.mean(diff_window)
-                            std = statistics.pstdev(diff_window)
-
-                            adaptive_threshold = mean + 2.2 * std
-                            adaptive_threshold = max(
-                                threshold * 0.7,
-                                min(adaptive_threshold, threshold * 1.3)
-                            )
-                            calibrated = True
-
-                        prev_hist = hist
-                        continue
-
-                    # confirmação temporal
-                    strong_hits = sum(
-                        1 for d in diff_window
-                        if d > adaptive_threshold
-                    )
-
-                    hard_cut = diff > adaptive_threshold * HARD_CUT_MULT
-
-                    if hard_cut and last_scene_change_frame is None:
-                        last_scene_change_frame = frame_idx
-                    elif strong_hits >= 2 and last_scene_change_frame is None:
-                        last_scene_change_frame = frame_idx
-
-                    # corte confirmado
-                    if (
-                            last_scene_change_frame is not None and
-                            (last_scene_change_frame - last_cut_frame) >= min_frames
-                    ):
-
-                        cut_frame = last_scene_change_frame
-                        cut_frame = max(cut_frame, last_cut_frame + 1)
-
-                        scenes.append((last_cut_frame, cut_frame))
-                        last_cut_frame = cut_frame
-
-                        last_scene_change_frame = None
-
-                        if self.log:
-                            self.log.write_status(
-                                detected=len(scenes),
-                                cut=self.done
-                            )
-
-                prev_hist = hist
-
-                # preview
-                if self.previewer and self.preview_enabled:
-                    if frame_idx % preview_mod == 0:
-                        img_pil = frame.to_image().resize(
-                            (420, int(420 * frame.height / frame.width))
-                        )
-                        self.previewer.update_image(img_pil)
-
-        if frame_idx > last_cut_frame:
-            scenes.append((last_cut_frame, frame_idx))
+        for start, end in scene_list:
+            scenes.append((
+                start.get_frames(),
+                end.get_frames()
+            ))
 
         self.detected = len(scenes)
         return scenes
@@ -589,6 +530,9 @@ class SceneEngine:
                 # análise = 40%, corte = 60%
                 self.progress.update(0.4 + cut_ratio * 0.6)
 
+        if self.progress:
+            self.progress.update(1.0)
+
     def _generate_thumbnail(self, timestamp):
         try:
             if self._thumb_container is None:
@@ -629,6 +573,18 @@ class SceneEngine:
         num, den = subprocess.check_output(cmd).decode().strip().split("/")
         self._fps = float(num) / float(den)
         return self._fps
+
+    def _map_threshold(self):
+        # Ajuste empírico baseado no ContentDetector
+        base = self.cfg["THRESHOLD"]
+
+        if base >= 40:
+            return 40.0  # Low
+        elif base >= 25:
+            return 27.0  # Normal
+        else:
+            return 18.0  # High
+
 
 
 class FaceDetectionEngine:
@@ -732,8 +688,14 @@ class FaceDetectionEngine:
         self._start_time = time.time()
 
         cap = cv2.VideoCapture(self.video)
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+        fps_raw = cap.get(cv2.CAP_PROP_FPS)
+        fps = float(fps_raw) if fps_raw and fps_raw > 0 else 30.0
+
+        total_frames_raw = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        try:
+            total_frames = int(float(total_frames_raw))
+        except Exception:
+            total_frames = 1
 
         ttl_frames = int(fps * self.profile_cfg["ttl"])
         tracks = []
@@ -778,7 +740,9 @@ class FaceDetectionEngine:
             new_tracks = []
 
             for box in results.boxes.xyxy:
+                box = box.squeeze()  # garante 1D
                 x1, y1, x2, y2 = map(int, box.tolist())
+
                 w, h = x2 - x1, y2 - y1
 
                 if w < self.profile_cfg["min_size"] or h < self.profile_cfg["min_size"]:
@@ -862,7 +826,8 @@ class FaceDetectionEngine:
                 )
 
             if self.progress:
-                self.progress.update(frame_idx / total_frames)
+                self.progress.update(float(frame_idx) / float(total_frames))
+
 
         csv_file.close()
         cap.release()
@@ -1172,6 +1137,8 @@ def single_instance():
     except OSError:
         return False
     return True
+
+
 
 # Main
 if __name__ == "__main__":
