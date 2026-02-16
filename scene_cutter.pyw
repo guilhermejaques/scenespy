@@ -10,6 +10,7 @@ import cv2
 import csv
 import os
 import mediapipe as mp
+import signal
 import statistics
 from collections import deque
 from PIL import Image
@@ -194,6 +195,8 @@ class ProgressBar(ctk.CTkFrame):
         self.bar = ctk.CTkProgressBar(self)
         self.bar.pack(fill="x", pady=4)
         self.bar.set(0)
+        self._after_id = None
+        self._enabled = True
 
         self.label = ctk.CTkLabel(self, text="0%", font=("Consolas", 11))
         self.label.pack(anchor="e")
@@ -209,22 +212,28 @@ class ProgressBar(ctk.CTkFrame):
         self._speed = 0.008  # menor = mais suave, maior = mais rápido
 
     def update(self, value):
+        if not self._enabled:
+            return
+
         value = max(0.0, min(1.0, value))
 
-        # bloqueia regressão lógica
         if value < self._logical_value:
+            return
+
+        if not self.winfo_exists():
             return
 
         self._logical_value = value
 
-        # inicia animação se necessário
         if not self._animating:
             self._animating = True
-            self.after(10, self._animate_step)
+            self._after_id = self.after(10, self._animate_step)
 
     def _animate_step(self):
-        if self._visual_value >= self._logical_value:
+        if self._logical_value - self._visual_value < 0.01:
             self._visual_value = self._logical_value
+            self.bar.set(self._visual_value)
+            self.label.configure(text=f"{int(self._visual_value * 100)}%")
             self._animating = False
             return
 
@@ -236,9 +245,17 @@ class ProgressBar(ctk.CTkFrame):
         self.bar.set(self._visual_value)
         self.label.configure(text=f"{int(self._visual_value * 100)}%")
 
-        self.after(16, self._animate_step)  # ~60 FPS
+        self._after_id = self.after(16, self._animate_step)
 
     def mark_finished(self):
+        if self._after_id:
+            try:
+                self.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+        self._animating = False
         self._logical_value = 1.0
         self._visual_value = 1.0
         self.bar.configure(progress_color="#22c55e")
@@ -246,6 +263,15 @@ class ProgressBar(ctk.CTkFrame):
         self.label.configure(text="100%")
 
     def reset(self):
+        self._enabled = False  # 🔒 BLOQUEIA updates futuros
+
+        if self._after_id:
+            try:
+                self.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
         self._logical_value = 0.0
         self._visual_value = 0.0
         self._animating = False
@@ -378,9 +404,25 @@ class SceneEngine:
         self._fps = None
         self._thumb_container = None
         self._total_frames = None
+        self._ffmpeg_proc = None
 
     def stop(self):
         self._stop = True
+
+        if self._ffmpeg_proc:
+            try:
+                self._ffmpeg_proc.send_signal(signal.CTRL_BREAK_EVENT)
+                self._ffmpeg_proc.kill()
+            except Exception:
+                pass
+            self._ffmpeg_proc = None
+
+        if self._thumb_container:
+            try:
+                self._thumb_container.close()
+            except Exception:
+                pass
+            self._thumb_container = None
 
     def total_time(self):
         if not self._start_time:
@@ -392,9 +434,12 @@ class SceneEngine:
         return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
     def run(self, scene_mode=True):
-        self._start_time = time.time()
-
         self._analysis_ratio = 0.0
+        self._start_time = time.time()
+        self._end_time = None
+        self.done = 0
+        self.detected = 0
+        self.last_preview = 0
 
         # Show video info in preview
         if self.previewer and not self._video_info_shown:
@@ -410,7 +455,6 @@ class SceneEngine:
             self.log.write_message(f"🎬 Scenes detected: {len(scenes)}")
 
         self._cut_scenes(scenes)
-        self._end_time = time.time()
         return True
 
 
@@ -452,6 +496,9 @@ class SceneEngine:
         video_duration = video.duration.get_seconds()
 
         def _progress_cb(frame_num, _):
+            if self._stop:
+                raise RuntimeError("Scene detection stopped")
+
             if not self.progress:
                 return
 
@@ -471,13 +518,22 @@ class SceneEngine:
 
             self.progress.update(ratio * 0.4)
 
-        # 🚨 ISTO ESTAVA FALTANDO
-        scene_manager.detect_scenes(
-            video=video,
-            callback=_progress_cb
-        )
+        try:
+            scene_manager.detect_scenes(
+                video=video,
+                callback=_progress_cb
+            )
+        except RuntimeError:
+            return []
 
         scene_list = scene_manager.get_scene_list()
+
+
+        if not scene_list:
+            total_frames = int(video.duration.get_seconds() * fps)
+            self.detected = 1
+            return [(0, total_frames)]
+
 
         scenes = []
         for start, end in scene_list:
@@ -561,7 +617,15 @@ class SceneEngine:
 
             outfile = os.path.join(outdir, f"scene_{idx:04d}.mp4")
             cmd.append(outfile)
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._ffmpeg_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+            )
+
+            self._ffmpeg_proc.wait()
+            self._ffmpeg_proc = None
 
             self.done += 1
 
@@ -577,15 +641,15 @@ class SceneEngine:
                 # análise = 40%, corte = 60%
                 self.progress.update(0.4 + cut_ratio * 0.6)
 
-        if self.progress:
-            self.progress.update(1.0)
+        if self.progress and not self._stop and self.done == self.total:
+            self.progress.mark_finished()
 
     def _generate_thumbnail(self, timestamp):
         try:
             if self._thumb_container is None:
                 self._thumb_container = av.open(self.video)
 
-            self._thumb_container.seek(int(timestamp * av.time_base))
+            self._thumb_container.seek(int(timestamp * av.time_base), any_frame=True)
             for frame in self._thumb_container.decode(video=0):
                 img = frame.to_image()
                 img = img.resize((420, int(420 * frame.height / frame.width)))
@@ -661,6 +725,7 @@ class FaceDetectionEngine:
 
         self.detected = 0
         self.done = 0
+        self._face_ratio = 0.0
 
         base_dir = os.path.dirname(os.path.abspath(__file__))
         model_path = os.path.join(base_dir, "models", "yolov8n-face.pt")
@@ -873,8 +938,10 @@ class FaceDetectionEngine:
                 )
 
             if self.progress:
-                self.progress.update(float(frame_idx) / float(total_frames))
-
+                ratio = frame_idx / total_frames
+                ratio = max(self._face_ratio, ratio)  # impede regressão
+                self._face_ratio = ratio
+                self.progress.update(ratio)
 
         csv_file.close()
         cap.release()
@@ -902,9 +969,12 @@ class SceneCutterApp(ctk.CTk):
         self.geometry("1000x650")
         self.engine = None
         self.running = False
+        self.stop_pending = False
+
         self.preview_enabled = ENABLE_PREVIEW_DEFAULT
         self.available_accel = detect_available_accel()
         self._build_ui()
+
 
     def _build_ui(self):
         # Left panel
@@ -1018,12 +1088,14 @@ class SceneCutterApp(ctk.CTk):
     def toggle_preview(self):
         self.preview_enabled = self.preview_switch.get()
         if not self.preview_enabled:
-            self.preview_frame.clear_image()
+            self.preview_frame.clear_all()
 
     def toggle_start(self):
         if self.running:
-            self.stop_process()
+            self.confirm_stop()
         else:
+            if self.engine is not None:
+                return  # proteção contra clique duplo
             self.start_process()
 
     def start_process(self):
@@ -1034,8 +1106,11 @@ class SceneCutterApp(ctk.CTk):
             self.log.write_message("Invalid paths!", color="red")
             return
 
-        self.progress.reset()
+        self.cleanup_process(reason="reset")
+        self.progress._enabled = True
+
         self.running = True
+
         self.set_ui_state(True)
         self.start_btn.configure(text="Stop", fg_color="#dc2626")
 
@@ -1043,6 +1118,8 @@ class SceneCutterApp(ctk.CTk):
         requested = self.accel.get()
         mode = self.cut_mode.get()
         compat = MODE_ACCEL_COMPAT.get(mode, {})
+
+
 
         encoder_allowed = compat.get("encoder", {"cpu"}) & self.available_accel
         inference_allowed = compat.get("inference", {"cpu"}) & self.available_accel
@@ -1093,13 +1170,8 @@ class SceneCutterApp(ctk.CTk):
         threading.Thread(target=self.run_engine, args=(scene_mode,), daemon=True).start()
 
     def stop_process(self):
-        self.running = False
         if self.engine:
             self.engine.stop()
-        self.preview_frame.clear_all()
-        self.log.clear_status()
-        self.log.write_message("Process stopped", color="#facc15")
-        self.reset_ui()
 
     def run_engine(self, scene_mode):
         result = False
@@ -1108,18 +1180,24 @@ class SceneCutterApp(ctk.CTk):
         except Exception as e:
             print("Error:", e)
         finally:
-            self.after(0, self.reset_ui if not result else lambda: self.reset_ui(finished=True))
+            self.engine = None
+            self.stop_pending = False
+            self.after(
+                0,
+                self.reset_ui if not result else lambda: self.reset_ui(finished=True)
+            )
 
     def reset_ui(self, finished=False):
         self.running = False
-        self.start_btn.configure(text="Start", fg_color="#4ade80")
+        self.start_btn.configure(
+            text="Start",
+            fg_color="#4ade80",
+            state="normal"  # 🔓 REABILITA O BOTÃO
+        )
         self.set_ui_state(False)
+
         if finished:
-            self.log.write_message(
-                f"Process finished [{self.engine.total_time()}]",
-                color="#22c55e"
-            )
-            self.progress.mark_finished()
+            self.cleanup_process(reason="finish")
 
     def set_ui_state(self, disabled):
         state = "disabled" if disabled else "normal"
@@ -1152,7 +1230,12 @@ class SceneCutterApp(ctk.CTk):
         except Exception as e:
             print("Face engine error:", e)
         finally:
-            self.after(0, self.reset_ui if not result else lambda: self.reset_ui(finished=True))
+            self.engine = None
+            self.stop_pending = False
+            self.after(
+                0,
+                self.reset_ui if not result else lambda: self.reset_ui(finished=True)
+            )
 
     def update_accel_radios(self):
         mode = self.cut_mode.get()
@@ -1173,6 +1256,54 @@ class SceneCutterApp(ctk.CTk):
         if self.accel.get() not in enabled:
             self.accel.set("cpu")
 
+    def cleanup_process(self, reason="reset"):
+        # preview
+        if self.preview_frame:
+            self.preview_frame.clear_all()
+
+        # progress
+        if self.progress and reason in ("stop", "reset"):
+            self.progress.reset()
+
+        # log
+        if self.log:
+            self.log.clear_status()
+            if reason == "stop":
+                self.log.write_message("Process stopped", color="#facc15")
+            elif reason == "finish":
+                self.log.write_message("Process finished", color="#22c55e")
+
+        # força GC leve (previne leaks de frame/av/torch)
+        import gc
+        gc.collect()
+
+    def confirm_stop(self):
+        if self.stop_pending:
+            return
+
+        import tkinter.messagebox as mb
+
+        answer = mb.askyesno(
+            "Confirm stop",
+            "The process is still running.\nDo you really want to stop it?"
+        )
+
+        if not answer:
+            return
+
+        self.stop_pending = True
+        self.start_btn.configure(
+            text="Stopping...",
+            fg_color="#7f1d1d",
+            state="disabled"
+        )
+
+        # 🔥 CORTE IMEDIATO DO VISUAL
+        if self.progress:
+            self.progress.reset()
+
+        self.after(50, self.stop_process)
+
 
 def single_instance():
     global INSTANCE_SOCKET
@@ -1184,6 +1315,7 @@ def single_instance():
     except OSError:
         return False
     return True
+
 
 
 
