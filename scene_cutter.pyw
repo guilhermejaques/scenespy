@@ -190,29 +190,68 @@ class LogBox(ctk.CTkTextbox):
 class ProgressBar(ctk.CTkFrame):
     def __init__(self, master):
         super().__init__(master, fg_color="transparent")
+
         self.bar = ctk.CTkProgressBar(self)
         self.bar.pack(fill="x", pady=4)
         self.bar.set(0)
+
         self.label = ctk.CTkLabel(self, text="0%", font=("Consolas", 11))
         self.label.pack(anchor="e")
 
         self._normal_color = self.bar.cget("progress_color")
 
+        # 🔒 estado lógico
+        self._logical_value = 0.0      # valor real recebido
+        self._visual_value = 0.0       # valor exibido
+        self._animating = False
+
+        # ⚙️ parâmetros de animação
+        self._speed = 0.008  # menor = mais suave, maior = mais rápido
+
     def update(self, value):
         value = max(0.0, min(1.0, value))
-        self.bar.set(value)
-        self.label.configure(text=f"{int(value * 100)}%")
+
+        # bloqueia regressão lógica
+        if value < self._logical_value:
+            return
+
+        self._logical_value = value
+
+        # inicia animação se necessário
+        if not self._animating:
+            self._animating = True
+            self.after(10, self._animate_step)
+
+    def _animate_step(self):
+        if self._visual_value >= self._logical_value:
+            self._visual_value = self._logical_value
+            self._animating = False
+            return
+
+        # interpolação suave (ease-out simples)
+        delta = (self._logical_value - self._visual_value) * self._speed
+        delta = max(delta, 0.001)  # evita travar perto do fim
+
+        self._visual_value += delta
+        self.bar.set(self._visual_value)
+        self.label.configure(text=f"{int(self._visual_value * 100)}%")
+
+        self.after(16, self._animate_step)  # ~60 FPS
 
     def mark_finished(self):
+        self._logical_value = 1.0
+        self._visual_value = 1.0
         self.bar.configure(progress_color="#22c55e")
         self.bar.set(1.0)
         self.label.configure(text="100%")
 
     def reset(self):
+        self._logical_value = 0.0
+        self._visual_value = 0.0
+        self._animating = False
         self.bar.configure(progress_color=self._normal_color)
         self.bar.set(0)
         self.label.configure(text="0%")
-
 
 
 class PreviewFrame(ctk.CTkFrame):
@@ -355,6 +394,8 @@ class SceneEngine:
     def run(self, scene_mode=True):
         self._start_time = time.time()
 
+        self._analysis_ratio = 0.0
+
         # Show video info in preview
         if self.previewer and not self._video_info_shown:
             info_text = self._get_video_info_text()
@@ -421,7 +462,13 @@ class SceneEngine:
             current_time = frame_idx / fps
             ratio = min(current_time / video_duration, 1.0)
 
-            # análise ocupa 40% da barra
+            # ← GARANTE progressão local
+            if not hasattr(self, "_analysis_ratio"):
+                self._analysis_ratio = 0.0
+
+            ratio = max(self._analysis_ratio, ratio)
+            self._analysis_ratio = ratio
+
             self.progress.update(ratio * 0.4)
 
         # 🚨 ISTO ESTAVA FALTANDO
