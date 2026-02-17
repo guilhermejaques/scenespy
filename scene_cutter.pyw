@@ -144,12 +144,18 @@ class LogBox(ctk.CTkTextbox):
     def __init__(self, master, height=140):
         super().__init__(master, height=height, fg_color="#0f0f14", corner_radius=3)
         self.configure(state="disabled", font=("Consolas", 11))
-        self.status_lines = [""] * 3
-        self._init_status_lines()
+
+        self.status_lines = [
+            "",
+            "",
+            "",
+            "",
+            ""
+        ]
+
+        self._render()
 
     def write_status(self, detected=None, cut=None, eta=None):
-        self.configure(state="normal")
-
         if detected is not None:
             self.status_lines[0] = f"Scenes detected: {detected}"
         if cut is not None:
@@ -157,34 +163,35 @@ class LogBox(ctk.CTkTextbox):
         if eta is not None:
             self.status_lines[2] = f"Estimated time: {eta}"
 
-        self.delete("1.0", "end")
-        for line in self.status_lines:
-            self.insert("end", line + "\n")
-        self.see("end")
-        self.configure(state="disabled")
-
-    def write_message(self, text, color=None):
-        self.configure(state="normal")
-        self.insert("end", text + "\n")
-        if color:
-            tag = f"msg_{color}"
-            self.tag_add(tag, "end-2l", "end-1l")
-            self.tag_config(tag, foreground=color)
-        self.see("end")
-        self.configure(state="disabled")
+        self._render()
 
     def clear_status(self):
+        self.status_lines = [
+            "Initializing process...",
+            "",
+            "",
+            "",
+            ""
+        ]
+        self._render()
+
+    def write_finished(self, text):
         self.configure(state="normal")
-        self.status_lines = [""] * 4
+        self.delete("1.0", "end")
+
+        for line in self.status_lines:
+            self.insert("end", line + "\n")
+
+        self.insert("end", text + "\n", "finished")
+        self.tag_config("finished", foreground="#22c55e")
+
+        self.configure(state="disabled")
+
+    def _render(self):
+        self.configure(state="normal")
         self.delete("1.0", "end")
         for line in self.status_lines:
             self.insert("end", line + "\n")
-        self.configure(state="disabled")
-
-    def _init_status_lines(self):
-        self.configure(state="normal")
-        for _ in self.status_lines:
-            self.insert("end", "\n")
         self.configure(state="disabled")
 
 
@@ -451,10 +458,10 @@ class SceneEngine:
         if not scenes or self._stop:
             return False
 
-        if self.log:
-            self.log.write_message(f"🎬 Scenes detected: {len(scenes)}")
-
         self._cut_scenes(scenes)
+
+        self._end_time = time.time()
+
         return True
 
 
@@ -508,10 +515,6 @@ class SceneEngine:
 
             current_time = frame_idx / fps
             ratio = min(current_time / video_duration, 1.0)
-
-            # ← GARANTE progressão local
-            if not hasattr(self, "_analysis_ratio"):
-                self._analysis_ratio = 0.0
 
             ratio = max(self._analysis_ratio, ratio)
             self._analysis_ratio = ratio
@@ -1103,7 +1106,10 @@ class SceneCutterApp(ctk.CTk):
         output = self.output_selector.get()
 
         if not os.path.isfile(video) or not os.path.isdir(output):
-            self.log.write_message("Invalid paths!", color="red")
+            self.log.clear_status()
+            self.log.status_lines[0] = "Invalid paths!"
+            self.log.write_status()
+
             return
 
         self.cleanup_process(reason="reset")
@@ -1153,19 +1159,21 @@ class SceneCutterApp(ctk.CTk):
             try:
                 cfg["FIXED_INTERVAL"] = float(self.interval_entry.get())
             except ValueError:
-                self.log.write_message("Invalid interval!", color="red")
+                self.log.clear_status()
+                self.log.status_lines[0] = "Invalid interval!"
+                self.log.write_status()
                 self.reset_ui()
                 return
 
         self.engine = SceneEngine(
-            video,
-            output,
-            cfg,
-            logbox=self.log,
-            progressbar=self.progress,
-            previewer=self.preview_frame,
-            preview_enabled=self.preview_enabled
-        )
+                video,
+                output,
+                cfg,
+                logbox=self.log,
+                progressbar=self.progress,
+                previewer=self.preview_frame,
+                preview_enabled=self.preview_enabled
+            )
 
         threading.Thread(target=self.run_engine, args=(scene_mode,), daemon=True).start()
 
@@ -1180,24 +1188,29 @@ class SceneCutterApp(ctk.CTk):
         except Exception as e:
             print("Error:", e)
         finally:
+            total_time = None
+            if result and self.engine:
+                total_time = self.engine.total_time()
+
             self.engine = None
             self.stop_pending = False
+
             self.after(
                 0,
-                self.reset_ui if not result else lambda: self.reset_ui(finished=True)
+                lambda: self.reset_ui(finished=result, total_time=total_time)
             )
 
-    def reset_ui(self, finished=False):
+    def reset_ui(self, finished=False, total_time=None):
         self.running = False
         self.start_btn.configure(
             text="Start",
             fg_color="#4ade80",
-            state="normal"  # 🔓 REABILITA O BOTÃO
+            state="normal"
         )
         self.set_ui_state(False)
 
         if finished:
-            self.cleanup_process(reason="finish")
+            self.cleanup_process(reason="finish", total_time=total_time)
 
     def set_ui_state(self, disabled):
         state = "disabled" if disabled else "normal"
@@ -1230,11 +1243,16 @@ class SceneCutterApp(ctk.CTk):
         except Exception as e:
             print("Face engine error:", e)
         finally:
+            total_time = None
+            if result and self.engine:
+                total_time = self.engine.total_time()
+
             self.engine = None
             self.stop_pending = False
+
             self.after(
                 0,
-                self.reset_ui if not result else lambda: self.reset_ui(finished=True)
+                lambda: self.reset_ui(finished=result, total_time=total_time)
             )
 
     def update_accel_radios(self):
@@ -1256,25 +1274,26 @@ class SceneCutterApp(ctk.CTk):
         if self.accel.get() not in enabled:
             self.accel.set("cpu")
 
-    def cleanup_process(self, reason="reset"):
-        # preview
+    def cleanup_process(self, reason="reset", total_time=None):
         if self.preview_frame:
             self.preview_frame.clear_all()
 
-        # progress
         if self.progress and reason in ("stop", "reset"):
             self.progress.reset()
 
-        # log
         if self.log:
-            self.log.clear_status()
             if reason == "stop":
-                self.log.write_message("Process stopped", color="#facc15")
-            elif reason == "finish":
-                self.log.write_message("Process finished", color="#22c55e")
+                self.log.clear_status()
+                self.log.status_lines[0] = "Process stopped"
+                self.log.write_status()
 
-        # força GC leve (previne leaks de frame/av/torch)
-        import gc
+            elif reason == "finish":
+                msg = "Process finished"
+                if total_time:
+                    msg += f" {total_time}"
+                self.log.write_finished(msg)
+
+        import gc #revisar o import dps
         gc.collect()
 
     def confirm_stop(self):
