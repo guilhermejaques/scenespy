@@ -1109,12 +1109,14 @@ class SceneCutterApp(ctk.CTk):
             self.log.clear_status()
             self.log.status_lines[0] = "Invalid paths!"
             self.log.write_status()
-
             return
 
         self.cleanup_process(reason="reset")
-        self.progress._enabled = True
 
+        if self.log:
+            self.log.clear_status()
+
+        self.progress._enabled = True
         self.running = True
 
         self.set_ui_state(True)
@@ -1178,8 +1180,9 @@ class SceneCutterApp(ctk.CTk):
         threading.Thread(target=self.run_engine, args=(scene_mode,), daemon=True).start()
 
     def stop_process(self):
-        if self.engine:
-            self.engine.stop()
+        if not self.engine:
+            return
+        self.engine.stop()
 
     def run_engine(self, scene_mode):
         result = False
@@ -1189,6 +1192,9 @@ class SceneCutterApp(ctk.CTk):
             print("Error:", e)
         finally:
             total_time = None
+            engine = self.engine
+            stopped = engine._stop if engine else False
+
             if result and self.engine:
                 total_time = self.engine.total_time()
 
@@ -1197,10 +1203,15 @@ class SceneCutterApp(ctk.CTk):
 
             self.after(
                 0,
-                lambda: self.reset_ui(finished=result, total_time=total_time)
+                lambda: self.reset_ui(
+                    finished=result,
+                    total_time=total_time,
+                    stopped=stopped
+                )
             )
 
-    def reset_ui(self, finished=False, total_time=None):
+    def reset_ui(self, finished=False, total_time=None, stopped=False):
+        self.stop_pending = False
         self.running = False
         self.start_btn.configure(
             text="Start",
@@ -1209,7 +1220,9 @@ class SceneCutterApp(ctk.CTk):
         )
         self.set_ui_state(False)
 
-        if finished:
+        if stopped:
+            self.cleanup_process(reason="stop")
+        elif finished:
             self.cleanup_process(reason="finish", total_time=total_time)
 
     def set_ui_state(self, disabled):
@@ -1224,7 +1237,9 @@ class SceneCutterApp(ctk.CTk):
             widget.configure(state=state)
 
         if self.cut_mode.get() == "interval":
-            self.interval_entry.configure(state=state)
+            self.interval_entry.configure(
+                state=state if self.cut_mode.get() == "interval" else "disabled"
+            )
 
         self.preview_switch.configure(state="disabled" if self.running else "normal")
 
@@ -1247,12 +1262,20 @@ class SceneCutterApp(ctk.CTk):
             if result and self.engine:
                 total_time = self.engine.total_time()
 
+            engine = self.engine
+            stopped = engine._stop if engine else False
             self.engine = None
+
             self.stop_pending = False
+
 
             self.after(
                 0,
-                lambda: self.reset_ui(finished=result, total_time=total_time)
+                lambda: self.reset_ui(
+                    finished=result,
+                    total_time=total_time,
+                    stopped=stopped
+                )
             )
 
     def update_accel_radios(self):
@@ -1297,6 +1320,8 @@ class SceneCutterApp(ctk.CTk):
         gc.collect()
 
     def confirm_stop(self):
+        if not self.running or self.engine is None:
+            return
         if self.stop_pending:
             return
 
@@ -1311,15 +1336,6 @@ class SceneCutterApp(ctk.CTk):
             return
 
         self.stop_pending = True
-        self.start_btn.configure(
-            text="Stopping...",
-            fg_color="#7f1d1d",
-            state="disabled"
-        )
-
-        # 🔥 CORTE IMEDIATO DO VISUAL
-        if self.progress:
-            self.progress.reset()
 
         self.after(50, self.stop_process)
 
