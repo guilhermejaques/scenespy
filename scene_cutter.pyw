@@ -608,7 +608,6 @@ class SceneEngine:
 
             duration = (end_frame - start_frame - 1) / fps
 
-
             cmd = [
                 "ffmpeg",
                 "-y",
@@ -700,7 +699,6 @@ class SceneEngine:
             return 18.0  # High
 
 
-
 class FaceDetectionEngine:
     def __init__(self, video, output, logbox=None, progressbar=None,
                  previewer=None, profile="Normal", accel="cpu", preview_enabled=True):
@@ -720,7 +718,6 @@ class FaceDetectionEngine:
         self.profile = profile
         self.accel = accel
         self.device = "cuda:0" if accel == "nvidia" and torch.cuda.is_available() else "cpu"
-
 
         self._stop = False
         self._start_time = None
@@ -749,7 +746,6 @@ class FaceDetectionEngine:
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5
         )
-
 
     def stop(self):
         self._stop = True
@@ -978,7 +974,6 @@ class SceneCutterApp(ctk.CTk):
         self.available_accel = detect_available_accel()
         self._build_ui()
 
-
     def _build_ui(self):
         # Left panel
         self.left = ctk.CTkFrame(self, width=300)
@@ -1020,11 +1015,15 @@ class SceneCutterApp(ctk.CTk):
                 if rb.cget("value") == "faces":
                     rb.configure(state="disabled")
 
+        vcmd = (self.register(self._validate_interval), "%P")
+
         self.interval_entry = ctk.CTkEntry(
             mode,
             width=90,
             corner_radius=15,
-            placeholder_text="Secounds"
+            placeholder_text="Seconds",
+            validate="key",
+            validatecommand=vcmd
         )
 
         profile = Section(self.left, "Detection Sensitivity")
@@ -1127,8 +1126,6 @@ class SceneCutterApp(ctk.CTk):
         mode = self.cut_mode.get()
         compat = MODE_ACCEL_COMPAT.get(mode, {})
 
-
-
         encoder_allowed = compat.get("encoder", {"cpu"}) & self.available_accel
         inference_allowed = compat.get("inference", {"cpu"}) & self.available_accel
 
@@ -1158,14 +1155,16 @@ class SceneCutterApp(ctk.CTk):
         scene_mode = mode == "scene"
 
         if mode == "interval":
-            try:
-                cfg["FIXED_INTERVAL"] = float(self.interval_entry.get())
-            except ValueError:
+            value = self.interval_entry.get()
+
+            if not value:
                 self.log.clear_status()
-                self.log.status_lines[0] = "Invalid interval!"
+                self.log.status_lines[0] = "Interval cannot be empty!"
                 self.log.write_status()
                 self.reset_ui()
                 return
+
+            cfg["FIXED_INTERVAL"] = int(value)
 
         self.engine = SceneEngine(
                 video,
@@ -1245,6 +1244,7 @@ class SceneCutterApp(ctk.CTk):
 
     def _on_cut_mode_change(self, *args):
         if self.cut_mode.get() == "interval":
+            self.interval_entry.configure(state="normal")
             self.interval_entry.pack(anchor="n", padx=24, pady=(0, 6))
         else:
             self.interval_entry.pack_forget()
@@ -1339,6 +1339,16 @@ class SceneCutterApp(ctk.CTk):
 
         self.after(50, self.stop_process)
 
+    def _validate_interval(self, value: str) -> bool:
+        if value == "":
+            return True
+
+        if not value.isdigit():
+            return False
+
+        v = int(value)
+        return 1 <= v <= 18000
+
 
 def single_instance():
     global INSTANCE_SOCKET
@@ -1350,8 +1360,6 @@ def single_instance():
     except OSError:
         return False
     return True
-
-
 
 
 # Main
