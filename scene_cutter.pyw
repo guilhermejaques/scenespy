@@ -842,7 +842,7 @@ class FaceDetectionEngine:
                 frame,
                 conf=self.profile_cfg["conf"],
                 iou=0.45,
-                imgsz=800,
+                imgsz=640 if frame.shape[1] <= 1280 else 800,
                 device=self.device,
                 half=use_cuda,
                 verbose=False
@@ -851,7 +851,7 @@ class FaceDetectionEngine:
             new_tracks = []
 
             for box in results.boxes.xyxy:
-                box = box.squeeze()  # garante 1D
+                box = box.squeeze()
                 x1, y1, x2, y2 = map(int, box.tolist())
 
                 w, h = x2 - x1, y2 - y1
