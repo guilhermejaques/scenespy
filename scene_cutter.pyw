@@ -732,16 +732,37 @@ class FaceDetectionEngine:
         self.model = YOLO(model_path)
 
         self.profile_cfg = {
-            "Low":    {"conf": 0.45, "min_size": 56, "ttl": 0.6},
-            "Normal": {"conf": 0.35, "min_size": 40, "ttl": 1.2},
-            "High":   {"conf": 0.25, "min_size": 32, "ttl": 2.0},
+            "Low": {
+                "conf": 0.45,
+                "min_size": 64,
+                "ttl": 0.6,
+                "min_frames": 0.8,
+                "min_valid_ratio": 0.75,
+                "min_sharpness": 60
+            },
+            "Normal": {
+                "conf": 0.35,
+                "min_size": 40,
+                "ttl": 1.2,
+                "min_frames": 0.5,
+                "min_valid_ratio": 0.6,
+                "min_sharpness": 40
+            },
+            "High": {
+                "conf": 0.22,
+                "min_size": 28,
+                "ttl": 2.0,
+                "min_frames": 0.25,
+                "min_valid_ratio": 0.35,
+                "min_sharpness": 20
+            }
         }[profile]
 
         self.last_preview = 0
 
         self.mp_face = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=False,
-            max_num_faces=1,
+            max_num_faces=2,
             refine_landmarks=True,
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5
@@ -824,6 +845,7 @@ class FaceDetectionEngine:
 
         frame_idx = 0
         track_id = 0
+        min_lm_frames = 3 if self.profile != "High" else 1
 
         while cap.isOpened():
             if self._stop:
@@ -837,11 +859,12 @@ class FaceDetectionEngine:
 
             use_cuda = self.device.startswith("cuda")
 
+            iou = 0.45 if self.profile != "High" else 0.35
 
             results = self.model.predict(
                 frame,
                 conf=self.profile_cfg["conf"],
-                iou=0.45,
+                iou=iou,
                 imgsz=640 if frame.shape[1] <= 1280 else 800,
                 device=self.device,
                 half=use_cuda,
@@ -851,7 +874,7 @@ class FaceDetectionEngine:
             new_tracks = []
 
             for box in results.boxes.xyxy:
-                box = box.squeeze()
+                box = box.squeeze()  # garante 1D
                 x1, y1, x2, y2 = map(int, box.tolist())
 
                 w, h = x2 - x1, y2 - y1
@@ -864,13 +887,15 @@ class FaceDetectionEngine:
                     continue
 
                 face = frame[y1:y2, x1:x2]
-                if face.size == 0 or self._skin_ratio(face) < 0.15:
+                skin_min = 0.15 if self.profile != "High" else 0.08
+
+                if face.size == 0 or self._skin_ratio(face) < skin_min:
                     continue
 
                 matched = False
 
                 for t in tracks:
-                    if self._iou(t["box"], (x1, y1, x2, y2)) > 0.35:
+                    if self._iou(t["box"], (x1, y1, x2, y2)) > iou:
                         t["box"] = (x1, y1, x2, y2)
                         t["ttl"] = ttl_frames
                         t["frames"] += 1
@@ -880,15 +905,16 @@ class FaceDetectionEngine:
                             t["score"] = sharp
                             t["face"] = face.copy()
 
-                        if t["frames"] >= 3 and self._valid_landmarks(face):
-                            t["valid"] += 1
+                        if t["frames"] >= min_lm_frames and self._valid_landmarks(face):
+                            t["valid"] = min(t["valid"] + 1, t["frames"])
+
+
 
                         matched = True
                         break
 
                 if not matched:
                     track_id += 1
-                    self.detected += 1
 
                     new_tracks.append({
                         "id": track_id,
@@ -903,15 +929,22 @@ class FaceDetectionEngine:
             for t in tracks:
                 t["ttl"] -= 1
                 if t["ttl"] <= 0:
+                    cfg = self.profile_cfg
+                    min_required = max(3, int(fps * cfg["min_frames"]))
+
                     if (
-                        t["frames"] >= fps * 0.5 and
-                        (t["valid"] / max(t["frames"], 1)) >= 0.6 and
-                        t["score"] > 40
+                        t["frames"] >= min_required and
+                        (t["valid"] / max(t["frames"], 1)) >= cfg["min_valid_ratio"] and
+                        t["score"] >= cfg["min_sharpness"]
                     ):
-                        self.done += 1
-                        fname = f"face_{self.done:04d}.png"
-                        cv2.imwrite(os.path.join(outdir, fname), t["face"])
-                        writer.writerow([fname, t["id"]])
+                        fname = f"face_{self.done + 1:04d}.png"
+                        path = os.path.join(outdir, fname)
+
+                        if cv2.imwrite(path, t["face"]):
+                            self.done += 1
+                            self.detected += 1
+                            writer.writerow([fname, t["id"]])
+
 
             tracks = [t for t in tracks if t["ttl"] > 0] + new_tracks
 
@@ -941,6 +974,24 @@ class FaceDetectionEngine:
                 ratio = max(self._face_ratio, ratio)  # impede regressão
                 self._face_ratio = ratio
                 self.progress.update(ratio)
+
+
+        for t in tracks:
+            cfg = self.profile_cfg
+            min_required = max(3, int(fps * cfg["min_frames"]))
+
+            if (
+                t["frames"] >= min_required and
+                (t["valid"] / max(t["frames"], 1)) >= cfg["min_valid_ratio"] and
+                t["score"] >= cfg["min_sharpness"]
+            ):
+                fname = f"face_{self.done + 1:04d}.png"
+                path = os.path.join(outdir, fname)
+
+                if cv2.imwrite(path, t["face"]):
+                    self.done += 1
+                    self.detected += 1
+                    writer.writerow([fname, t["id"]])
 
         csv_file.close()
         cap.release()
