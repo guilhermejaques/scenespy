@@ -753,7 +753,7 @@ class FaceDetectionEngine:
                 "min_size": 28,
                 "ttl": 2.0,
                 "min_frames": 0.25,
-                "min_valid_ratio": 0.35,
+                "min_valid_ratio": 0.30,
                 "min_sharpness": 20
             }
         }[profile]
@@ -845,7 +845,7 @@ class FaceDetectionEngine:
 
         frame_idx = 0
         track_id = 0
-        min_lm_frames = 3 if self.profile != "High" else 1
+        min_lm_frames = 2
 
         while cap.isOpened():
             if self._stop:
@@ -859,7 +859,7 @@ class FaceDetectionEngine:
 
             use_cuda = self.device.startswith("cuda")
 
-            iou = 0.45 if self.profile != "High" else 0.35
+            iou = 0.45
 
             results = self.model.predict(
                 frame,
@@ -887,7 +887,7 @@ class FaceDetectionEngine:
                     continue
 
                 face = frame[y1:y2, x1:x2]
-                skin_min = 0.15 if self.profile != "High" else 0.08
+                skin_min = 0.12 if self.profile != "High" else 0.10
 
                 if face.size == 0 or self._skin_ratio(face) < skin_min:
                     continue
