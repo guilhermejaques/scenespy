@@ -7,7 +7,6 @@ import datetime
 import customtkinter as ctk
 import av
 import cv2
-import csv
 import os
 import mediapipe as mp
 import signal
@@ -60,6 +59,11 @@ MODE_ACCEL_COMPAT = {
     },
 }
 
+MODE_ABBREV = {
+    "faces": "FD",
+    "scene": "SD",
+    "interval": "ES",
+}
 
 def detect_available_accel():
     available = {"cpu"}
@@ -81,7 +85,13 @@ def detect_available_accel():
 
     return available
 
-
+def build_output_dir(base_output, mode, profile, accel):
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    mode_tag = MODE_ABBREV.get(mode, mode.upper())
+    name = f"{mode_tag}_{ts}_{profile}_{accel}"
+    path = os.path.join(base_output, name)
+    os.makedirs(path, exist_ok=True)
+    return path
 
 def test_ffmpeg_encoder(encoder: str) -> bool:
     try:
@@ -441,6 +451,7 @@ class SceneEngine:
         return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
     def run(self, scene_mode=True):
+        self.scene_mode = scene_mode
         self._analysis_ratio = 0.0
         self._start_time = time.time()
         self._end_time = None
@@ -575,11 +586,12 @@ class SceneEngine:
         return scenes
 
     def _cut_scenes(self, scenes):
-        outdir = os.path.join(
+        outdir = build_output_dir(
             self.output,
-            datetime.datetime.now().strftime("scenes_%Y%m%d_%H%M%S")
+            mode="scene" if self.scene_mode else "interval",
+            profile=self.cfg.get("label", "NA"),
+            accel=self.cfg.get("ENCODER", "cpu")
         )
-        os.makedirs(outdir, exist_ok=True)
 
         self.total, self.done = len(scenes), 0
         encoder = self.cfg.get("ENCODER", "cpu")
@@ -750,10 +762,10 @@ class FaceDetectionEngine:
             },
             "High": {
                 "conf": 0.22,
-                "min_size": 28,
-                "ttl": 2.0,
+                "min_size": 24,
+                "ttl": 2.5,
                 "min_frames": 0.25,
-                "min_valid_ratio": 0.30,
+                "min_valid_ratio": 0.35,
                 "min_sharpness": 20
             }
         }[profile]
@@ -811,7 +823,7 @@ class FaceDetectionEngine:
         if not (left_eye.y < nose.y < mouth.y):
             return False
 
-        if abs(left_eye.x - right_eye.x) < 0.030:
+        if abs(left_eye.x - right_eye.x) < (0.020 if self.profile == "High" else 0.030):
             return False
 
         return True
@@ -832,20 +844,16 @@ class FaceDetectionEngine:
         ttl_frames = int(fps * self.profile_cfg["ttl"])
         tracks = []
 
-        outdir = os.path.join(
+        outdir = build_output_dir(
             self.output,
-            datetime.datetime.now().strftime("faces_%Y%m%d_%H%M%S")
+            mode="faces",
+            profile=self.profile,
+            accel=self.accel
         )
-        os.makedirs(outdir, exist_ok=True)
-
-        csv_path = os.path.join(outdir, "faces.csv")
-        csv_file = open(csv_path, "w", newline="")
-        writer = csv.writer(csv_file)
-        writer.writerow(["file", "track_id"])
 
         frame_idx = 0
         track_id = 0
-        min_lm_frames = 2
+        min_lm_frames = 1 if self.profile == "High" else 2
 
         while cap.isOpened():
             if self._stop:
@@ -877,6 +885,7 @@ class FaceDetectionEngine:
                 box = box.squeeze()  # garante 1D
                 x1, y1, x2, y2 = map(int, box.tolist())
 
+                face_raw = frame[y1:y2, x1:x2]
                 w, h = x2 - x1, y2 - y1
 
                 if w < self.profile_cfg["min_size"] or h < self.profile_cfg["min_size"]:
@@ -888,19 +897,21 @@ class FaceDetectionEngine:
 
                 h_frame, w_frame, _ = frame.shape
 
-                expand_x = int((x2 - x1) * 0.1)  # 15% lateral (perfil)
-                expand_y_top = int((y2 - y1) * 0.1)  # 35% para cima (cabelo)
-                expand_y_bot = int((y2 - y1) * 0.1)  # 10% para baixo
+                expand_x = int((x2 - x1) * 0.15)  # 15% lateral (perfil)
+                expand_y_top = int((y2 - y1) * 0.15)  # 35% para cima (cabelo)
+                expand_y_bot = int((y2 - y1) * 0.15)  # 10% para baixo
 
                 cx1 = max(0, x1 - expand_x)
                 cy1 = max(0, y1 - expand_y_top)
                 cx2 = min(w_frame, x2 + expand_x)
                 cy2 = min(h_frame, y2 + expand_y_bot)
 
-                face = frame[cy1:cy2, cx1:cx2]#
-                skin_min = 0.12 if self.profile != "High" else 0.10
 
-                if face.size == 0 or self._skin_ratio(face) < skin_min:
+                skin_min = 0.12 if self.profile != "High" else 0.10
+                face_crop = frame[cy1:cy2, cx1:cx2]
+
+
+                if face_raw.size == 0 or self._skin_ratio(face_raw) < skin_min:
                     continue
 
                 matched = False
@@ -911,12 +922,22 @@ class FaceDetectionEngine:
                         t["ttl"] = ttl_frames
                         t["frames"] += 1
 
-                        sharp = cv2.Laplacian(face, cv2.CV_64F).var()
+                        h, w = face_raw.shape[:2]
+                        cx1 = int(w * 0.25)
+                        cx2 = int(w * 0.75)
+                        cy1 = int(h * 0.25)
+                        cy2 = int(h * 0.75)
+
+                        center_face = face_raw[cy1:cy2, cx1:cx2]
+                        if center_face.size == 0:
+                            center_face = face_raw
+
+                        sharp = cv2.Laplacian(center_face, cv2.CV_64F).var()
                         if sharp > t["score"]:
                             t["score"] = sharp
-                            t["face"] = face.copy()
+                            t["face"] = face_crop.copy()
 
-                        if t["frames"] >= min_lm_frames and self._valid_landmarks(face):
+                        if t["frames"] >= min_lm_frames and self._valid_landmarks(face_raw):
                             t["valid"] = min(t["valid"] + 1, t["frames"])
 
 
@@ -927,6 +948,15 @@ class FaceDetectionEngine:
                 if not matched:
                     track_id += 1
 
+                    h, w = face_raw.shape[:2]
+                    cx1 = int(w * 0.25)
+                    cx2 = int(w * 0.75)
+                    cy1 = int(h * 0.25)
+                    cy2 = int(h * 0.75)
+
+                    center_face = face_raw[cy1:cy2, cx1:cx2]
+                    if center_face.size == 0:
+                        center_face = face_raw
 
                     new_tracks.append({
                         "id": track_id,
@@ -934,8 +964,8 @@ class FaceDetectionEngine:
                         "ttl": ttl_frames,
                         "frames": 1,
                         "valid": 0,
-                        "score": cv2.Laplacian(face, cv2.CV_64F).var(),
-                        "face": face.copy()
+                        "score": cv2.Laplacian(center_face, cv2.CV_64F).var(),
+                        "face": face_crop.copy()
                     })
 
             for t in tracks:
@@ -955,7 +985,6 @@ class FaceDetectionEngine:
                         if cv2.imwrite(path, t["face"]):
                             self.done += 1
                             self.detected += 1
-                            writer.writerow([fname, t["id"]])
 
 
             tracks = [t for t in tracks if t["ttl"] > 0] + new_tracks
@@ -1003,9 +1032,9 @@ class FaceDetectionEngine:
                 if cv2.imwrite(path, t["face"]):
                     self.done += 1
                     self.detected += 1
-                    writer.writerow([fname, t["id"]])
 
-        csv_file.close()
+
+
         cap.release()
         self._end_time = time.time()
 
