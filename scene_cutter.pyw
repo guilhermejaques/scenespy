@@ -811,7 +811,7 @@ class FaceDetectionEngine:
         if not (left_eye.y < nose.y < mouth.y):
             return False
 
-        if abs(left_eye.x - right_eye.x) < 0.035:
+        if abs(left_eye.x - right_eye.x) < 0.030:
             return False
 
         return True
@@ -886,7 +886,18 @@ class FaceDetectionEngine:
                 if not (0.65 <= aspect <= 1.35):
                     continue
 
-                face = frame[y1:y2, x1:x2]
+                h_frame, w_frame, _ = frame.shape
+
+                expand_x = int((x2 - x1) * 0.1)  # 15% lateral (perfil)
+                expand_y_top = int((y2 - y1) * 0.1)  # 35% para cima (cabelo)
+                expand_y_bot = int((y2 - y1) * 0.1)  # 10% para baixo
+
+                cx1 = max(0, x1 - expand_x)
+                cy1 = max(0, y1 - expand_y_top)
+                cx2 = min(w_frame, x2 + expand_x)
+                cy2 = min(h_frame, y2 + expand_y_bot)
+
+                face = frame[cy1:cy2, cx1:cx2]#
                 skin_min = 0.12 if self.profile != "High" else 0.10
 
                 if face.size == 0 or self._skin_ratio(face) < skin_min:
@@ -915,6 +926,7 @@ class FaceDetectionEngine:
 
                 if not matched:
                     track_id += 1
+
 
                     new_tracks.append({
                         "id": track_id,
