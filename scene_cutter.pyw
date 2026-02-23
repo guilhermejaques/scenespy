@@ -8,10 +8,9 @@ import customtkinter as ctk
 import av
 import cv2
 import os
+import gc
 import mediapipe as mp
 import signal
-import statistics
-from collections import deque
 from PIL import Image
 from ultralytics import YOLO
 
@@ -332,20 +331,24 @@ class FileSelector(ctk.CTkFrame):
 
         self.entry = ctk.CTkEntry(row, width=width, corner_radius=2)
         self.entry.pack(side="left", fill="x", expand=True)
-        self.entry.configure(state="disabled")
 
-        self.button = ctk.CTkButton(row, text="...", width=30, command=self.select,
-                                    corner_radius=5, fg_color="gray25", hover_color="gray35")
+        self.button = ctk.CTkButton(
+            row,
+            text="...",
+            width=30,
+            command=self.select,
+            corner_radius=5,
+            fg_color="gray25",
+            hover_color="gray35"
+        )
         self.button.pack(side="right", padx=(6, 0))
 
     def select(self):
         import tkinter.filedialog as fd
         path = fd.askopenfilename()
         if path:
-            self.entry.configure(state="normal")
             self.entry.delete(0, "end")
             self.entry.insert(0, path)
-            self.entry.configure(state="disabled")
 
     def get(self):
         return self.entry.get()
@@ -356,10 +359,8 @@ class DirectorySelector(FileSelector):
         import tkinter.filedialog as fd
         path = fd.askdirectory()
         if path:
-            self.entry.configure(state="normal")
             self.entry.delete(0, "end")
             self.entry.insert(0, path)
-            self.entry.configure(state="disabled")
 
 
 class RadioGroup(ctk.CTkFrame):
@@ -1318,6 +1319,7 @@ class SceneCutterApp(ctk.CTk):
 
     def set_ui_state(self, disabled):
         state = "disabled" if disabled else "normal"
+
         for widget in [
             self.video_selector.button,
             self.output_selector.button,
@@ -1327,12 +1329,18 @@ class SceneCutterApp(ctk.CTk):
         ]:
             widget.configure(state=state)
 
+        self.video_selector.entry.configure(state=state)
+        self.output_selector.entry.configure(state=state)
+
         if self.cut_mode.get() == "interval":
             self.interval_entry.configure(
-                state=state if self.cut_mode.get() == "interval" else "disabled"
+                state=state if disabled else "normal"
             )
 
-        self.preview_switch.configure(state="disabled" if self.running else "normal")
+        # Preview switch
+        self.preview_switch.configure(
+            state="disabled" if self.running else "normal"
+        )
 
     def _on_cut_mode_change(self, *args):
         if self.cut_mode.get() == "interval":
@@ -1408,7 +1416,6 @@ class SceneCutterApp(ctk.CTk):
                     msg += f" {total_time}"
                 self.log.write_finished(msg)
 
-        import gc #revisar o import dps
         gc.collect()
 
     def confirm_stop(self):
