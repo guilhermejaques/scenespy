@@ -41,7 +41,8 @@ PREVIEW_INTERVAL = 0.15
 PREVIEW_FPS = 1
 INSTANCE_SOCKET = None
 INSTANCE_PORT = 54321
-
+PREVIEW_MAX_WIDTH = 420
+PREVIEW_MAX_HEIGHT = 240
 
 MODE_ACCEL_COMPAT = {
     "scene": {
@@ -58,11 +59,33 @@ MODE_ACCEL_COMPAT = {
     },
 }
 
+ALLOWED_VIDEO_EXTENSIONS = {
+    ".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"
+}
+
+
 MODE_ABBREV = {
     "faces": "FD",
     "scene": "SD",
     "interval": "ES",
 }
+
+
+# Paleta base
+BG_MAIN = "#1a1a1a"        # fundo geral
+BG_PANEL = "#313131"      # painéis
+BG_CARD = "#404040"       # seções internas
+BG_INPUT = "#1a1a1a"      # entradas
+
+BORDER_SOFT = "#787474"   # bordas finas
+BORDER_SOFT2 = "#4C4848"
+TEXT_MAIN = "#e5e7eb"
+TEXT_MUTED = "#9ca3af"
+
+ACCENT = "#6366f1"        # roxo/índigo moderno
+SUCCESS = "#22c55e"
+DANGER = "#ef4444"
+
 
 def detect_available_accel():
     available = {"cpu"}
@@ -133,7 +156,13 @@ def _safe_frame_index(v):
 # Widgets
 class Section(ctk.CTkFrame):
     def __init__(self, master, title, **kwargs):
-        super().__init__(master, fg_color="gray17", corner_radius=5, **kwargs)
+        super().__init__(
+            master,
+            fg_color=BG_CARD,
+            border_width=1,
+            border_color=BORDER_SOFT2,
+            corner_radius=5
+        )
         ctk.CTkLabel(
             self, text=title, font=("Consolas", 14, "bold")).pack(anchor="w", padx=12, pady=(8, 4))
 
@@ -142,7 +171,16 @@ class LabeledEntry(ctk.CTkFrame):
     def __init__(self, master, label, placeholder="", width=160):
         super().__init__(master, fg_color="transparent")
         ctk.CTkLabel(self, text=label, font=("Consolas", 12)).pack(anchor="w")
-        self.entry = ctk.CTkEntry(self, placeholder_text=placeholder, width=width)
+        self.entry = ctk.CTkEntry(
+            width=width,
+            corner_radius=5,
+            fg_color=BG_INPUT,
+            border_width=1,
+            border_color=BORDER_SOFT,
+            text_color=TEXT_MAIN,
+            placeholder_text_color=TEXT_MUTED,
+            placeholder_text = placeholder
+        )
         self.entry.pack(pady=(2, 8), fill="x")
 
     def get(self):
@@ -176,7 +214,7 @@ class LogBox(ctk.CTkTextbox):
 
     def clear_status(self):
         self.status_lines = [
-            "Initializing process...",
+            "Processing...",
             "",
             "",
             "",
@@ -298,7 +336,13 @@ class ProgressBar(ctk.CTkFrame):
 
 class PreviewFrame(ctk.CTkFrame):
     def __init__(self, master):
-        super().__init__(master, fg_color="gray25", corner_radius=3)
+        super().__init__(
+            master,
+            fg_color=BG_CARD,
+            border_width=1,
+            border_color=BORDER_SOFT,
+            corner_radius=5
+        )
         self.info_label = ctk.CTkLabel(self, text="", font=("Consolas", 10))
         self.info_label.pack(anchor="n", pady=4)
         self.label = ctk.CTkLabel(self, text="")
@@ -306,6 +350,11 @@ class PreviewFrame(ctk.CTkFrame):
         self._img_ref = None
 
     def update_image(self, image):
+        if not image:
+            return
+        w, h = image.size
+        if w > PREVIEW_MAX_WIDTH or h > PREVIEW_MAX_HEIGHT:
+            return
         self._img_ref = ctk.CTkImage(light_image=image, size=image.size)
         self.label.configure(image=self._img_ref)
 
@@ -329,17 +378,29 @@ class FileSelector(ctk.CTkFrame):
         row = ctk.CTkFrame(self, fg_color="transparent")
         row.pack(fill="x", pady=(4, 8))
 
-        self.entry = ctk.CTkEntry(row, width=width, corner_radius=2)
+        self.entry = ctk.CTkEntry(
+            row,
+            width=width,
+            corner_radius=5,
+            fg_color=BG_INPUT,
+            border_width=1,
+            border_color=BORDER_SOFT,
+            text_color=TEXT_MAIN,
+            placeholder_text_color=TEXT_MUTED
+        )
         self.entry.pack(side="left", fill="x", expand=True)
 
         self.button = ctk.CTkButton(
             row,
-            text="...",
-            width=30,
-            command=self.select,
+            text="…",
+            width=32,
             corner_radius=5,
-            fg_color="gray25",
-            hover_color="gray35"
+            fg_color=BG_CARD,
+            hover_color="#1e2444",
+            border_width=1,
+            border_color=BORDER_SOFT,
+            text_color=TEXT_MUTED,
+            command=self.select
         )
         self.button.pack(side="right", padx=(6, 0))
 
@@ -435,12 +496,13 @@ class SceneEngine:
                 pass
             self._ffmpeg_proc = None
 
-        if self._thumb_container:
-            try:
+        try:
+            if self._thumb_container:
                 self._thumb_container.close()
-            except Exception:
-                pass
-            self._thumb_container = None
+        except Exception:
+            pass
+
+        self._thumb_container = None
 
     def total_time(self):
         if not self._start_time:
@@ -516,7 +578,7 @@ class SceneEngine:
 
         def _progress_cb(frame_num, _):
             if self._stop:
-                raise RuntimeError("Scene detection stopped")
+                return
 
             if not self.progress:
                 return
@@ -538,17 +600,22 @@ class SceneEngine:
                 video=video,
                 callback=_progress_cb
             )
-        except RuntimeError:
-            return []
 
-        scene_list = scene_manager.get_scene_list()
+            if self._stop:
+                return []
 
+            scene_list = scene_manager.get_scene_list()
+            video_seconds = video.duration.get_seconds()
+        finally:
+            try:
+                video.close()
+            except Exception:
+                pass
 
         if not scene_list:
-            total_frames = int(video.duration.get_seconds() * fps)
+            total_frames = int(video_seconds * fps)
             self.detected = 1
             return [(0, total_frames)]
-
 
         scenes = []
         for start, end in scene_list:
@@ -619,19 +686,28 @@ class SceneEngine:
             start_time = start_frame / fps
             end_time = end_frame / fps
 
-            duration = (end_frame - start_frame - 1) / fps
-
+            duration = max((end_frame - start_frame) / fps, 0.01)
+            outfile = os.path.join(outdir, f"scene_{idx:04d}.mp4")
             cmd = [
                 "ffmpeg",
                 "-y",
-                "-i", self.video,
                 "-ss", f"{start_time:.6f}",
+                "-i", self.video,
                 "-t", f"{duration:.6f}",
-                "-avoid_negative_ts", "make_zero",
+                "-ss", "0",
+                "-map", "0:v:0",
+                "-map", "0:a?",
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-preset", "veryfast",
+                "-g", str(int(fps * 2)),
+                "-keyint_min", str(int(fps * 2)),
+                "-sc_threshold", "0",
+                "-force_key_frames", "expr:gte(t,0)",
+                "-reset_timestamps", "1",
+                outfile
             ]
 
-            outfile = os.path.join(outdir, f"scene_{idx:04d}.mp4")
-            cmd.append(outfile)
             self._ffmpeg_proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
@@ -659,16 +735,43 @@ class SceneEngine:
         if self.progress and not self._stop and self.done == self.total:
             self.progress.mark_finished()
 
+        if self._thumb_container:
+            try:
+                self._thumb_container.close()
+            except Exception:
+                pass
+            self._thumb_container = None
+
     def _generate_thumbnail(self, timestamp):
         try:
-            if self._thumb_container is None:
-                self._thumb_container = av.open(self.video)
+            if self._thumb_container:
+                try:
+                    self._thumb_container.close()
+                except Exception:
+                    pass
 
-            self._thumb_container.seek(int(timestamp * av.time_base), any_frame=True)
+            self._thumb_container = av.open(self.video)
+
+            stream = self._thumb_container.streams.video[0]
+            time_base = float(stream.time_base)
+
+            target_pts = int(timestamp / time_base)
+
+            self._thumb_container.seek(
+                target_pts,
+                backward=True,
+                any_frame=True
+            )
+
             for frame in self._thumb_container.decode(video=0):
-                img = frame.to_image()
-                img = img.resize((420, int(420 * frame.height / frame.width)))
-                return img
+                if frame.pts is None:
+                    continue
+
+                if frame.pts >= target_pts:
+                    img = frame.to_image()
+                    img = resize_for_preview(img)
+                    return img
+
         except Exception:
             return None
 
@@ -994,15 +1097,18 @@ class FaceDetectionEngine:
                 now = time.time()
                 if now - self.last_preview >= PREVIEW_INTERVAL:
                     draw = frame.copy()
+                    h, w, _ = draw.shape
+
                     for t in tracks:
                         x1, y1, x2, y2 = t["box"]
                         cv2.rectangle(draw, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-                    h, w, _ = draw.shape
-                    draw = cv2.resize(draw, (420, int(420 * h / w)))
                     img = Image.fromarray(cv2.cvtColor(draw, cv2.COLOR_BGR2RGB))
-                    self.previewer.update_image(img)
-                    self.last_preview = now
+                    img = resize_for_preview(img)
+
+                    if img:
+                        self.previewer.update_image(img)
+                        self.last_preview = now
 
             if self.log:
                 self.log.write_status(
@@ -1069,7 +1175,14 @@ class SceneCutterApp(ctk.CTk):
 
     def _build_ui(self):
         # Left panel
-        self.left = ctk.CTkFrame(self, width=300)
+        self.left = ctk.CTkFrame(
+            self,
+            width=300,
+            fg_color=BG_PANEL,
+            border_width=1,
+            border_color=BORDER_SOFT2,
+            corner_radius=0
+        )
         self.left.pack(side="left", fill="y", padx=10, pady=10)
 
         files = Section(self.left, "Files")
@@ -1113,7 +1226,7 @@ class SceneCutterApp(ctk.CTk):
         self.interval_entry = ctk.CTkEntry(
             mode,
             width=90,
-            corner_radius=15,
+            corner_radius=5,
             placeholder_text="Seconds",
             validate="key",
             validatecommand=vcmd
@@ -1152,14 +1265,29 @@ class SceneCutterApp(ctk.CTk):
         self.accel_radios = group.radios
         self.update_accel_radios()
 
-        self.start_btn = ctk.CTkButton(self.left, text="Start", command=self.toggle_start, corner_radius=50, fg_color="#67679C")
+        self.start_btn = ctk.CTkButton(
+            self.left,
+            text="Start",
+            corner_radius=5,
+            fg_color=ACCENT,
+            hover_color="#4f46e5",
+            text_color="white",
+            command=self.toggle_start
+        )
         self.start_btn.pack(pady=20)
 
         self.log = LogBox(self.left, height=220)
         self.log.pack(fill="x", padx=10, pady=10)
 
         # Right panel
-        self.right = ctk.CTkFrame(self)
+        self.right = ctk.CTkFrame(
+            self,
+            width=300,
+            fg_color=BG_PANEL,
+            border_width=1,
+            border_color=BORDER_SOFT2,
+            corner_radius=0
+        )
         self.right.pack(side="right", fill="both", expand=True, padx=10, pady=10)
 
         section = Section(self.right, "Preview")
@@ -1195,11 +1323,24 @@ class SceneCutterApp(ctk.CTk):
 
     def start_process(self):
         video = self.video_selector.get()
+        ext = os.path.splitext(video)[1].lower()
         output = self.output_selector.get()
+
+        if ext not in ALLOWED_VIDEO_EXTENSIONS:
+            self.log.clear_status()
+            self.log.status_lines[0] = "Unsupported file type"
+            self.log.write_status()
+            return
 
         if not os.path.isfile(video) or not os.path.isdir(output):
             self.log.clear_status()
             self.log.status_lines[0] = "Invalid paths!"
+            self.log.write_status()
+            return
+
+        if not is_valid_video_file(video):
+            self.log.clear_status()
+            self.log.status_lines[0] = "Invalid or unsupported video file"
             self.log.write_status()
             return
 
@@ -1212,7 +1353,7 @@ class SceneCutterApp(ctk.CTk):
         self.running = True
 
         self.set_ui_state(True)
-        self.start_btn.configure(text="Stop", fg_color="#dc2626")
+        self.start_btn.configure(text="Stop", fg_color=DANGER, hover_color="#dc2626")
 
         cfg = PROFILES[self.profile.get()].copy()
         requested = self.accel.get()
@@ -1448,6 +1589,50 @@ class SceneCutterApp(ctk.CTk):
         v = int(value)
         return 1 <= v <= 18000
 
+def resize_for_preview(img, max_w=PREVIEW_MAX_WIDTH, max_h=PREVIEW_MAX_HEIGHT):
+    w, h = img.size
+
+    if w <= 0 or h <= 0:
+        return None
+
+    scale = min(max_w / w, max_h / h)
+
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+
+    return img.resize((new_w, new_h), Image.BILINEAR)
+
+
+def is_valid_video_file(path: str) -> bool:
+    try:
+        cmd = [
+            "ffprobe",
+            "-v", "error",
+            "-show_streams",
+            "-select_streams", "v",
+            "-of", "json",
+            path
+        ]
+
+        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL)
+        import json
+        data = json.loads(out)
+
+        streams = data.get("streams", [])
+        if not streams:
+            return False
+
+        for s in streams:
+            if s.get("codec_type") == "video":
+                codec = s.get("codec_name", "").lower()
+                if codec != "gif":
+                    return True
+
+        return False
+
+    except Exception:
+        return False
+
 
 def single_instance():
     global INSTANCE_SOCKET
@@ -1459,7 +1644,6 @@ def single_instance():
     except OSError:
         return False
     return True
-
 
 # Main
 if __name__ == "__main__":
