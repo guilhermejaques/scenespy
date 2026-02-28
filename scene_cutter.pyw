@@ -161,7 +161,7 @@ class Section(ctk.CTkFrame):
             fg_color=BG_CARD,
             border_width=1,
             border_color=BORDER_SOFT2,
-            corner_radius=5
+            corner_radius=7
         )
         ctk.CTkLabel(
             self, text=title, font=("Consolas", 14, "bold")).pack(anchor="w", padx=12, pady=(8, 4))
@@ -173,7 +173,7 @@ class LabeledEntry(ctk.CTkFrame):
         ctk.CTkLabel(self, text=label, font=("Consolas", 12)).pack(anchor="w")
         self.entry = ctk.CTkEntry(
             width=width,
-            corner_radius=5,
+            corner_radius=7,
             fg_color=BG_INPUT,
             border_width=1,
             border_color=BORDER_SOFT,
@@ -189,8 +189,8 @@ class LabeledEntry(ctk.CTkFrame):
 
 class LogBox(ctk.CTkTextbox):
     def __init__(self, master, height=140):
-        super().__init__(master, height=height, fg_color="#0f0f14", corner_radius=3)
-        self.configure(state="disabled", font=("Consolas", 11))
+        super().__init__(master, height=height, fg_color=BG_MAIN, corner_radius=7, border_color=BORDER_SOFT2, border_width=1)
+        self.configure(state="disabled", font=("Consolas", 12))
 
         self.status_lines = [
             "",
@@ -257,12 +257,10 @@ class ProgressBar(ctk.CTkFrame):
 
         self._normal_color = self.bar.cget("progress_color")
 
-        # 🔒 estado lógico
         self._logical_value = 0.0      # valor real recebido
         self._visual_value = 0.0       # valor exibido
         self._animating = False
 
-        # ⚙️ parâmetros de animação
         self._speed = 0.008  # menor = mais suave, maior = mais rápido
 
     def update(self, value):
@@ -338,10 +336,10 @@ class PreviewFrame(ctk.CTkFrame):
     def __init__(self, master):
         super().__init__(
             master,
-            fg_color=BG_CARD,
+            fg_color=BG_MAIN,
             border_width=1,
-            border_color=BORDER_SOFT,
-            corner_radius=5
+            border_color=BORDER_SOFT2,
+            corner_radius=7
         )
         self.info_label = ctk.CTkLabel(self, text="", font=("Consolas", 10))
         self.info_label.pack(anchor="n", pady=4)
@@ -381,11 +379,11 @@ class FileSelector(ctk.CTkFrame):
         self.entry = ctk.CTkEntry(
             row,
             width=width,
-            corner_radius=5,
-            fg_color=BG_INPUT,
+            corner_radius=7,
+            fg_color=BG_MAIN,
             border_width=1,
             border_color=BORDER_SOFT,
-            text_color=TEXT_MAIN,
+            text_color="#e6e6e6",
             placeholder_text_color=TEXT_MUTED
         )
         self.entry.pack(side="left", fill="x", expand=True)
@@ -393,10 +391,10 @@ class FileSelector(ctk.CTkFrame):
         self.button = ctk.CTkButton(
             row,
             text="…",
-            width=32,
-            corner_radius=5,
+            width=30,
+            corner_radius=7,
             fg_color=BG_CARD,
-            hover_color="#1e2444",
+            hover_color=BG_MAIN,
             border_width=1,
             border_color=BORDER_SOFT,
             text_color=TEXT_MUTED,
@@ -445,7 +443,18 @@ class RadioGroup(ctk.CTkFrame):
                 text=label,
                 variable=variable,
                 value=value,
+
                 width=radio_width,
+                radiobutton_width=20,
+                radiobutton_height=20,
+
+                fg_color=ACCENT,  # círculo marcado
+                border_color=BORDER_SOFT,
+                hover_color="#818cf8",
+                text_color=TEXT_MAIN,
+                text_color_disabled=TEXT_MUTED,
+
+                bg_color="transparent",
                 font=("Consolas", 12)
             )
 
@@ -1226,7 +1235,7 @@ class SceneCutterApp(ctk.CTk):
         self.interval_entry = ctk.CTkEntry(
             mode,
             width=90,
-            corner_radius=5,
+            corner_radius=7,
             placeholder_text="Seconds",
             validate="key",
             validatecommand=vcmd
@@ -1268,7 +1277,7 @@ class SceneCutterApp(ctk.CTk):
         self.start_btn = ctk.CTkButton(
             self.left,
             text="Start",
-            corner_radius=5,
+            corner_radius=7,
             fg_color=ACCENT,
             hover_color="#4f46e5",
             text_color="white",
