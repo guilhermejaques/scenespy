@@ -30,8 +30,8 @@ except Exception:
 
 # Config
 PROFILES = {
-    "Low": {"label": "Low", "THRESHOLD": 45.0, "MIN_FINAL_DURATION": 5.0},
-    "Normal": {"label": "Normal", "THRESHOLD": 30.0, "MIN_FINAL_DURATION": 2.5},
+    "Low": {"label": "Low", "THRESHOLD": 48.0, "MIN_FINAL_DURATION": 7.0},
+    "Normal": {"label": "Normal", "THRESHOLD": 32.0, "MIN_FINAL_DURATION": 4.0},
     "High": {"label": "High", "THRESHOLD": 20.0, "MIN_FINAL_DURATION": 1.0},
 }
 
@@ -161,7 +161,7 @@ class Section(ctk.CTkFrame):
             fg_color=BG_CARD,
             border_width=1,
             border_color=BORDER_SOFT2,
-            corner_radius=7
+            corner_radius=0
         )
         ctk.CTkLabel(
             self, text=title, font=("Consolas", 14, "bold")).pack(anchor="w", padx=12, pady=(8, 4))
@@ -173,8 +173,8 @@ class LabeledEntry(ctk.CTkFrame):
         ctk.CTkLabel(self, text=label, font=("Consolas", 12)).pack(anchor="w")
         self.entry = ctk.CTkEntry(
             width=width,
-            corner_radius=7,
-            fg_color=BG_INPUT,
+            corner_radius=15,
+            fg_color=BG_MAIN,
             border_width=1,
             border_color=BORDER_SOFT,
             text_color=TEXT_MAIN,
@@ -189,7 +189,7 @@ class LabeledEntry(ctk.CTkFrame):
 
 class LogBox(ctk.CTkTextbox):
     def __init__(self, master, height=140):
-        super().__init__(master, height=height, fg_color=BG_MAIN, corner_radius=7, border_color=BORDER_SOFT2, border_width=1)
+        super().__init__(master, height=height, fg_color=BG_MAIN, corner_radius=15, border_color=BORDER_SOFT2, border_width=1)
         self.configure(state="disabled", font=("Consolas", 12))
 
         self.status_lines = [
@@ -339,7 +339,7 @@ class PreviewFrame(ctk.CTkFrame):
             fg_color=BG_MAIN,
             border_width=1,
             border_color=BORDER_SOFT2,
-            corner_radius=7
+            corner_radius=15
         )
         self.info_label = ctk.CTkLabel(self, text="", font=("Consolas", 10))
         self.info_label.pack(anchor="n", pady=4)
@@ -379,7 +379,7 @@ class FileSelector(ctk.CTkFrame):
         self.entry = ctk.CTkEntry(
             row,
             width=width,
-            corner_radius=7,
+            corner_radius=15,
             fg_color=BG_MAIN,
             border_width=1,
             border_color=BORDER_SOFT,
@@ -392,7 +392,7 @@ class FileSelector(ctk.CTkFrame):
             row,
             text="…",
             width=30,
-            corner_radius=7,
+            corner_radius=15,
             fg_color=BG_CARD,
             hover_color=BG_MAIN,
             border_width=1,
@@ -445,12 +445,13 @@ class RadioGroup(ctk.CTkFrame):
                 value=value,
 
                 width=radio_width,
-                radiobutton_width=20,
-                radiobutton_height=20,
+                radiobutton_width=10,
+                radiobutton_height=10,
 
-                fg_color=ACCENT,  # círculo marcado
-                border_color=BORDER_SOFT,
-                hover_color="#818cf8",
+                fg_color=ACCENT,  # círculo interno quando marcado
+                border_color="#4b5563",  # cinza suave (borda mais “fina”)
+                hover_color="#6366f1",
+
                 text_color=TEXT_MAIN,
                 text_color_disabled=TEXT_MUTED,
 
@@ -553,7 +554,7 @@ class SceneEngine:
         cmd = [
             "ffprobe", "-v", "error",
             "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,r_frame_rate,bit_rate",
+            "-show_entries", "stream=width,height,r_frame_rate:format=bit_rate",
             "-of", "default=noprint_wrappers=1:nokey=1",
             self.video
         ]
@@ -692,6 +693,23 @@ class SceneEngine:
                 if thumb:
                     self.previewer.update_image(thumb)
 
+            OFFSET_BY_PROFILE = {
+                "Low": 0.12,
+                "Normal": 0.08,
+                "High": 0.05
+            }
+
+            SCENE_START_OFFSET_FRAMES = max(
+                1,
+                int(OFFSET_BY_PROFILE[self.cfg["label"]] * fps)
+            )
+
+            start_frame = min(
+                start_frame + SCENE_START_OFFSET_FRAMES,
+                end_frame - 1
+            )
+
+
             start_time = start_frame / fps
             end_time = end_frame / fps
 
@@ -700,19 +718,14 @@ class SceneEngine:
             cmd = [
                 "ffmpeg",
                 "-y",
-                "-ss", f"{start_time:.6f}",
                 "-i", self.video,
+                "-ss", f"{start_time:.6f}",
                 "-t", f"{duration:.6f}",
-                "-ss", "0",
                 "-map", "0:v:0",
                 "-map", "0:a?",
                 "-c:v", "libx264",
-                "-pix_fmt", "yuv420p",
                 "-preset", "veryfast",
-                "-g", str(int(fps * 2)),
-                "-keyint_min", str(int(fps * 2)),
-                "-sc_threshold", "0",
-                "-force_key_frames", "expr:gte(t,0)",
+                "-pix_fmt", "yuv420p",
                 "-reset_timestamps", "1",
                 outfile
             ]
@@ -816,10 +829,10 @@ class SceneEngine:
         # Ajuste empírico baseado no ContentDetector
         base = self.cfg["THRESHOLD"]
 
-        if base >= 40:
-            return 40.0  # Low
-        elif base >= 25:
-            return 27.0  # Normal
+        if base >= 45:
+            return 42.0  # Low
+        elif base >= 30:
+            return 30.0  # Normal
         else:
             return 18.0  # High
 
@@ -1234,8 +1247,14 @@ class SceneCutterApp(ctk.CTk):
 
         self.interval_entry = ctk.CTkEntry(
             mode,
+            height=25,
             width=90,
-            corner_radius=7,
+            fg_color=BG_MAIN,
+            border_color=BORDER_SOFT,
+            border_width=1,
+            corner_radius=15,
+            text_color=TEXT_MAIN,
+            placeholder_text_color=TEXT_MUTED,
             placeholder_text="Seconds",
             validate="key",
             validatecommand=vcmd
@@ -1277,7 +1296,7 @@ class SceneCutterApp(ctk.CTk):
         self.start_btn = ctk.CTkButton(
             self.left,
             text="Start",
-            corner_radius=7,
+            corner_radius=15,
             fg_color=ACCENT,
             hover_color="#4f46e5",
             text_color="white",
@@ -1295,7 +1314,7 @@ class SceneCutterApp(ctk.CTk):
             fg_color=BG_PANEL,
             border_width=1,
             border_color=BORDER_SOFT2,
-            corner_radius=0
+            corner_radius=15
         )
         self.right.pack(side="right", fill="both", expand=True, padx=10, pady=10)
 
