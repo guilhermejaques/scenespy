@@ -43,6 +43,7 @@ INSTANCE_SOCKET = None
 INSTANCE_PORT = 54321
 PREVIEW_MAX_WIDTH = 420
 PREVIEW_MAX_HEIGHT = 240
+PREVIEW_FRAMES_PER_SCENE = 3
 
 MODE_ACCEL_COMPAT = {
     "scene": {
@@ -269,6 +270,10 @@ class ProgressBar(ctk.CTkFrame):
 
         value = max(0.0, min(1.0, value))
 
+        # ignora micro variações
+        if abs(value - self._logical_value) < 0.005:
+            return
+
         if value < self._logical_value:
             return
 
@@ -291,7 +296,7 @@ class ProgressBar(ctk.CTkFrame):
 
         # interpolação suave (ease-out simples)
         delta = (self._logical_value - self._visual_value) * self._speed
-        delta = max(delta, 0.001)  # evita travar perto do fim
+        delta = max(delta, 0.004)
 
         self._visual_value += delta
         self.bar.set(self._visual_value)
@@ -315,7 +320,7 @@ class ProgressBar(ctk.CTkFrame):
         self.label.configure(text="100%")
 
     def reset(self):
-        self._enabled = False  # 🔒 BLOQUEIA updates futuros
+        self._enabled = False
 
         if self._after_id:
             try:
@@ -330,7 +335,7 @@ class ProgressBar(ctk.CTkFrame):
         self.bar.configure(progress_color=self._normal_color)
         self.bar.set(0)
         self.label.configure(text="0%")
-
+        self._enabled = True
 
 class PreviewFrame(ctk.CTkFrame):
     def __init__(self, master):
@@ -344,15 +349,13 @@ class PreviewFrame(ctk.CTkFrame):
         self.info_label = ctk.CTkLabel(self, text="", font=("Consolas", 10))
         self.info_label.pack(anchor="n", pady=4)
         self.label = ctk.CTkLabel(self, text="")
-        self.label.pack(expand=True)
+        self.label.pack(expand=True, anchor="center")
         self._img_ref = None
 
     def update_image(self, image):
-        if not image:
+        if not image or not self.winfo_exists():
             return
-        w, h = image.size
-        if w > PREVIEW_MAX_WIDTH or h > PREVIEW_MAX_HEIGHT:
-            return
+
         self._img_ref = ctk.CTkImage(light_image=image, size=image.size)
         self.label.configure(image=self._img_ref)
 
@@ -495,16 +498,22 @@ class SceneEngine:
         self._total_frames = None
         self._ffmpeg_proc = None
 
+
+
     def stop(self):
         self._stop = True
 
-        if self._ffmpeg_proc:
-            try:
-                self._ffmpeg_proc.send_signal(signal.CTRL_BREAK_EVENT)
-                self._ffmpeg_proc.kill()
-            except Exception:
-                pass
-            self._ffmpeg_proc = None
+        try:
+            if self._ffmpeg_proc:
+                try:
+                    self._ffmpeg_proc.terminate()
+                    time.sleep(0.3)
+                    if self._ffmpeg_proc.poll() is None:
+                        self._ffmpeg_proc.kill()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         try:
             if self._thumb_container:
@@ -531,7 +540,15 @@ class SceneEngine:
         self.done = 0
         self.detected = 0
         self.last_preview = 0
+        self._last_thumb_time = 0
 
+        if self.previewer and self.preview_enabled:
+            thumb = self._generate_thumbnail(0.0)
+            if thumb:
+                self.previewer.after(
+                    0,
+                    lambda img=thumb: self.previewer.update_image(img)
+                )
         # Show video info in preview
         if self.previewer and not self._video_info_shown:
             info_text = self._get_video_info_text()
@@ -572,7 +589,29 @@ class SceneEngine:
         min_dur = self.cfg["MIN_FINAL_DURATION"]
         fps = self._get_video_fps()
 
-        video = open_video(self.video)
+        backend = "pyav"
+
+        if self.video.lower().endswith(".mkv"):
+            backend = "opencv"
+
+        if backend == "opencv":
+            video = open_video(
+                self.video,
+                backend="opencv"
+            )
+        else:
+            video = open_video(
+                self.video,
+                backend=backend,
+                suppress_output=True,
+            )
+
+        if backend == "opencv":
+            try:
+                _ = video.frame_rate
+            except Exception:
+                video.close()
+                raise RuntimeError("Failed to read video stream")
 
         stats_manager = StatsManager()
         scene_manager = SceneManager(stats_manager)
@@ -583,39 +622,108 @@ class SceneEngine:
                 min_scene_len=int(min_dur * fps)
             )
         )
+        video_duration = None
 
-        video_duration = video.duration.get_seconds()
+        try:
+            video_duration = video.duration.get_seconds()
+        except Exception:
+            pass
+
+        if video_duration and video_duration > 0:
+            self._total_frames = int(video_duration * fps)
+
+        if not video_duration or video_duration <= 0:
+            try:
+                cmd = [
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    self.video
+                ]
+                video_duration = float(subprocess.check_output(cmd).decode().strip())
+                self._total_frames = int(video_duration * fps)
+            except Exception:
+                if self._total_frames is None:
+                    self._total_frames = int(video.frame_rate * 1)
+                video_duration = max(
+                    (self._total_frames or 1) / fps,
+                    1.0
+                )
+
 
         def _progress_cb(frame_num, _):
             if self._stop:
-                return
+                return False
 
             if not self.progress:
-                return
+                return True
 
-            frame_idx = _safe_frame_index(frame_num)
-            if frame_idx <= 0:
-                return
+            try:
+                frame_idx = _safe_frame_index(frame_num)
+                if frame_idx <= 0:
+                    return True
+            except Exception:
+                return True
 
             current_time = frame_idx / fps
+
+            if not video_duration:
+                return True
+
             ratio = min(current_time / video_duration, 1.0)
 
             ratio = max(self._analysis_ratio, ratio)
             self._analysis_ratio = ratio
 
-            self.progress.update(ratio * 0.4)
+            self.progress.after(
+                0,
+                lambda v=ratio * 0.4: self.progress.update(v)
+            )
+
+            return True
+
+        detect_kwargs = {
+            "video": video,
+            "callback": _progress_cb
+        }
+
+        scene_list = []
 
         try:
-            scene_manager.detect_scenes(
-                video=video,
-                callback=_progress_cb
-            )
+            detect_exception = None
+
+            def _run_detect():
+                nonlocal detect_exception
+                try:
+
+                    scene_manager.detect_scenes(**detect_kwargs)
+                except Exception as e:
+                    detect_exception = e
+
+            detect_thread = threading.Thread(target=_run_detect, daemon=True)
+            detect_thread.start()
+
+            while detect_thread.is_alive():
+                if self._stop:
+                    try:
+                        video.close()  # força quebra do loop interno
+                    except Exception:
+                        pass
+                    break
+                time.sleep(0.05)
+
+            detect_thread.join(timeout=1.0)
 
             if self._stop:
                 return []
 
+            if detect_exception:
+                raise detect_exception
+
             scene_list = scene_manager.get_scene_list()
-            video_seconds = video.duration.get_seconds()
+
+        except RuntimeError:
+            return []
         finally:
             try:
                 video.close()
@@ -623,7 +731,7 @@ class SceneEngine:
                 pass
 
         if not scene_list:
-            total_frames = int(video_seconds * fps)
+            total_frames = self._total_frames or int(fps)
             self.detected = 1
             return [(0, total_frames)]
 
@@ -685,14 +793,6 @@ class SceneEngine:
             if end_frame <= start_frame:
                 continue
 
-            if self.previewer and self.preview_enabled:
-                mid_frame = (start_frame + end_frame) // 2
-                mid_time = mid_frame / fps
-                thumb = self._generate_thumbnail(mid_time)
-
-                if thumb:
-                    self.previewer.update_image(thumb)
-
             OFFSET_BY_PROFILE = {
                 "Low": 0.12,
                 "Normal": 0.08,
@@ -715,6 +815,20 @@ class SceneEngine:
 
             duration = max((end_frame - start_frame) / fps, 0.01)
             outfile = os.path.join(outdir, f"scene_{idx:04d}.mp4")
+
+            if self.previewer and self.preview_enabled:
+                scene_duration = max(end_time - start_time, 0.5)
+
+                for i in range(PREVIEW_FRAMES_PER_SCENE):
+                    t = start_time + scene_duration * ((i + 0.5) / PREVIEW_FRAMES_PER_SCENE)
+                    thumb = self._generate_thumbnail(t)
+
+                    if thumb:
+                        self.previewer.after(
+                            i * 100,
+                            lambda img=thumb: self.previewer.update_image(img)
+                        )
+
             cmd = [
                 "ffmpeg",
                 "-y",
@@ -722,7 +836,7 @@ class SceneEngine:
                 "-ss", f"{start_time:.6f}",
                 "-t", f"{duration:.6f}",
                 "-map", "0:v:0",
-                "-map", "0:a?",
+                "-map", "0:a:0?",
                 "-c:v", "libx264",
                 "-preset", "veryfast",
                 "-pix_fmt", "yuv420p",
@@ -730,14 +844,30 @@ class SceneEngine:
                 outfile
             ]
 
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+
             self._ffmpeg_proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                creationflags=creationflags
             )
 
-            self._ffmpeg_proc.wait()
+            start_cut = time.time()
+            last_preview = 0
+
+            while self._ffmpeg_proc.poll() is None:
+                if self._stop:
+                    break
+
+                now = time.time()
+
+                if now - start_cut > 120:
+                    self._ffmpeg_proc.kill()
+                    break
+
+                time.sleep(0.05)
+
             self._ffmpeg_proc = None
 
             self.done += 1
@@ -752,7 +882,10 @@ class SceneEngine:
             if self.progress and self.total:
                 cut_ratio = self.done / self.total
                 # análise = 40%, corte = 60%
-                self.progress.update(0.4 + cut_ratio * 0.6)
+                self.progress.after(
+                    0,
+                    lambda v=0.4 + cut_ratio * 0.6: self.progress.update(v)
+                )
 
         if self.progress and not self._stop and self.done == self.total:
             self.progress.mark_finished()
@@ -765,37 +898,51 @@ class SceneEngine:
             self._thumb_container = None
 
     def _generate_thumbnail(self, timestamp):
+
+
+
         try:
-            if self._thumb_container:
-                try:
-                    self._thumb_container.close()
-                except Exception:
-                    pass
+            cmd = [
+                "ffmpeg",
+                "-loglevel", "error",
+                "-ss", str(timestamp),
+                "-i", self.video,
+                "-frames:v", "1",
+                "-vf",
+                f"scale={PREVIEW_MAX_WIDTH}:{PREVIEW_MAX_HEIGHT}:force_original_aspect_ratio=decrease,"
+                f"pad={PREVIEW_MAX_WIDTH}:{PREVIEW_MAX_HEIGHT}:(ow-iw)/2:(oh-ih)/2",
+                "-f", "rawvideo",
+                "-pix_fmt", "rgb24",
+                "-"
+            ]
 
-            self._thumb_container = av.open(self.video)
-
-            stream = self._thumb_container.streams.video[0]
-            time_base = float(stream.time_base)
-
-            target_pts = int(timestamp / time_base)
-
-            self._thumb_container.seek(
-                target_pts,
-                backward=True,
-                any_frame=True
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL
             )
 
-            for frame in self._thumb_container.decode(video=0):
-                if frame.pts is None:
-                    continue
+            frame_size = PREVIEW_MAX_WIDTH * PREVIEW_MAX_HEIGHT * 3
+            raw = proc.stdout.read(frame_size)
 
-                if frame.pts >= target_pts:
-                    img = frame.to_image()
-                    img = resize_for_preview(img)
-                    return img
+            proc.stdout.close()
+            proc.wait(timeout=3)
+
+            if len(raw) != frame_size:
+                return None
+
+            img = Image.frombytes(
+                "RGB",
+                (PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT),
+                raw
+            )
+
+            return img
 
         except Exception:
             return None
+
+
 
     def _calculate_eta(self):
         if self.done == 0:
@@ -1129,7 +1276,7 @@ class FaceDetectionEngine:
                     img = resize_for_preview(img)
 
                     if img:
-                        self.previewer.update_image(img)
+                        self.previewer.after(0, lambda img=img: self.previewer.update_image(img))
                         self.last_preview = now
 
             if self.log:
@@ -1350,7 +1497,8 @@ class SceneCutterApp(ctk.CTk):
             self.start_process()
 
     def start_process(self):
-        video = self.video_selector.get()
+        original = self.video_selector.get()
+        video = original
         ext = os.path.splitext(video)[1].lower()
         output = self.output_selector.get()
 
@@ -1377,10 +1525,12 @@ class SceneCutterApp(ctk.CTk):
         if self.log:
             self.log.clear_status()
 
-        self.progress._enabled = True
         self.running = True
 
+
+        self.update_idletasks()
         self.set_ui_state(True)
+        self.update_idletasks()
         self.start_btn.configure(text="Stop", fg_color=DANGER, hover_color="#dc2626")
 
         cfg = PROFILES[self.profile.get()].copy()
@@ -1448,6 +1598,7 @@ class SceneCutterApp(ctk.CTk):
     def run_engine(self, scene_mode):
         result = False
         try:
+            self.engine.video = remux_if_needed(self.engine.video)
             result = self.engine.run(scene_mode=scene_mode)
         except Exception as e:
             print("Error:", e)
@@ -1456,8 +1607,8 @@ class SceneCutterApp(ctk.CTk):
             engine = self.engine
             stopped = engine._stop if engine else False
 
-            if result and self.engine:
-                total_time = self.engine.total_time()
+            if result and engine:
+                total_time = engine.total_time()
 
             self.engine = None
             self.stop_pending = False
@@ -1523,20 +1674,20 @@ class SceneCutterApp(ctk.CTk):
     def run_face_engine(self):
         result = False
         try:
+            self.engine.video = remux_if_needed(self.engine.video)
             result = self.engine.run()
         except Exception as e:
             print("Face engine error:", e)
         finally:
             total_time = None
-            if result and self.engine:
-                total_time = self.engine.total_time()
-
             engine = self.engine
             stopped = engine._stop if engine else False
+
+            if result and engine:
+                total_time = engine.total_time()
+
             self.engine = None
-
             self.stop_pending = False
-
 
             self.after(
                 0,
@@ -1571,7 +1722,7 @@ class SceneCutterApp(ctk.CTk):
             self.preview_frame.clear_all()
 
         if self.progress and reason in ("stop", "reset"):
-            self.progress.reset()
+            self.after(0, self.progress.reset)
 
         if self.log:
             if reason == "stop":
@@ -1661,6 +1812,41 @@ def is_valid_video_file(path: str) -> bool:
     except Exception:
         return False
 
+def remux_if_needed(path):
+    ext = os.path.splitext(path)[1].lower()
+
+    # Somente MKV tem esse problema estrutural de index/keyframes
+    if ext != ".mkv":
+        return path
+
+    fixed = path[:-4] + "_fixed.mkv"
+    if os.path.exists(fixed) and is_valid_video_file(fixed):
+        return fixed
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-fflags", "+genpts+igndts",
+        "-err_detect", "ignore_err",
+        "-i", path,
+        "-map", "0:v:0",
+        "-map", "0:a?",
+        "-c", "copy",
+        "-max_interleave_delta", "0",
+        "-avoid_negative_ts", "make_zero",
+        fixed
+    ]
+
+    subprocess.run(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+
+    if os.path.exists(fixed) and is_valid_video_file(fixed):
+        return fixed
+
+    return path
 
 def single_instance():
     global INSTANCE_SOCKET
