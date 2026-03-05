@@ -787,42 +787,35 @@ class SceneEngine:
         )
 
         self.total, self.done = len(scenes), 0
-        encoder = self.cfg.get("ENCODER", "cpu")
-
         fps = self._get_video_fps()
+
+        # offset usado SOMENTE para preview
+        OFFSET_SECONDS = {
+            "Low": 0.12,
+            "Normal": 0.08,
+            "High": 0.05
+        }
 
         for idx, (start_frame, end_frame) in enumerate(scenes, 1):
 
             if self._stop:
                 break
 
-            # proteção contra cenas degeneradas
             if end_frame <= start_frame:
                 continue
 
-            OFFSET_BY_PROFILE = {
-                "Low": 0.12,
-                "Normal": 0.08,
-                "High": 0.05
-            }
-
-            OFFSET_SECONDS = {
-                "Low": 0.12,
-                "Normal": 0.08,
-                "High": 0.05
-            }
-
+            # ===== CÁLCULO FRAME-ACCURATE (RESTAURADO DO MÉTODO 1) =====
             start_time = start_frame / fps
-            end_time = end_frame / fps
+            duration = (end_frame - start_frame - 1) / fps
 
-            start_time += OFFSET_SECONDS[self.cfg["label"]]
-            start_time = min(start_time, end_time - 0.04)
+            if duration < 0.04:
+                duration = 0.04
 
-            duration = max(end_time - start_time, 0.04)
             outfile = os.path.join(outdir, f"scene_{idx:04d}.mp4")
 
+            # ===== PREVIEW (COM OFFSET, SEM AFETAR O CORTE) =====
             if self.previewer and self.preview_enabled:
-                scene_duration = max(end_time - start_time, 0.5)
+                preview_time = start_time + OFFSET_SECONDS.get(self.cfg.get("label"), 0.0)
 
                 for _ in range(PREVIEW_FRAMES_PER_SCENE):
                     thumb = self._read_preview_frame()
@@ -831,10 +824,10 @@ class SceneEngine:
                             0,
                             lambda img=thumb: self.previewer.update_image(img)
                         )
-
-            if not self.preview_enabled:
+            else:
                 self._read_preview_frame(drain=True)
 
+            # ===== FFmpeg PRECISO + ROBUSTO =====
             cmd = [
                 "ffmpeg",
                 "-y",
@@ -847,7 +840,7 @@ class SceneEngine:
                 "-preset", "veryfast",
                 "-pix_fmt", "yuv420p",
                 "-reset_timestamps", "1",
-                "-force_key_frames", "expr:gte(t,0)",
+                "-avoid_negative_ts", "make_zero",
                 outfile
             ]
 
@@ -861,22 +854,18 @@ class SceneEngine:
             )
 
             start_cut = time.time()
-            last_preview = 0
 
             while self._ffmpeg_proc.poll() is None:
                 if self._stop:
                     break
 
-                now = time.time()
-
-                if now - start_cut > 120:
+                if time.time() - start_cut > 120:
                     self._ffmpeg_proc.kill()
                     break
 
                 time.sleep(0.05)
 
             self._ffmpeg_proc = None
-
             self.done += 1
 
             if self.log:
@@ -888,7 +877,6 @@ class SceneEngine:
 
             if self.progress and self.total:
                 cut_ratio = self.done / self.total
-                # análise = 40%, corte = 60%
                 self.progress.after(
                     0,
                     lambda v=0.4 + cut_ratio * 0.6: self.progress.update(v)
