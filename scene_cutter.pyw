@@ -192,7 +192,7 @@ class LogBox(ctk.CTkTextbox):
     def __init__(self, master, height=140):
         super().__init__(master, height=height, fg_color=BG_MAIN, corner_radius=15, border_color=BORDER_SOFT2, border_width=1)
         self.configure(state="disabled", font=("Consolas", 12))
-
+        self.pack_propagate(False)
         self.status_lines = [
             "",
             "",
@@ -327,14 +327,16 @@ class ProgressBar(ctk.CTkFrame):
                 self.after_cancel(self._after_id)
             except Exception:
                 pass
-            self._after_id = None
 
+        self._after_id = None
+        self._animating = False
         self._logical_value = 0.0
         self._visual_value = 0.0
-        self._animating = False
+
         self.bar.configure(progress_color=self._normal_color)
         self.bar.set(0)
         self.label.configure(text="0%")
+
         self._enabled = True
 
 class PreviewFrame(ctk.CTkFrame):
@@ -404,6 +406,8 @@ class FileSelector(ctk.CTkFrame):
             command=self.select
         )
         self.button.pack(side="right", padx=(6, 0))
+        self.entry.pack_propagate(False)
+        self.button.pack_propagate(False)
 
     def select(self):
         import tkinter.filedialog as fd
@@ -497,12 +501,13 @@ class SceneEngine:
         self._thumb_container = None
         self._total_frames = None
         self._ffmpeg_proc = None
+        self._ui_alive = True
 
 
 
     def stop(self):
         self._stop = True
-
+        self._ui_alive = False
         try:
             if self._ffmpeg_proc:
                 try:
@@ -549,10 +554,15 @@ class SceneEngine:
             self._start_preview_decoder()
             thumb = self._read_preview_frame()
             if thumb:
-                self.previewer.after(
-                    0,
-                    lambda img=thumb: self.previewer.update_image(img)
-                )
+                if self._ui_alive:
+                    self.previewer.after(
+                        0,
+                        lambda img=thumb: (
+                            self.previewer.update_image(img)
+                            if self._ui_alive else None
+                        )
+                    )
+
         # Show video info in preview
         if self.previewer and not self._video_info_shown:
             info_text = self._get_video_info_text()
@@ -820,10 +830,14 @@ class SceneEngine:
                 for _ in range(PREVIEW_FRAMES_PER_SCENE):
                     thumb = self._read_preview_frame()
                     if thumb:
-                        self.previewer.after(
-                            0,
-                            lambda img=thumb: self.previewer.update_image(img)
-                        )
+                        if self._ui_alive:
+                            self.previewer.after(
+                                0,
+                                lambda img=thumb: (
+                                    self.previewer.update_image(img)
+                                    if self._ui_alive else None
+                                )
+                            )
             else:
                 self._read_preview_frame(drain=True)
 
@@ -895,6 +909,8 @@ class SceneEngine:
         self._stop_preview_decoder()
 
     def _read_preview_frame(self, drain=False):
+        if self._stop or not self._ui_alive:
+            return None
         if not self._thumb_container or not self._thumb_container.stdout:
             return None
 
@@ -1006,6 +1022,7 @@ class FaceDetectionEngine:
         self.progress = progressbar
         self.previewer = previewer
         self.preview_enabled = preview_enabled
+        self._ui_alive = True
 
         if not TORCH_AVAILABLE:
             raise RuntimeError(
@@ -1067,6 +1084,7 @@ class FaceDetectionEngine:
 
     def stop(self):
         self._stop = True
+        self._ui_alive = False
 
     def total_time(self):
         if not self._start_time:
@@ -1288,7 +1306,14 @@ class FaceDetectionEngine:
                     img = resize_for_preview(img)
 
                     if img:
-                        self.previewer.after(0, lambda img=img: self.previewer.update_image(img))
+                        if self._ui_alive:
+                            self.previewer.after(
+                                0,
+                                lambda img=img: (
+                                    self.previewer.update_image(img)
+                                    if self._ui_alive else None
+                                )
+                            )
                         self.last_preview = now
 
             if self.log:
@@ -1302,7 +1327,11 @@ class FaceDetectionEngine:
                 ratio = frame_idx / total_frames
                 ratio = max(self._face_ratio, ratio)  # impede regressão
                 self._face_ratio = ratio
-                self.progress.update(ratio)
+                if self._ui_alive:
+                    self.progress.after(
+                        0,
+                        lambda v=ratio: self.progress.update(v)
+                    )
 
 
         for t in tracks:
@@ -1493,6 +1522,8 @@ class SceneCutterApp(ctk.CTk):
         self.progress = ProgressBar(self.right)
         self.progress.pack(fill="x", padx=20, pady=10)
 
+        self.left.pack_propagate(False)
+        self.right.pack_propagate(False)
         self._on_cut_mode_change()
 
     def toggle_preview(self):
@@ -1676,9 +1707,8 @@ class SceneCutterApp(ctk.CTk):
     def _on_cut_mode_change(self, *args):
         if self.cut_mode.get() == "interval":
             self.interval_entry.configure(state="normal")
-            self.interval_entry.pack(anchor="n", padx=24, pady=(0, 6))
         else:
-            self.interval_entry.pack_forget()
+            self.interval_entry.configure(state="disabled")
 
         self.update_accel_radios()
 
@@ -1769,7 +1799,7 @@ class SceneCutterApp(ctk.CTk):
 
         self.stop_pending = True
 
-        self.after(50, self.stop_process)
+        self.after(0, self.stop_process)
 
     def _validate_interval(self, value: str) -> bool:
         if value == "":
