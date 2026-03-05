@@ -806,14 +806,14 @@ class SceneEngine:
 
             # ===== CÁLCULO FRAME-ACCURATE (RESTAURADO DO MÉTODO 1) =====
             start_time = start_frame / fps
-            duration = (end_frame - start_frame - 1) / fps
+            duration = (end_frame - start_frame) / fps
+            duration = max(duration - (1 / fps), 0.04)
 
             if duration < 0.04:
                 duration = 0.04
 
             outfile = os.path.join(outdir, f"scene_{idx:04d}.mp4")
 
-            # ===== PREVIEW (COM OFFSET, SEM AFETAR O CORTE) =====
             if self.previewer and self.preview_enabled:
                 preview_time = start_time + OFFSET_SECONDS.get(self.cfg.get("label"), 0.0)
 
@@ -1540,11 +1540,9 @@ class SceneCutterApp(ctk.CTk):
 
         self.running = True
 
-
-        self.update_idletasks()
         self.set_ui_state(True)
-        self.update_idletasks()
-        self.start_btn.configure(text="Stop", fg_color=DANGER, hover_color="#dc2626")
+        self.after(0, self._finalize_start_ui)
+
 
         cfg = PROFILES[self.profile.get()].copy()
         requested = self.accel.get()
@@ -1732,7 +1730,9 @@ class SceneCutterApp(ctk.CTk):
 
     def cleanup_process(self, reason="reset", total_time=None):
         if self.preview_frame:
-            self.preview_frame.clear_all()
+            if reason in ("stop", "finish"):
+                if self.preview_frame:
+                    self.preview_frame.clear_all()
 
         if self.progress and reason in ("stop", "reset"):
             self.after(0, self.progress.reset)
@@ -1749,7 +1749,7 @@ class SceneCutterApp(ctk.CTk):
                     msg += f" {total_time}"
                 self.log.write_finished(msg)
 
-        gc.collect()
+        self.after(1000, gc.collect)
 
     def confirm_stop(self):
         if not self.running or self.engine is None:
@@ -1780,6 +1780,13 @@ class SceneCutterApp(ctk.CTk):
 
         v = int(value)
         return 1 <= v <= 18000
+
+    def _finalize_start_ui(self):
+        self.start_btn.configure(
+            text="Stop",
+            fg_color=DANGER,
+            hover_color="#dc2626"
+        )
 
 def resize_for_preview(img, max_w=PREVIEW_MAX_WIDTH, max_h=PREVIEW_MAX_HEIGHT):
     w, h = img.size
