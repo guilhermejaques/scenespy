@@ -522,6 +522,7 @@ class SceneEngine:
             pass
 
         self._thumb_container = None
+        self._stop_preview_decoder()
 
     def total_time(self):
         if not self._start_time:
@@ -542,8 +543,11 @@ class SceneEngine:
         self.last_preview = 0
         self._last_thumb_time = 0
 
+
+
         if self.previewer and self.preview_enabled:
-            thumb = self._generate_thumbnail(0.0)
+            self._start_preview_decoder()
+            thumb = self._read_preview_frame()
             if thumb:
                 self.previewer.after(
                     0,
@@ -720,6 +724,9 @@ class SceneEngine:
             if detect_exception:
                 raise detect_exception
 
+            if not self.preview_enabled:
+                self._read_preview_frame(drain=True)
+
             scene_list = scene_manager.get_scene_list()
 
         except RuntimeError:
@@ -799,41 +806,40 @@ class SceneEngine:
                 "High": 0.05
             }
 
-            SCENE_START_OFFSET_FRAMES = max(
-                1,
-                int(OFFSET_BY_PROFILE[self.cfg["label"]] * fps)
-            )
-
-            start_frame = min(
-                start_frame + SCENE_START_OFFSET_FRAMES,
-                end_frame - 1
-            )
-
+            OFFSET_SECONDS = {
+                "Low": 0.12,
+                "Normal": 0.08,
+                "High": 0.05
+            }
 
             start_time = start_frame / fps
             end_time = end_frame / fps
 
-            duration = max((end_frame - start_frame) / fps, 0.01)
+            start_time += OFFSET_SECONDS[self.cfg["label"]]
+            start_time = min(start_time, end_time - 0.04)
+
+            duration = max(end_time - start_time, 0.04)
             outfile = os.path.join(outdir, f"scene_{idx:04d}.mp4")
 
             if self.previewer and self.preview_enabled:
                 scene_duration = max(end_time - start_time, 0.5)
 
-                for i in range(PREVIEW_FRAMES_PER_SCENE):
-                    t = start_time + scene_duration * ((i + 0.5) / PREVIEW_FRAMES_PER_SCENE)
-                    thumb = self._generate_thumbnail(t)
-
+                for _ in range(PREVIEW_FRAMES_PER_SCENE):
+                    thumb = self._read_preview_frame()
                     if thumb:
                         self.previewer.after(
-                            i * 100,
+                            0,
                             lambda img=thumb: self.previewer.update_image(img)
                         )
+
+            if not self.preview_enabled:
+                self._read_preview_frame(drain=True)
 
             cmd = [
                 "ffmpeg",
                 "-y",
-                "-i", self.video,
                 "-ss", f"{start_time:.6f}",
+                "-i", self.video,
                 "-t", f"{duration:.6f}",
                 "-map", "0:v:0",
                 "-map", "0:a:0?",
@@ -841,6 +847,7 @@ class SceneEngine:
                 "-preset", "veryfast",
                 "-pix_fmt", "yuv420p",
                 "-reset_timestamps", "1",
+                "-force_key_frames", "expr:gte(t,0)",
                 outfile
             ]
 
@@ -897,52 +904,69 @@ class SceneEngine:
                 pass
             self._thumb_container = None
 
-    def _generate_thumbnail(self, timestamp):
+        self._stop_preview_decoder()
 
+    def _read_preview_frame(self, drain=False):
+        if not self._thumb_container or not self._thumb_container.stdout:
+            return None
 
+        frame_size = PREVIEW_MAX_WIDTH * PREVIEW_MAX_HEIGHT * 3
 
         try:
-            cmd = [
-                "ffmpeg",
-                "-loglevel", "error",
-                "-ss", str(timestamp),
-                "-i", self.video,
-                "-frames:v", "1",
-                "-vf",
-                f"scale={PREVIEW_MAX_WIDTH}:{PREVIEW_MAX_HEIGHT}:force_original_aspect_ratio=decrease,"
-                f"pad={PREVIEW_MAX_WIDTH}:{PREVIEW_MAX_HEIGHT}:(ow-iw)/2:(oh-ih)/2",
-                "-f", "rawvideo",
-                "-pix_fmt", "rgb24",
-                "-"
-            ]
-
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL
-            )
-
-            frame_size = PREVIEW_MAX_WIDTH * PREVIEW_MAX_HEIGHT * 3
-            raw = proc.stdout.read(frame_size)
-
-            proc.stdout.close()
-            proc.wait(timeout=3)
-
+            raw = self._thumb_container.stdout.read(frame_size)
             if len(raw) != frame_size:
                 return None
 
-            img = Image.frombytes(
+            if drain:
+                return None
+
+            return Image.frombytes(
                 "RGB",
                 (PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT),
                 raw
             )
-
-            return img
-
         except Exception:
             return None
 
+    def _stop_preview_decoder(self):
+        if not self._thumb_container:
+            return
 
+        try:
+            self._thumb_container.terminate()
+            time.sleep(0.2)
+            if self._thumb_container.poll() is None:
+                self._thumb_container.kill()
+        except Exception:
+            pass
+
+        self._thumb_container = None
+
+
+    def _start_preview_decoder(self):
+        if self._thumb_container:
+            return
+
+        cmd = [
+            "ffmpeg",
+            "-an",
+            "-loglevel", "error",
+            "-i", self.video,
+            "-vf",
+            f"fps={PREVIEW_FPS},"
+            f"scale={PREVIEW_MAX_WIDTH}:{PREVIEW_MAX_HEIGHT}:force_original_aspect_ratio=decrease,"
+            f"pad={PREVIEW_MAX_WIDTH}:{PREVIEW_MAX_HEIGHT}:(ow-iw)/2:(oh-ih)/2",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "-"
+        ]
+
+        self._thumb_container = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=10 ** 8
+        )
 
     def _calculate_eta(self):
         if self.done == 0:
@@ -1487,6 +1511,7 @@ class SceneCutterApp(ctk.CTk):
         self.preview_enabled = self.preview_switch.get()
         if not self.preview_enabled:
             self.preview_frame.clear_all()
+
 
     def toggle_start(self):
         if self.running:
