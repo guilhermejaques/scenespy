@@ -203,15 +203,25 @@ class LogBox(ctk.CTkTextbox):
 
         self._render()
 
-    def write_status(self, detected=None, cut=None, eta=None):
-        if detected is not None:
-            self.status_lines[0] = f"Scenes detected: {detected}"
-        if cut is not None:
-            self.status_lines[1] = f"Scenes cut: {cut}"
-        if eta is not None:
-            self.status_lines[2] = f"Estimated time: {eta}"
+    def write_status(self, detected, cut, eta):
+        lines = [
+            f"Scenes detected: {detected}",
+            f"Scenes cut: {cut}",
+            f"Estimated time: {eta}"
+        ]
 
-        self._render()
+        self.configure(state="normal")
+
+        if not hasattr(self, "initialized"):
+            for line in lines:
+                self.insert("end", line + "\n")
+            self.initialized = True
+        else:
+            for i, line in enumerate(lines, start=1):
+                self.delete(f"{i}.0", f"{i}.end")
+                self.insert(f"{i}.0", line)
+
+        self.configure(state="disabled")
 
     def clear_status(self):
         self.status_lines = [
@@ -225,12 +235,22 @@ class LogBox(ctk.CTkTextbox):
 
     def write_finished(self, text):
         self.configure(state="normal")
-        self.delete("1.0", "end")
 
-        for line in self.status_lines:
-            self.insert("end", line + "\n")
+        # pega o texto atual da linha 3 (Estimated time)
+        current = self.get("3.0", "3.end")
 
-        self.insert("end", text + "\n", "finished")
+        # limpa a linha
+        self.delete("3.0", "3.end")
+
+        # escreve novamente o ETA
+        self.insert("3.0", current)
+
+        # adiciona o sufixo final
+        self.insert("3.end", " > ")
+
+        # texto final em verde
+        self.insert("3.end", text, "finished")
+
         self.tag_config("finished", foreground="#22c55e")
 
         self.configure(state="disabled")
@@ -1378,6 +1398,7 @@ class SceneCutterApp(ctk.CTk):
         self.engine = None
         self.running = False
         self.stop_pending = False
+        self.resizable(False, False)
 
         self.preview_enabled = ENABLE_PREVIEW_DEFAULT
         self.available_accel = detect_available_accel()
@@ -1396,7 +1417,7 @@ class SceneCutterApp(ctk.CTk):
         self.left.pack(side="left", fill="y", padx=10, pady=10)
 
         files = Section(self.left, "Files")
-        files.pack(fill="x", padx=10, pady=8)
+        files.pack(fill="x", padx=12, pady=12)
 
         self.video_selector = FileSelector(files, "Source video")
         self.video_selector.pack(fill="x", padx=12)
@@ -1448,8 +1469,10 @@ class SceneCutterApp(ctk.CTk):
             validatecommand=vcmd
         )
 
+        self.interval_entry.pack(anchor="w", padx=(186,0), pady=(0,8))
+
         profile = Section(self.left, "Detection Sensitivity")
-        profile.pack(fill="x", padx=12, pady=8)
+        profile.pack(fill="x", padx=12, pady=5)
 
         self.profile = ctk.StringVar(value="Normal")
         options = [(cfg["label"], key) for key, cfg in PROFILES.items()]
@@ -1458,7 +1481,7 @@ class SceneCutterApp(ctk.CTk):
             profile,
             self.profile,
             options,
-            radio_width=90,
+            radio_width=170,
         )
         group.pack(fill="x", padx=12)
 
@@ -1474,7 +1497,7 @@ class SceneCutterApp(ctk.CTk):
             accel_section,
             self.accel,
             options,
-            radio_width=85
+            radio_width=120
         )
         group.pack(fill="x", padx=12)
 
@@ -1507,7 +1530,7 @@ class SceneCutterApp(ctk.CTk):
         self.right.pack(side="right", fill="both", expand=True, padx=10, pady=10)
 
         section = Section(self.right, "Preview")
-        section.pack(padx=10, pady=10, fill="x")
+        section.pack(padx=12, pady=12, fill="x")
 
         self.preview_switch = ctk.CTkSwitch(section, text="Show Thumbnail", command=self.toggle_preview)
         self.preview_switch.pack(anchor="e", padx=10, pady=8)
@@ -1706,9 +1729,9 @@ class SceneCutterApp(ctk.CTk):
 
     def _on_cut_mode_change(self, *args):
         if self.cut_mode.get() == "interval":
-            self.interval_entry.configure(state="normal")
+            self.interval_entry.pack(anchor="w", padx=(186,0), pady=(0,8))
         else:
-            self.interval_entry.configure(state="disabled")
+            self.interval_entry.pack_forget()
 
         self.update_accel_radios()
 
@@ -1813,7 +1836,7 @@ class SceneCutterApp(ctk.CTk):
 
     def _finalize_start_ui(self):
         self.start_btn.configure(
-            text="Stop",
+            text="Stop ",
             fg_color=DANGER,
             hover_color="#dc2626"
         )
