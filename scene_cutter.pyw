@@ -83,7 +83,7 @@ BORDER_SOFT2 = "#4C4848"
 TEXT_MAIN = "#e5e7eb"
 TEXT_MUTED = "#9ca3af"
 
-ACCENT = "#6366f1"        # roxo/índigo moderno
+ACCENT = "#1f538d"        # roxo/índigo moderno
 SUCCESS = "#22c55e"
 DANGER = "#ef4444"
 
@@ -193,64 +193,59 @@ class LogBox(ctk.CTkTextbox):
         super().__init__(master, height=height, fg_color=BG_MAIN, corner_radius=15, border_color=BORDER_SOFT2, border_width=1)
         self.configure(state="disabled", font=("Consolas", 12))
         self.pack_propagate(False)
-        self.status_lines = [
-            "",
-            "",
-            "",
-            "",
-            ""
-        ]
+        self.status_lines = []
+        self.initialized = False
 
-        self._render()
-
-    def write_status(self, detected, cut, eta):
+    def write_status(self, detected=None, cut=None, eta=None):
         lines = [
-            f"Scenes detected: {detected}",
-            f"Scenes cut: {cut}",
-            f"Estimated time: {eta}"
+            f"Scenes detected: {detected if detected is not None else '-'}",
+            f"Scenes cut: {cut if cut is not None else '-'}",
+            f"Estimated time: {eta if eta is not None else '--:--'}"
         ]
 
         self.configure(state="normal")
 
-        if not hasattr(self, "initialized"):
+        if not self.initialized:
+            # primeira atualização: substitui "Processing..."
+            self.delete("1.0", "end")
+
             for line in lines:
                 self.insert("end", line + "\n")
+
             self.initialized = True
+
         else:
-            for i, line in enumerate(lines, start=1):
-                self.delete(f"{i}.0", f"{i}.end")
-                self.insert(f"{i}.0", line)
+            # atualizações normais
+            for i, line in enumerate(lines):
+                self.delete(f"{i + 1}.0", f"{i + 1}.end")
+                self.insert(f"{i + 1}.0", line)
 
         self.configure(state="disabled")
 
     def clear_status(self):
-        self.status_lines = [
-            "Processing...",
-            "",
-            "",
-            "",
-            ""
-        ]
+        self.status_lines = ["Processing..."]
+        self.initialized = False
         self._render()
 
     def write_finished(self, text):
         self.configure(state="normal")
 
-        # pega o texto atual da linha 3 (Estimated time)
-        current = self.get("3.0", "3.end")
+        current = self.get("3.0", "3.end").strip()
+        if not current:
+            current = "Estimated time: --:--"
 
-        # limpa a linha
+        # limpa linha
         self.delete("3.0", "3.end")
 
-        # escreve novamente o ETA
-        self.insert("3.0", current)
+        # escreve ETA
+        self.insert("3.0", current + " ")
 
-        # adiciona o sufixo final
-        self.insert("3.end", " > ")
+        # escreve mensagem completa em verde (incluindo parênteses)
+        start = self.index("3.end")
+        self.insert("3.end", f"({text})")
+        end = self.index("3.end")
 
-        # texto final em verde
-        self.insert("3.end", text, "finished")
-
+        self.tag_add("finished", start, end)
         self.tag_config("finished", foreground="#22c55e")
 
         self.configure(state="disabled")
@@ -394,7 +389,7 @@ class PreviewFrame(ctk.CTkFrame):
 
 
 class FileSelector(ctk.CTkFrame):
-    def __init__(self, master, label="File", width=420):
+    def __init__(self, master, label="File", width=400):
         super().__init__(master, fg_color="transparent")
         ctk.CTkLabel(self, text=label, font=("Consolas", 12)).pack(anchor="w")
 
@@ -408,18 +403,20 @@ class FileSelector(ctk.CTkFrame):
             fg_color=BG_MAIN,
             border_width=1,
             border_color=BORDER_SOFT,
-            text_color="#e6e6e6",
+            text_color="#ededed",
+            font=("Consolas", 11),
             placeholder_text_color=TEXT_MUTED
         )
-        self.entry.pack(side="left", fill="x", expand=True)
+        self.entry.pack(side="left")
 
         self.button = ctk.CTkButton(
             row,
             text="…",
-            width=30,
+            width=10,
+            height=10,
             corner_radius=15,
             fg_color=BG_CARD,
-            hover_color=BG_MAIN,
+            hover_color="#615f5f",
             border_width=1,
             border_color=BORDER_SOFT,
             text_color=TEXT_MUTED,
@@ -553,7 +550,7 @@ class SceneEngine:
         if not self._start_time:
             return "--:--"
         end = self._end_time or time.time()
-        elapsed = int(end - self._start_time)
+        elapsed = max(1, int(end - self._start_time))
         m, s = divmod(elapsed, 60)
         h, m = divmod(m, 60)
         return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
@@ -1110,7 +1107,7 @@ class FaceDetectionEngine:
         if not self._start_time:
             return "--:--"
         end = self._end_time or time.time()
-        elapsed = int(end - self._start_time)
+        elapsed = max(1, int(end - self._start_time))
         m, s = divmod(elapsed, 60)
         h, m = divmod(m, 60)
         return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
@@ -1408,7 +1405,7 @@ class SceneCutterApp(ctk.CTk):
         # Left panel
         self.left = ctk.CTkFrame(
             self,
-            width=300,
+            width=420,
             fg_color=BG_PANEL,
             border_width=1,
             border_color=BORDER_SOFT2,
@@ -1462,7 +1459,8 @@ class SceneCutterApp(ctk.CTk):
             border_color=BORDER_SOFT,
             border_width=1,
             corner_radius=15,
-            text_color=TEXT_MAIN,
+            text_color="#ededed",
+            font=("Consolas", 11),
             placeholder_text_color=TEXT_MUTED,
             placeholder_text="Seconds",
             validate="key",
@@ -1497,7 +1495,7 @@ class SceneCutterApp(ctk.CTk):
             accel_section,
             self.accel,
             options,
-            radio_width=120
+            radio_width=110
         )
         group.pack(fill="x", padx=12)
 
@@ -1507,13 +1505,14 @@ class SceneCutterApp(ctk.CTk):
         self.start_btn = ctk.CTkButton(
             self.left,
             text="Start",
-            corner_radius=15,
+            height=13,
+            corner_radius=420,
             fg_color=ACCENT,
             hover_color="#4f46e5",
             text_color="white",
             command=self.toggle_start
         )
-        self.start_btn.pack(pady=20)
+        self.start_btn.pack(pady=(20, 10))
 
         self.log = LogBox(self.left, height=220)
         self.log.pack(fill="x", padx=10, pady=10)
@@ -1521,7 +1520,7 @@ class SceneCutterApp(ctk.CTk):
         # Right panel
         self.right = ctk.CTkFrame(
             self,
-            width=300,
+            width=250,
             fg_color=BG_PANEL,
             border_width=1,
             border_color=BORDER_SOFT2,
@@ -1564,27 +1563,38 @@ class SceneCutterApp(ctk.CTk):
             self.start_process()
 
     def start_process(self):
-        original = self.video_selector.get()
-        video = original
+        video = self.video_selector.get().strip()
+        output = self.output_selector.get().strip()
+
+        # nenhum campo preenchido -> não faz nada
+        if not video and not output:
+            return
+
+        # apenas um campo preenchido
+        if not video or not output:
+            self.log.clear_status()
+            self.log.status_lines[0] = "Select input video and output folder"
+            self.log._render()
+            return
+
         ext = os.path.splitext(video)[1].lower()
-        output = self.output_selector.get()
 
         if ext not in ALLOWED_VIDEO_EXTENSIONS:
             self.log.clear_status()
             self.log.status_lines[0] = "Unsupported file type"
-            self.log.write_status()
+            self.log._render()
             return
 
         if not os.path.isfile(video) or not os.path.isdir(output):
             self.log.clear_status()
             self.log.status_lines[0] = "Invalid paths!"
-            self.log.write_status()
+            self.log._render()
             return
 
         if not is_valid_video_file(video):
             self.log.clear_status()
             self.log.status_lines[0] = "Invalid or unsupported video file"
-            self.log.write_status()
+            self.log._render()
             return
 
         self.cleanup_process(reason="reset")
@@ -1692,7 +1702,8 @@ class SceneCutterApp(ctk.CTk):
         self.running = False
         self.start_btn.configure(
             text="Start",
-            fg_color="#4ade80",
+            fg_color=ACCENT,
+            hover_color="#4f46e5",
             state="normal"
         )
         self.set_ui_state(False)
