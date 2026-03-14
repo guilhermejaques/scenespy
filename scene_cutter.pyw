@@ -769,13 +769,8 @@ class SceneEngine:
             self.detected = 1
             return [(0, total_frames)]
 
-        scenes = []
-        for start, end in scene_list:
-            scenes.append((
-                start.get_frames(),
-                end.get_frames()
-            ))
-
+        scenes = [(start.get_frames(), end.get_frames()) for start, end in scene_list]
+        scenes = sorted(scenes, key=lambda x: x[0])
         self.detected = len(scenes)
         return scenes
 
@@ -825,19 +820,22 @@ class SceneEngine:
 
         for idx, (start_frame, end_frame) in enumerate(scenes, 1):
 
+            start_frame = int(start_frame)
+            end_frame = int(end_frame)
+
+            if idx < len(scenes):
+                next_start = scenes[idx][0]
+                end_frame = min(end_frame, next_start)
+
+            start_time = start_frame / fps
+            end_time = end_frame / fps
+
             if self._stop:
                 break
 
             if end_frame <= start_frame:
                 continue
 
-            # ===== CÁLCULO FRAME-ACCURATE (RESTAURADO DO MÉTODO 1) =====
-            start_time = start_frame / fps
-            duration = (end_frame - start_frame) / fps
-            duration = max(duration - (1 / fps), 0.04)
-
-            if duration < 0.04:
-                duration = 0.04
 
             outfile = os.path.join(outdir, f"scene_{idx:04d}.mp4")
 
@@ -859,19 +857,23 @@ class SceneEngine:
                 self._read_preview_frame(drain=True)
 
             # ===== FFmpeg PRECISO + ROBUSTO =====
+            duration = end_time - start_time
+
             cmd = [
                 "ffmpeg",
                 "-y",
-                "-ss", f"{start_time:.6f}",
                 "-i", self.video,
-                "-t", f"{duration:.6f}",
+                "-ss", f"{start_time:.6f}",
+                "-to", f"{end_time:.6f}",
                 "-map", "0:v:0",
                 "-map", "0:a:0?",
                 "-c:v", "libx264",
                 "-preset", "veryfast",
+                "-crf", "18",
                 "-pix_fmt", "yuv420p",
-                "-reset_timestamps", "1",
+                "-vsync", "0",
                 "-avoid_negative_ts", "make_zero",
+                "-threads", "0",
                 outfile
             ]
 
@@ -1009,7 +1011,7 @@ class SceneEngine:
         cmd = [
             "ffprobe", "-v", "error",
             "-select_streams", "v:0",
-            "-show_entries", "stream=r_frame_rate",
+            "-show_entries", "stream=avg_frame_rate",
             "-of", "default=noprint_wrappers=1:nokey=1",
             self.video
         ]
