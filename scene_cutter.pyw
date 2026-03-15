@@ -4,6 +4,7 @@ import subprocess
 import threading
 import time
 import datetime
+
 import customtkinter as ctk
 import av
 import cv2
@@ -13,6 +14,8 @@ import mediapipe as mp
 import signal
 from PIL import Image
 from ultralytics import YOLO
+import subprocess
+import re
 
 from scenedetect import open_video
 from scenedetect import SceneManager
@@ -37,13 +40,12 @@ PROFILES = {
 
 ACCEL_OPTIONS = ["cpu", "nvidia", "amd", "intel"]
 ENABLE_PREVIEW_DEFAULT = True
-PREVIEW_INTERVAL = 0.15
-PREVIEW_FPS = 1
+PREVIEW_INTERVAL = 0.5
+PREVIEW_FPS = 2
 INSTANCE_SOCKET = None
 INSTANCE_PORT = 54321
 PREVIEW_MAX_WIDTH = 420
 PREVIEW_MAX_HEIGHT = 240
-PREVIEW_FRAMES_PER_SCENE = 3
 
 MODE_ACCEL_COMPAT = {
     "scene": {
@@ -519,7 +521,7 @@ class SceneEngine:
         self._total_frames = None
         self._ffmpeg_proc = None
         self._ui_alive = True
-
+        self._duration = None
 
 
     def stop(self):
@@ -623,7 +625,7 @@ class SceneEngine:
         backend = "pyav"
 
         if self.video.lower().endswith(".mkv"):
-            backend = "opencv"
+            backend = "pyav" ###alert
 
         if backend == "opencv":
             video = open_video(
@@ -634,7 +636,7 @@ class SceneEngine:
             video = open_video(
                 self.video,
                 backend=backend,
-                suppress_output=True,
+                suppress_output=True
             )
 
         if backend == "opencv":
@@ -646,17 +648,19 @@ class SceneEngine:
 
         stats_manager = StatsManager()
         scene_manager = SceneManager(stats_manager)
-
+        scene_manager.auto_downscale = False
+        scene_manager.downscale = 2
         scene_manager.add_detector(
             ContentDetector(
                 threshold=threshold,
-                min_scene_len=int(min_dur * fps)
+                min_scene_len=int(min_dur * fps),
+                luma_only=True
             )
         )
         video_duration = None
 
         try:
-            video_duration = video.duration.get_seconds()
+            video_duration = self._get_video_duration()
         except Exception:
             pass
 
@@ -680,7 +684,6 @@ class SceneEngine:
                     (self._total_frames or 1) / fps,
                     1.0
                 )
-
 
         def _progress_cb(frame_num, _):
             if self._stop:
@@ -706,10 +709,20 @@ class SceneEngine:
             ratio = max(self._analysis_ratio, ratio)
             self._analysis_ratio = ratio
 
-            self.progress.after(
-                0,
-                lambda v=ratio * 0.4: self.progress.update(v)
-            )
+            if self.progress:
+                self.progress.after(
+                    0,
+                    lambda v=ratio * 0.4: self.progress.update(v)
+                )
+
+
+            if self.log:
+                eta = self._calculate_eta()
+                self.log.after(
+                    0,
+                    lambda d=self.detected, c=self.done, e=eta:
+                    self.log.write_status(detected=d, cut=c, eta=e)
+                )
 
             return True
 
@@ -755,6 +768,7 @@ class SceneEngine:
                 self._read_preview_frame(drain=True)
 
             scene_list = scene_manager.get_scene_list()
+            self.detected = len(scene_list)
 
         except RuntimeError:
             return []
@@ -768,9 +782,9 @@ class SceneEngine:
             total_frames = self._total_frames or int(fps)
             self.detected = 1
             return [(0, total_frames)]
-
         scenes = [(start.get_frames(), end.get_frames()) for start, end in scene_list]
-        scenes = sorted(scenes, key=lambda x: x[0])
+        #scenes = sorted(scenes, key=lambda x: x[0])
+
         self.detected = len(scenes)
         return scenes
 
@@ -801,6 +815,7 @@ class SceneEngine:
         return scenes
 
     def _cut_scenes(self, scenes):
+
         outdir = build_output_dir(
             self.output,
             mode="scene" if self.scene_mode else "interval",
@@ -809,113 +824,125 @@ class SceneEngine:
         )
 
         self.total, self.done = len(scenes), 0
+        scenes = sorted(scenes, key=lambda x: x[0])
         fps = self._get_video_fps()
+        video_duration = self._get_video_duration()
 
-        # offset usado SOMENTE para preview
-        OFFSET_SECONDS = {
-            "Low": 0.12,
-            "Normal": 0.08,
-            "High": 0.05
-        }
+        min_frames = int(self.cfg["MIN_FINAL_DURATION"] * fps)
 
-        for idx, (start_frame, end_frame) in enumerate(scenes, 1):
+        filtered = []
+        prev = None
 
-            start_frame = int(start_frame)
-            end_frame = int(end_frame)
-
-            if idx < len(scenes):
-                next_start = scenes[idx][0]
-                end_frame = min(end_frame, next_start)
-
-            start_time = start_frame / fps
-            end_time = end_frame / fps
-
-            if self._stop:
-                break
-
-            if end_frame <= start_frame:
+        for start, end in scenes:
+            if prev is None:
+                filtered.append((start, end))
+                prev = end
                 continue
 
+            if (end - start) < min_frames:
+                continue
 
-            outfile = os.path.join(outdir, f"scene_{idx:04d}.mp4")
+            filtered.append((start, end))
+            prev = end
 
+        scenes = filtered
+
+        if len(scenes) < 1:
+            return
+
+        cut_times = []
+        for start_frame, _ in scenes[1:]:
+            t = round(start_frame / fps, 6)
+
+            if not cut_times or abs(t - cut_times[-1]) > (1 / fps):
+                cut_times.append(t)
+
+        cut_str = ",".join(f"{t:.6f}" for t in cut_times)
+        force_keys = ",".join(f"{t:.6f}" for t in cut_times)
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", self.video,
+
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+
+            "-c:v", "libx264",
+            "-preset", "faster",
+            "-movflags", "+faststart",
+            "-crf", "20",
+            "-pix_fmt", "yuv420p",
+
+            "-f", "segment",
+            "-segment_times", cut_str,
+            "-segment_time_delta", "0.001",
+            "-force_key_frames", force_keys,
+            "-reset_timestamps", "1",
+            "-avoid_negative_ts", "make_zero",
+
+            os.path.join(outdir, "scene_%03d.mp4")
+        ]
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1
+        )
+
+        time_pattern = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+
+        scene_times = [s / fps for s, _ in scenes[1:]]
+
+        self.total = len(scene_times) + 1
+        self.done = 0
+        scene_index = 0
+
+        for line in process.stderr:
+            match = time_pattern.search(line)
+            if not match:
+                continue
+
+            h, m, s = match.groups()
+            current_time = int(h) * 3600 + int(m) * 60 + float(s)
             if self.previewer and self.preview_enabled:
-                preview_time = start_time + OFFSET_SECONDS.get(self.cfg.get("label"), 0.0)
+                now = time.time()
 
-                for _ in range(PREVIEW_FRAMES_PER_SCENE):
+                if now - self.last_preview >= PREVIEW_INTERVAL:
                     thumb = self._read_preview_frame()
-                    if thumb:
-                        if self._ui_alive:
-                            self.previewer.after(
-                                0,
-                                lambda img=thumb: (
-                                    self.previewer.update_image(img)
-                                    if self._ui_alive else None
-                                )
+                    if thumb and self._ui_alive:
+                        self.previewer.after(
+                            0,
+                            lambda img=thumb: (
+                                self.previewer.update_image(img)
+                                if self._ui_alive else None
                             )
-            else:
-                self._read_preview_frame(drain=True)
+                        )
+                    self.last_preview = now
 
-            # ===== FFmpeg PRECISO + ROBUSTO =====
-            duration = end_time - start_time
+            while scene_index < len(scene_times) and scene_times[scene_index] <= current_time:
+                scene_index += 1
 
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-i", self.video,
-                "-ss", f"{start_time:.6f}",
-                "-to", f"{end_time:.6f}",
-                "-map", "0:v:0",
-                "-map", "0:a:0?",
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-crf", "18",
-                "-pix_fmt", "yuv420p",
-                "-vsync", "0",
-                "-avoid_negative_ts", "make_zero",
-                "-threads", "0",
-                outfile
-            ]
+            self.done = scene_index + 1
 
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+            progress_ratio = min(current_time / video_duration, 1.0)
 
-            self._ffmpeg_proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=creationflags
-            )
-
-            start_cut = time.time()
-
-            while self._ffmpeg_proc.poll() is None:
-                if self._stop:
-                    break
-
-                if time.time() - start_cut > 120:
-                    self._ffmpeg_proc.kill()
-                    break
-
-                time.sleep(0.05)
-
-            self._ffmpeg_proc = None
-            self.done += 1
-
-            if self.log:
-                self.log.write_status(
-                    detected=self.detected,
-                    cut=self.done,
-                    eta=self._calculate_eta()
-                )
-
-            if self.progress and self.total:
-                cut_ratio = self.done / self.total
+            if self.progress:
                 self.progress.after(
                     0,
-                    lambda v=0.4 + cut_ratio * 0.6: self.progress.update(v)
+                    lambda v=0.4 + progress_ratio * 0.6: self.progress.update(v)
                 )
 
-        if self.progress and not self._stop and self.done == self.total:
+            if self.log:
+                eta = self._calculate_eta()
+                self.log.after(
+                    0,
+                    lambda d=self.detected, c=self.done, e=eta:
+                    self.log.write_status(detected=d, cut=c, eta=e)
+                )
+        process.wait()
+        if self.progress and not self._stop:
             self.progress.mark_finished()
 
         if self._thumb_container:
@@ -930,27 +957,30 @@ class SceneEngine:
     def _read_preview_frame(self, drain=False):
         if self._stop or not self._ui_alive:
             return None
+
         if not self._thumb_container or not self._thumb_container.stdout:
             return None
 
         frame_size = PREVIEW_MAX_WIDTH * PREVIEW_MAX_HEIGHT * 3
 
         try:
-            raw = self._thumb_container.stdout.read(frame_size)
-            if len(raw) != frame_size:
+            data = self._thumb_container.stdout.read(frame_size)
+            if len(data) != frame_size:
                 return None
 
             if drain:
                 return None
 
-            return Image.frombytes(
+            img = Image.frombytes(
                 "RGB",
                 (PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT),
-                raw
+                data
             )
+
+            return resize_for_preview(img)
+
         except Exception:
             return None
-
     def _stop_preview_decoder(self):
         if not self._thumb_container:
             return
@@ -972,6 +1002,7 @@ class SceneEngine:
 
         cmd = [
             "ffmpeg",
+            "-re",
             "-an",
             "-loglevel", "error",
             "-i", self.video,
@@ -988,7 +1019,7 @@ class SceneEngine:
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            bufsize=10 ** 8
+            bufsize=10 ** 6
         )
 
     def _calculate_eta(self):
@@ -1029,6 +1060,20 @@ class SceneEngine:
             return 30.0  # Normal
         else:
             return 18.0  # High
+
+    def _get_video_duration(self):
+        if self._duration is not None:
+            return self._duration
+
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            self.video
+        ]
+
+        self._duration = float(subprocess.check_output(cmd).decode().strip())
+        return self._duration
 
 
 class FaceDetectionEngine:
