@@ -869,11 +869,13 @@ class SceneEngine:
             "-map", "0:a:0?",
 
             "-c:v", "libx264",
-            "-preset", "faster",
+            "-preset", "slow",
             "-movflags", "+faststart",
-            "-crf", "20",
+            "-crf", "18",
             "-pix_fmt", "yuv420p",
-
+            "-profile:v", "high",
+            "-level", "4.1",
+            "-x264-params", "ref=4:bframes=3:aq-mode=2",
             "-f", "segment",
             "-segment_times", cut_str,
             "-segment_time_delta", "0.001",
