@@ -4,7 +4,7 @@ import subprocess
 import threading
 import time
 import datetime
-
+import io
 import customtkinter as ctk
 import av
 import cv2
@@ -522,6 +522,8 @@ class SceneEngine:
         self._ffmpeg_proc = None
         self._ui_alive = True
         self._duration = None
+        self._last_preview_ratio = -1
+        self._keyframes_cache = None
 
 
     def stop(self):
@@ -546,7 +548,6 @@ class SceneEngine:
             pass
 
         self._thumb_container = None
-        self._stop_preview_decoder()
 
     def total_time(self):
         if not self._start_time:
@@ -567,20 +568,14 @@ class SceneEngine:
         self.last_preview = 0
         self._last_thumb_time = 0
 
-
-
         if self.previewer and self.preview_enabled:
-            self._start_preview_decoder()
-            thumb = self._read_preview_frame()
-            if thumb:
-                if self._ui_alive:
-                    self.previewer.after(
-                        0,
-                        lambda img=thumb: (
-                            self.previewer.update_image(img)
-                            if self._ui_alive else None
-                        )
-                    )
+            try:
+                img = self._get_preview_frame_at(0)
+                if img and self._ui_alive:
+                    self.previewer.after(0, lambda img=img: self.previewer.update_image(img))
+            except:
+                pass
+        threading.Thread(target=self._preview_loop, daemon=True).start()
 
         # Show video info in preview
         if self.previewer and not self._video_info_shown:
@@ -764,9 +759,6 @@ class SceneEngine:
             if detect_exception:
                 raise detect_exception
 
-            if not self.preview_enabled:
-                self._read_preview_frame(drain=True)
-
             scene_list = scene_manager.get_scene_list()
             self.detected = len(scene_list)
 
@@ -815,7 +807,6 @@ class SceneEngine:
         return scenes
 
     def _cut_scenes(self, scenes):
-
         outdir = build_output_dir(
             self.output,
             mode="scene" if self.scene_mode else "interval",
@@ -823,118 +814,50 @@ class SceneEngine:
             accel=self.cfg.get("ENCODER", "cpu")
         )
 
-        self.total, self.done = len(scenes), 0
-        scenes = sorted(scenes, key=lambda x: x[0])
         fps = self._get_video_fps()
-        video_duration = self._get_video_duration()
 
-        min_frames = int(self.cfg["MIN_FINAL_DURATION"] * fps)
-
-        filtered = []
-        prev = None
-
-        for start, end in scenes:
-            if prev is None:
-                filtered.append((start, end))
-                prev = end
-                continue
-
-            if (end - start) < min_frames:
-                continue
-
-            filtered.append((start, end))
-            prev = end
-
-        scenes = filtered
-
-        if len(scenes) < 1:
-            return
-
-        cut_times = []
-        for start_frame, _ in scenes[1:]:
-            t = round(start_frame / fps, 6)
-
-            if not cut_times or abs(t - cut_times[-1]) > (1 / fps):
-                cut_times.append(t)
-
-        cut_str = ",".join(f"{t:.6f}" for t in cut_times)
-        force_keys = ",".join(f"{t:.6f}" for t in cut_times)
-
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i", self.video,
-
-            "-map", "0:v:0",
-            "-map", "0:a:0?",
-
-            "-c:v", "libx264",
-            "-preset", "slow",
-            "-movflags", "+faststart",
-            "-crf", "18",
-            "-pix_fmt", "yuv420p",
-            "-profile:v", "high",
-            "-level", "4.1",
-            "-x264-params", "ref=4:bframes=3:aq-mode=2",
-            "-f", "segment",
-            "-segment_times", cut_str,
-            "-segment_time_delta", "0.001",
-            "-force_key_frames", force_keys,
-            "-reset_timestamps", "1",
-            "-avoid_negative_ts", "make_zero",
-
-            os.path.join(outdir, "scene_%03d.mp4")
-        ]
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1
-        )
-
-        time_pattern = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
-
-        scene_times = [s / fps for s, _ in scenes[1:]]
-
-        self.total = len(scene_times) + 1
+        self.total = len(scenes)
         self.done = 0
-        scene_index = 0
 
-        for line in process.stderr:
-            match = time_pattern.search(line)
-            if not match:
-                continue
+        keyframes = self._get_keyframes()
 
-            h, m, s = match.groups()
-            current_time = int(h) * 3600 + int(m) * 60 + float(s)
-            if self.previewer and self.preview_enabled:
-                now = time.time()
+        for i, (start_frame, end_frame) in enumerate(scenes):
+            if self._stop:
+                break
 
-                if now - self.last_preview >= PREVIEW_INTERVAL:
-                    thumb = self._read_preview_frame()
-                    if thumb and self._ui_alive:
-                        self.previewer.after(
-                            0,
-                            lambda img=thumb: (
-                                self.previewer.update_image(img)
-                                if self._ui_alive else None
-                            )
-                        )
-                    self.last_preview = now
+            start_time = start_frame / fps
+            end_time = end_frame / fps
 
-            while scene_index < len(scene_times) and scene_times[scene_index] <= current_time:
-                scene_index += 1
+            output_file = os.path.join(outdir, f"scene_{i:03d}.mp4")
 
-            self.done = scene_index + 1
+            aligned_start = self._nearest_keyframe_before(start_time, keyframes)
+            aligned_end = self._nearest_keyframe_before(end_time, keyframes)
 
-            progress_ratio = min(current_time / video_duration, 1.0)
+            start_delta = abs(start_time - aligned_start)
+            end_delta = abs(end_time - aligned_end)
 
-            if self.progress:
-                self.progress.after(
-                    0,
-                    lambda v=0.4 + progress_ratio * 0.6: self.progress.update(v)
+            needs_precise_cut = (
+                    start_delta > (1 / fps) or
+                    end_delta > (1 / fps)
+            )
+
+            if not needs_precise_cut:
+                # ✅ corte perfeito sem re-encode
+                self._run_ffmpeg_copy(aligned_start, end_time, output_file)
+            else:
+                self._run_ffmpeg_precise_cut(
+                    self.video,
+                    start_time,
+                    end_time,
+                    output_file
                 )
+
+            self.done += 1
+
+            # progresso
+            if self.progress:
+                ratio = self.done / self.total
+                self.progress.after(0, lambda v=ratio: self.progress.update(v))
 
             if self.log:
                 eta = self._calculate_eta()
@@ -943,86 +866,12 @@ class SceneEngine:
                     lambda d=self.detected, c=self.done, e=eta:
                     self.log.write_status(detected=d, cut=c, eta=e)
                 )
-        process.wait()
-        if self.progress and not self._stop:
-            self.progress.mark_finished()
 
-        if self._thumb_container:
-            try:
-                self._thumb_container.close()
-            except Exception:
-                pass
-            self._thumb_container = None
+    def _get_progress_ratio(self):
+        if self.total > 0:
+            return self.done / self.total
 
-        self._stop_preview_decoder()
-
-    def _read_preview_frame(self, drain=False):
-        if self._stop or not self._ui_alive:
-            return None
-
-        if not self._thumb_container or not self._thumb_container.stdout:
-            return None
-
-        frame_size = PREVIEW_MAX_WIDTH * PREVIEW_MAX_HEIGHT * 3
-
-        try:
-            data = self._thumb_container.stdout.read(frame_size)
-            if len(data) != frame_size:
-                return None
-
-            if drain:
-                return None
-
-            img = Image.frombytes(
-                "RGB",
-                (PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT),
-                data
-            )
-
-            return resize_for_preview(img)
-
-        except Exception:
-            return None
-    def _stop_preview_decoder(self):
-        if not self._thumb_container:
-            return
-
-        try:
-            self._thumb_container.terminate()
-            time.sleep(0.2)
-            if self._thumb_container.poll() is None:
-                self._thumb_container.kill()
-        except Exception:
-            pass
-
-        self._thumb_container = None
-
-
-    def _start_preview_decoder(self):
-        if self._thumb_container:
-            return
-
-        cmd = [
-            "ffmpeg",
-            "-re",
-            "-an",
-            "-loglevel", "error",
-            "-i", self.video,
-            "-vf",
-            f"fps={PREVIEW_FPS},"
-            f"scale={PREVIEW_MAX_WIDTH}:{PREVIEW_MAX_HEIGHT}:force_original_aspect_ratio=decrease,"
-            f"pad={PREVIEW_MAX_WIDTH}:{PREVIEW_MAX_HEIGHT}:(ow-iw)/2:(oh-ih)/2",
-            "-f", "rawvideo",
-            "-pix_fmt", "rgb24",
-            "-"
-        ]
-
-        self._thumb_container = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            bufsize=10 ** 6
-        )
+        return self._analysis_ratio
 
     def _calculate_eta(self):
         if self.done == 0:
@@ -1077,6 +926,166 @@ class SceneEngine:
         self._duration = float(subprocess.check_output(cmd).decode().strip())
         return self._duration
 
+    def _get_keyframes(self):
+        if self._keyframes_cache is not None:
+            return self._keyframes_cache
+
+        cmd = [
+            "ffprobe",
+            "-select_streams", "v",
+            "-skip_frame", "nokey",
+            "-show_frames",
+            "-show_entries", "frame=pkt_pts_time",
+            "-of", "csv=p=0",
+            self.video
+        ]
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True
+        )
+
+        keyframes = []
+        for line in result.stdout.splitlines():
+            try:
+                keyframes.append(float(line.strip()))
+            except:
+                pass
+
+        self._keyframes_cache = keyframes
+        return keyframes
+
+    def _nearest_keyframe_before(self, t, keyframes):
+        prev = 0.0
+        for k in keyframes:
+            if k > t:
+                break
+            prev = k
+        return prev
+
+    def _run_ffmpeg_copy(self, start, end, output):
+        duration = end - start
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+
+            "-ss", f"{start:.6f}",
+
+            "-i", self.video,
+
+            "-t", f"{duration:.6f}",  #
+
+            "-c", "copy",
+
+            "-copyts",
+            "-avoid_negative_ts", "1",
+            "-fflags", "+genpts",
+
+            "-muxpreload", "0",
+            "-muxdelay", "0",
+
+            output
+        ]
+
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _run_ffmpeg_precise_cut(self, original_input, start_time, end_time, output):
+        cmd = [
+            "ffmpeg",
+            "-y",
+
+            "-i", original_input,
+            "-ss", f"{start_time:.6f}",
+
+            "-t", f"{end_time - start_time:.6f}",
+
+            # 🔥 força precisão
+            "-avoid_negative_ts", "make_zero",
+            "-fflags", "+genpts",
+
+            # re-encode mínimo
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "18",
+
+            "-pix_fmt", "yuv420p",
+
+            "-c:a", "copy",
+
+            output
+        ]
+
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _preview_loop(self, continuea=None):
+        while not self._stop:
+            if self.previewer and self.preview_enabled:
+                now = time.time()
+
+                if now - self.last_preview >= PREVIEW_INTERVAL:
+                    try:
+                        ratio = self._get_progress_ratio()
+                        ratio = max(0.0, min(1.0, ratio))
+
+                        if abs(ratio - self._last_preview_ratio) < 0.02:
+                            self.last_preview = now
+
+                        self._last_preview_ratio = ratio
+                        duration = self._get_video_duration()
+                        t = ratio * duration
+
+                        img = self._get_preview_frame_at(t)
+
+                        if img and self._ui_alive:
+                            self.previewer.after(
+                                0,
+                                lambda img=img: (
+                                    self.previewer.update_image(img)
+                                    if self._ui_alive else None
+                                )
+                            )
+
+                    except Exception:
+                        pass
+
+                    self.last_preview = now
+
+            time.sleep(0.01)
+
+    def _get_preview_frame_at(self, t):
+        try:
+            cmd = [
+                "ffmpeg",
+                "-ss", f"{t:.6f}",
+                "-i", self.video,
+                "-frames:v", "1",
+                "-vf",
+                f"scale={PREVIEW_MAX_WIDTH}:{PREVIEW_MAX_HEIGHT}:force_original_aspect_ratio=decrease",
+                "-f", "image2pipe",
+                "-vcodec", "png",
+                "-"
+            ]
+
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL
+            )
+
+            data = proc.stdout.read()
+            proc.stdout.close()
+            proc.wait()
+
+            if not data:
+                return None
+
+            img = Image.open(io.BytesIO(data)).convert("RGB")
+            return resize_for_preview(img)
+
+        except Exception:
+            return None
 
 class FaceDetectionEngine:
     def __init__(self, video, output, logbox=None, progressbar=None,
