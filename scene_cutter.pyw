@@ -1778,7 +1778,6 @@ class SceneCutterApp(ctk.CTk):
             self.video_selector.button,
             self.output_selector.button,
             *self.mode_radios,
-            *self.profile_radios,
             *self.accel_radios
         ]:
             widget.configure(state=state)
@@ -1786,10 +1785,17 @@ class SceneCutterApp(ctk.CTk):
         self.video_selector.entry.configure(state=state)
         self.output_selector.entry.configure(state=state)
 
+        if disabled:
+            for rb in self.profile_radios:
+                rb.configure(state="disabled")
+        else:
+            if self.cut_mode.get() != "interval":
+                for rb in self.profile_radios:
+                    rb.configure(state="normal")
+
+        # interval entry
         if self.cut_mode.get() == "interval":
-            self.interval_entry.configure(
-                state=state if disabled else "normal"
-            )
+            self.interval_entry.configure(state=state)
 
         # Preview switch
         self.preview_switch.configure(
@@ -1797,10 +1803,22 @@ class SceneCutterApp(ctk.CTk):
         )
 
     def _on_cut_mode_change(self, *args):
-        if self.cut_mode.get() == "interval":
-            self.interval_entry.pack(anchor="w", padx=(186,0), pady=(0,8))
+        mode = self.cut_mode.get()
+
+        # Interval input
+        if mode == "interval":
+            self.interval_entry.pack(anchor="w", padx=(186, 0), pady=(0, 8))
         else:
             self.interval_entry.pack_forget()
+
+        if mode == "interval":
+            for rb in self.profile_radios:
+                rb.configure(state="disabled")
+        else:
+            # respeita estado global (ex: running)
+            state = "disabled" if self.running else "normal"
+            for rb in self.profile_radios:
+                rb.configure(state=state)
 
         self.update_accel_radios()
 
