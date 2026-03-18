@@ -15,6 +15,7 @@ import signal
 from PIL import Image
 from ultralytics import YOLO
 import subprocess
+import bisect
 import re
 
 from scenedetect import open_video
@@ -53,7 +54,7 @@ MODE_ACCEL_COMPAT = {
         "inference": {"cpu"}
     },
     "interval": {
-        "encoder": {"cpu"},
+        "encoder": {"cpu", "nvidia", "amd", "intel"},
         "inference": {"cpu"}
     },
     "faces": {
@@ -820,6 +821,8 @@ class SceneEngine:
         self.done = 0
 
         keyframes = self._get_keyframes()
+        if not keyframes:
+            keyframes = [0.0]
 
         for i, (start_frame, end_frame) in enumerate(scenes):
             if self._stop:
@@ -831,7 +834,7 @@ class SceneEngine:
             output_file = os.path.join(outdir, f"scene_{i:03d}.mp4")
 
             aligned_start = self._nearest_keyframe_before(start_time, keyframes)
-            aligned_end = self._nearest_keyframe_before(end_time, keyframes)
+            aligned_end = self._nearest_keyframe_after(end_time, keyframes)
 
             start_delta = abs(start_time - aligned_start)
             end_delta = abs(end_time - aligned_end)
@@ -842,14 +845,14 @@ class SceneEngine:
             )
 
             if not needs_precise_cut:
-                # ✅ corte perfeito sem re-encode
-                self._run_ffmpeg_copy(aligned_start, end_time, output_file)
+                self._run_ffmpeg_copy(aligned_start, aligned_end, output_file)
             else:
                 self._run_ffmpeg_precise_cut(
                     self.video,
                     start_time,
                     end_time,
-                    output_file
+                    output_file,
+                    aligned_start
                 )
 
             self.done += 1
@@ -934,8 +937,8 @@ class SceneEngine:
             "ffprobe",
             "-select_streams", "v",
             "-skip_frame", "nokey",
-            "-show_frames",
             "-show_entries", "frame=pkt_pts_time",
+            "-loglevel", "error",
             "-of", "csv=p=0",
             self.video
         ]
@@ -952,17 +955,9 @@ class SceneEngine:
                 keyframes.append(float(line.strip()))
             except:
                 pass
-
+        keyframes = sorted(set(keyframes))
         self._keyframes_cache = keyframes
         return keyframes
-
-    def _nearest_keyframe_before(self, t, keyframes):
-        prev = 0.0
-        for k in keyframes:
-            if k > t:
-                break
-            prev = k
-        return prev
 
     def _run_ffmpeg_copy(self, start, end, output):
         duration = end - start
@@ -975,14 +970,9 @@ class SceneEngine:
 
             "-i", self.video,
 
-            "-t", f"{duration:.6f}",  #
-
+            "-t", f"{duration:.6f}",
             "-c", "copy",
-
-            "-copyts",
-            "-avoid_negative_ts", "1",
-            "-fflags", "+genpts",
-
+            "-avoid_negative_ts", "make_zero",
             "-muxpreload", "0",
             "-muxdelay", "0",
 
@@ -991,33 +981,67 @@ class SceneEngine:
 
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    def _run_ffmpeg_precise_cut(self, original_input, start_time, end_time, output):
+    def _run_ffmpeg_precise_cut(self, original_input, start_time, end_time, output, aligned_start):
+        encoder = self.cfg.get("ENCODER", "cpu")
+
+        encoder_map = {
+            "cpu": ["-c:v", "libx264"],
+            "nvidia": ["-c:v", "h264_nvenc"],
+            "amd": ["-c:v", "h264_amf"],
+            "intel": ["-c:v", "h264_qsv"],
+        }
+
+        preset_map = {
+            "cpu": "ultrafast",
+            "nvidia": "p4",
+            "amd": "balanced",
+            "intel": "medium"
+        }
+
+        # QUALIDADE
+        if encoder == "cpu":
+            quality = ["-crf", "18"]
+        elif encoder == "nvidia":
+            quality = [
+                "-cq", "19",
+                "-rc", "vbr",
+                "-b:v", "0",
+                "-maxrate", "10M",
+                "-bufsize", "20M"
+            ]
+        else:
+            quality = ["-b:v", "5M"]
+
+        offset = max(0.0, start_time - aligned_start)
+
         cmd = [
             "ffmpeg",
             "-y",
 
+            "-ss", f"{aligned_start:.6f}",
             "-i", original_input,
-            "-ss", f"{start_time:.6f}",
 
+            "-ss", f"{offset:.6f}",
             "-t", f"{end_time - start_time:.6f}",
 
-            # 🔥 força precisão
             "-avoid_negative_ts", "make_zero",
-            "-fflags", "+genpts",
 
-            # re-encode mínimo
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "18",
+            *encoder_map.get(encoder, encoder_map["cpu"]),
+            "-preset", preset_map.get(encoder, "fast"),
+            *quality,
 
             "-pix_fmt", "yuv420p",
-
-            "-c:a", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
 
             output
         ]
 
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _nearest_keyframe_before(self, t, keyframes):
+        idx = bisect.bisect_right(keyframes, t)
+        return keyframes[idx - 1] if idx > 0 else 0.0
 
     def _preview_loop(self, continuea=None):
         while not self._stop:
@@ -1064,7 +1088,7 @@ class SceneEngine:
                 "-vf",
                 f"scale={PREVIEW_MAX_WIDTH}:{PREVIEW_MAX_HEIGHT}:force_original_aspect_ratio=decrease",
                 "-f", "image2pipe",
-                "-vcodec", "png",
+                "-vcodec", "mjpeg",
                 "-"
             ]
 
@@ -1086,6 +1110,14 @@ class SceneEngine:
 
         except Exception:
             return None
+
+    def _nearest_keyframe_after(self, t, keyframes):
+        if not keyframes:
+            return t
+        idx = bisect.bisect_left(keyframes, t)
+        if idx < len(keyframes):
+            return keyframes[idx]
+        return min(keyframes[-1], t)
 
 class FaceDetectionEngine:
     def __init__(self, video, output, logbox=None, progressbar=None,
