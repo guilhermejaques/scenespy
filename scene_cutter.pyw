@@ -41,7 +41,7 @@ PROFILES = {
 
 ACCEL_OPTIONS = ["cpu", "nvidia", "amd", "intel"]
 ENABLE_PREVIEW_DEFAULT = True
-PREVIEW_INTERVAL = 0.5
+PREVIEW_INTERVAL = 0.1
 PREVIEW_FPS = 2
 INSTANCE_SOCKET = None
 INSTANCE_PORT = 54321
@@ -138,6 +138,7 @@ def test_ffmpeg_encoder(encoder: str) -> bool:
             text=True,
             timeout=5
         )
+        time.sleep(0.05)
 
         return result.returncode == 0
     except Exception:
@@ -525,7 +526,7 @@ class SceneEngine:
         self._duration = None
         self._last_preview_ratio = -1
         self._keyframes_cache = None
-
+        self._preview_cap = None
 
     def stop(self):
         self._stop = True
@@ -549,6 +550,14 @@ class SceneEngine:
             pass
 
         self._thumb_container = None
+
+        try:
+            if self._preview_cap:
+                self._preview_cap.release()
+        except Exception:
+            pass
+
+        self._preview_cap = None
 
     def total_time(self):
         if not self._start_time:
@@ -576,6 +585,14 @@ class SceneEngine:
                     self.previewer.after(0, lambda img=img: self.previewer.update_image(img))
             except:
                 pass
+
+        if self.preview_enabled:
+            try:
+                import cv2
+                self._preview_cap = cv2.VideoCapture(self.video)
+            except Exception:
+                self._preview_cap = None
+
         threading.Thread(target=self._preview_loop, daemon=True).start()
 
         # Show video info in preview
@@ -591,6 +608,13 @@ class SceneEngine:
         self._cut_scenes(scenes)
 
         self._end_time = time.time()
+
+        if self._preview_cap:
+            try:
+                self._preview_cap.release()
+            except Exception:
+                pass
+            self._preview_cap = None
 
         return True
 
@@ -696,6 +720,14 @@ class SceneEngine:
                 return True
 
             current_time = frame_idx / fps
+
+            if not hasattr(self, "_last_ui_update"):
+                self._last_ui_update = 0
+
+            if time.time() - self._last_ui_update < 0.3:
+                return True
+
+            self._last_ui_update = time.time()
 
             if not video_duration:
                 return True
@@ -948,6 +980,7 @@ class SceneEngine:
             capture_output=True,
             text=True
         )
+        time.sleep(0.05)
 
         keyframes = []
         for line in result.stdout.splitlines():
@@ -980,64 +1013,82 @@ class SceneEngine:
         ]
 
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.05)
 
-    def _run_ffmpeg_precise_cut(self, original_input, start_time, end_time, output, aligned_start):
+    def _run_ffmpeg_precise_cut(self, input_file, start_time, end_time, output, aligned_start):
         encoder = self.cfg.get("ENCODER", "cpu")
 
-        encoder_map = {
-            "cpu": ["-c:v", "libx264"],
-            "nvidia": ["-c:v", "h264_nvenc"],
-            "amd": ["-c:v", "h264_amf"],
-            "intel": ["-c:v", "h264_qsv"],
-        }
+        duration = end_time - start_time
+        bitrate = self._get_video_bitrate()
 
-        preset_map = {
-            "cpu": "ultrafast",
-            "nvidia": "p4",
-            "amd": "balanced",
-            "intel": "medium"
-        }
-
-        # QUALIDADE
+        # Configuração específica por encoder
         if encoder == "cpu":
-            quality = ["-crf", "18"]
+            codec = [
+                "-c:v", "libx264",
+                "-crf", "18",
+                "-preset", "slow"
+            ]
+
         elif encoder == "nvidia":
-            quality = [
+            codec = [
+                "-c:v", "h264_nvenc",
+                "-preset", "p5",
                 "-cq", "19",
                 "-rc", "vbr",
                 "-b:v", "0",
-                "-maxrate", "10M",
-                "-bufsize", "20M"
+                "-spatial_aq", "1",
+                "-temporal_aq", "1",
+                "-rc-lookahead", "20"
             ]
-        else:
-            quality = ["-b:v", "5M"]
 
-        offset = max(0.0, start_time - aligned_start)
+        elif encoder == "amd":
+            codec = [
+                "-c:v", "h264_amf",
+                "-quality", "balanced",
+                "-rc", "vbr_peak"
+            ]
+
+        elif encoder == "intel":
+            codec = [
+                "-c:v", "h264_qsv",
+                "-preset", "medium",
+                "-global_quality", "20"
+            ]
+
+        else:
+            codec = [
+                "-c:v", "libx264",
+                "-crf", "18"
+            ]
 
         cmd = [
             "ffmpeg",
             "-y",
 
-            "-ss", f"{aligned_start:.6f}",
-            "-i", original_input,
+            # seek antes do input = mais rápido
+            "-ss", f"{start_time:.6f}",
+            "-i", input_file,
 
-            "-ss", f"{offset:.6f}",
-            "-t", f"{end_time - start_time:.6f}",
+            "-t", f"{duration:.6f}",
 
-            "-avoid_negative_ts", "make_zero",
-
-            *encoder_map.get(encoder, encoder_map["cpu"]),
-            "-preset", preset_map.get(encoder, "fast"),
-            *quality,
+            *codec,
 
             "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-b:a", "192k",
+            "-c:a", "copy",
+            "-movflags", "+faststart",
 
             output
         ]
 
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # bitrate opcional (mantém compatibilidade com alguns players)
+        if bitrate and encoder == "cpu":
+            cmd += ["-maxrate", str(bitrate), "-bufsize", str(bitrate * 2)]
+
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        time.sleep(0.05)
+
+        if result.returncode != 0:
+            print("FFMPEG ERROR:\n", result.stderr.decode())
 
     def _nearest_keyframe_before(self, t, keyframes):
         idx = bisect.bisect_right(keyframes, t)
@@ -1054,7 +1105,8 @@ class SceneEngine:
                         ratio = max(0.0, min(1.0, ratio))
 
                         if abs(ratio - self._last_preview_ratio) < 0.02:
-                            self.last_preview = now
+                            time.sleep(0.02)
+                            continue
 
                         self._last_preview_ratio = ratio
                         duration = self._get_video_duration()
@@ -1076,36 +1128,21 @@ class SceneEngine:
 
                     self.last_preview = now
 
-            time.sleep(0.01)
+            time.sleep(0.05)
 
     def _get_preview_frame_at(self, t):
+        if not self._preview_cap:
+            return None
+
         try:
-            cmd = [
-                "ffmpeg",
-                "-ss", f"{t:.6f}",
-                "-i", self.video,
-                "-frames:v", "1",
-                "-vf",
-                f"scale={PREVIEW_MAX_WIDTH}:{PREVIEW_MAX_HEIGHT}:force_original_aspect_ratio=decrease",
-                "-f", "image2pipe",
-                "-vcodec", "mjpeg",
-                "-"
-            ]
+            # posiciona no tempo (ms)
+            self._preview_cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
 
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL
-            )
-
-            data = proc.stdout.read()
-            proc.stdout.close()
-            proc.wait()
-
-            if not data:
+            ret, frame = self._preview_cap.read()
+            if not ret or frame is None:
                 return None
 
-            img = Image.open(io.BytesIO(data)).convert("RGB")
+            img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             return resize_for_preview(img)
 
         except Exception:
@@ -1118,6 +1155,19 @@ class SceneEngine:
         if idx < len(keyframes):
             return keyframes[idx]
         return min(keyframes[-1], t)
+
+    def _get_video_bitrate(self):
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=bit_rate",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            self.video
+        ]
+        try:
+            return int(subprocess.check_output(cmd).decode().strip())
+        except:
+            return None
 
 class FaceDetectionEngine:
     def __init__(self, video, output, logbox=None, progressbar=None,
@@ -2034,6 +2084,7 @@ def remux_if_needed(path):
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
+    time.sleep(0.05)
 
     if os.path.exists(fixed) and is_valid_video_file(fixed):
         return fixed
