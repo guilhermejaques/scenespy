@@ -4,19 +4,15 @@ import subprocess
 import threading
 import time
 import datetime
-import io
+import json
 import customtkinter as ctk
-import av
 import cv2
 import os
 import gc
 import mediapipe as mp
-import signal
+import bisect
 from PIL import Image
 from ultralytics import YOLO
-import subprocess
-import bisect
-import re
 
 from scenedetect import open_video
 from scenedetect import SceneManager
@@ -34,9 +30,9 @@ except Exception:
 
 # Config
 PROFILES = {
-    "Low": {"label": "Low", "THRESHOLD": 48.0, "MIN_FINAL_DURATION": 7.0},
-    "Normal": {"label": "Normal", "THRESHOLD": 32.0, "MIN_FINAL_DURATION": 4.0},
-    "High": {"label": "High", "THRESHOLD": 20.0, "MIN_FINAL_DURATION": 1.0},
+    "Low": {"label": "Low", "THRESHOLD": 48.0, "MIN_SCENE_LEN": 8.0},
+    "Normal": {"label": "Normal", "THRESHOLD": 30.0, "MIN_SCENE_LEN": 5.0},
+    "High": {"label": "High", "THRESHOLD": 15.0, "MIN_SCENE_LEN": 2.0},
 }
 
 ACCEL_OPTIONS = ["cpu", "nvidia", "amd", "intel"]
@@ -625,51 +621,38 @@ class SceneEngine:
             "ffprobe", "-v", "error",
             "-select_streams", "v:0",
             "-show_entries", "stream=width,height,r_frame_rate:format=bit_rate",
-            "-of", "default=noprint_wrappers=1:nokey=1",
+            "-of", "json",
             self.video
         ]
         try:
-            out = subprocess.check_output(cmd).decode().splitlines()
-            width, height, fps, bitrate = out
-            num, den = fps.split("/")
+            out = subprocess.check_output(cmd).decode()
+            data = json.loads(out)
+            streams = data.get("streams", [])
+            s = streams[0] if streams else {}
+            width = s.get("width", "?")
+            height = s.get("height", "?")
+            fps_str = s.get("r_frame_rate", "0/1")
+            num, den = fps_str.split("/")
             fps_float = round(int(num) / int(den), 2)
+            bitrate = data.get("format", {}).get("bit_rate", "0")
             return f"{width}x{height} | FPS: {fps_float} | Bitrate: {int(bitrate)/1000:.0f} kbps"
         except Exception:
             return "Video info unavailable"
 
     def _detect_scenes_progressive(self):
-        threshold = self._map_threshold()
-        min_dur = self.cfg["MIN_FINAL_DURATION"]
+        threshold = self.cfg["THRESHOLD"]
+        min_dur = self.cfg["MIN_SCENE_LEN"]
         fps = self._get_video_fps()
 
-        backend = "pyav"
-
-        if self.video.lower().endswith(".mkv"):
-            backend = "pyav" ###alert
-
-        if backend == "opencv":
-            video = open_video(
-                self.video,
-                backend="opencv"
-            )
-        else:
-            video = open_video(
-                self.video,
-                backend=backend,
-                suppress_output=True
-            )
-
-        if backend == "opencv":
-            try:
-                _ = video.frame_rate
-            except Exception:
-                video.close()
-                raise RuntimeError("Failed to read video stream")
+        video = open_video(
+            self.video,
+            backend="pyav",
+            suppress_output=True
+        )
 
         stats_manager = StatsManager()
         scene_manager = SceneManager(stats_manager)
-        scene_manager.auto_downscale = False
-        scene_manager.downscale = 2
+        scene_manager.auto_downscale = True
         scene_manager.add_detector(
             ContentDetector(
                 threshold=threshold,
@@ -808,7 +791,12 @@ class SceneEngine:
             self.detected = 1
             return [(0, total_frames)]
         scenes = [(start.get_frames(), end.get_frames()) for start, end in scene_list]
-        #scenes = sorted(scenes, key=lambda x: x[0])
+        scenes = sorted(scenes, key=lambda x: x[0])
+
+        # Filtra cenas mais curtas que o mínimo e mescla com as adjacentes
+        min_dur = self.cfg.get("MIN_SCENE_LEN")
+        if min_dur:
+            scenes = self._post_filter_scenes(scenes, fps, min_dur)
 
         self.detected = len(scenes)
         return scenes
@@ -856,6 +844,8 @@ class SceneEngine:
         if not keyframes:
             keyframes = [0.0]
 
+        output_ext = get_best_output_ext(self.video)
+
         for i, (start_frame, end_frame) in enumerate(scenes):
             if self._stop:
                 break
@@ -863,7 +853,7 @@ class SceneEngine:
             start_time = start_frame / fps
             end_time = end_frame / fps
 
-            output_file = os.path.join(outdir, f"scene_{i:03d}.mp4")
+            output_file = os.path.join(outdir, f"scene_{i:03d}{output_ext}")
 
             aligned_start = self._nearest_keyframe_before(start_time, keyframes)
             aligned_end = self._nearest_keyframe_after(end_time, keyframes)
@@ -889,7 +879,6 @@ class SceneEngine:
 
             self.done += 1
 
-            # progresso
             if self.progress:
                 ratio = self.done / self.total
                 self.progress.after(0, lambda v=ratio: self.progress.update(v))
@@ -936,16 +925,23 @@ class SceneEngine:
         self._fps = float(num) / float(den)
         return self._fps
 
-    def _map_threshold(self):
-        # Ajuste empírico baseado no ContentDetector
-        base = self.cfg["THRESHOLD"]
+    def _post_filter_scenes(self, scenes, fps, min_duration):
+        """Remove cenas mais curtas que min_duration e mescla com as adjacentes."""
+        if not scenes or min_duration <= 0:
+            return scenes
 
-        if base >= 45:
-            return 42.0  # Low
-        elif base >= 30:
-            return 30.0  # Normal
-        else:
-            return 18.0  # High
+        filtered = []
+        for start, end in scenes:
+            dur = (end - start) / fps
+            if dur >= min_duration:
+                filtered.append((start, end))
+            elif filtered:
+                # mescla com cena anterior
+                prev_start, prev_end = filtered[-1]
+                filtered[-1] = (prev_start, end)
+            # se não há cena anterior, descarta a cena curta
+
+        return filtered if filtered else [(0, int(fps))]
 
     def _get_video_duration(self):
         if self._duration is not None:
@@ -986,7 +982,7 @@ class SceneEngine:
         for line in result.stdout.splitlines():
             try:
                 keyframes.append(float(line.strip()))
-            except:
+            except Exception:
                 pass
         keyframes = sorted(set(keyframes))
         self._keyframes_cache = keyframes
@@ -998,17 +994,13 @@ class SceneEngine:
         cmd = [
             "ffmpeg",
             "-y",
-
             "-ss", f"{start:.6f}",
-
             "-i", self.video,
-
             "-t", f"{duration:.6f}",
             "-c", "copy",
             "-avoid_negative_ts", "make_zero",
             "-muxpreload", "0",
             "-muxdelay", "0",
-
             output
         ]
 
@@ -1021,14 +1013,12 @@ class SceneEngine:
         duration = end_time - start_time
         bitrate = self._get_video_bitrate()
 
-        # Configuração específica por encoder
         if encoder == "cpu":
             codec = [
                 "-c:v", "libx264",
                 "-crf", "18",
                 "-preset", "slow"
             ]
-
         elif encoder == "nvidia":
             codec = [
                 "-c:v", "h264_nvenc",
@@ -1040,21 +1030,18 @@ class SceneEngine:
                 "-temporal_aq", "1",
                 "-rc-lookahead", "20"
             ]
-
         elif encoder == "amd":
             codec = [
                 "-c:v", "h264_amf",
                 "-quality", "balanced",
                 "-rc", "vbr_peak"
             ]
-
         elif encoder == "intel":
             codec = [
                 "-c:v", "h264_qsv",
                 "-preset", "medium",
                 "-global_quality", "20"
             ]
-
         else:
             codec = [
                 "-c:v", "libx264",
@@ -1064,35 +1051,37 @@ class SceneEngine:
         cmd = [
             "ffmpeg",
             "-y",
-
-            # seek antes do input = mais rápido
             "-ss", f"{start_time:.6f}",
             "-i", input_file,
-
             "-t", f"{duration:.6f}",
-
             *codec,
-
             "-pix_fmt", "yuv420p",
             "-c:a", "copy",
-            "-movflags", "+faststart",
-
-            output
         ]
 
-        # bitrate opcional (mantém compatibilidade com alguns players)
+        if output.endswith(".mp4"):
+            cmd.append("-movflags")
+            cmd.append("+faststart")
+
+        cmd.append(output)
+
         if bitrate and encoder == "cpu":
             cmd += ["-maxrate", str(bitrate), "-bufsize", str(bitrate * 2)]
 
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         time.sleep(0.05)
 
-        if result.returncode != 0:
-            print("FFMPEG ERROR:\n", result.stderr.decode())
-
     def _nearest_keyframe_before(self, t, keyframes):
         idx = bisect.bisect_right(keyframes, t)
         return keyframes[idx - 1] if idx > 0 else 0.0
+
+    def _nearest_keyframe_after(self, t, keyframes):
+        if not keyframes:
+            return t
+        idx = bisect.bisect_left(keyframes, t)
+        if idx < len(keyframes):
+            return keyframes[idx]
+        return min(keyframes[-1], t)
 
     def _preview_loop(self, continuea=None):
         while not self._stop:
@@ -1147,14 +1136,6 @@ class SceneEngine:
 
         except Exception:
             return None
-
-    def _nearest_keyframe_after(self, t, keyframes):
-        if not keyframes:
-            return t
-        idx = bisect.bisect_left(keyframes, t)
-        if idx < len(keyframes):
-            return keyframes[idx]
-        return min(keyframes[-1], t)
 
     def _get_video_bitrate(self):
         cmd = [
@@ -1812,6 +1793,7 @@ class SceneCutterApp(ctk.CTk):
 
     def run_engine(self, scene_mode):
         result = False
+        original_video = self.engine.video if self.engine else ""
         try:
             self.engine.video = remux_if_needed(self.engine.video)
             result = self.engine.run(scene_mode=scene_mode)
@@ -1824,6 +1806,9 @@ class SceneCutterApp(ctk.CTk):
 
             if result and engine:
                 total_time = engine.total_time()
+
+            if original_video:
+                cleanup_intermediates(original_video)
 
             self.engine = None
             self.stop_pending = False
@@ -1906,6 +1891,7 @@ class SceneCutterApp(ctk.CTk):
 
     def run_face_engine(self):
         result = False
+        original_video = self.engine.video if self.engine else ""
         try:
             self.engine.video = remux_if_needed(self.engine.video)
             result = self.engine.run()
@@ -1918,6 +1904,9 @@ class SceneCutterApp(ctk.CTk):
 
             if result and engine:
                 total_time = engine.total_time()
+
+            if original_video:
+                cleanup_intermediates(original_video)
 
             self.engine = None
             self.stop_pending = False
@@ -2021,7 +2010,7 @@ def resize_for_preview(img, max_w=PREVIEW_MAX_WIDTH, max_h=PREVIEW_MAX_HEIGHT):
     new_w = max(1, int(w * scale))
     new_h = max(1, int(h * scale))
 
-    return img.resize((new_w, new_h), Image.BILINEAR)
+    return img.resize((new_w, new_h), Image.Resampling.BILINEAR)
 
 
 def is_valid_video_file(path: str) -> bool:
@@ -2036,7 +2025,6 @@ def is_valid_video_file(path: str) -> bool:
         ]
 
         out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL)
-        import json
         data = json.loads(out)
 
         streams = data.get("streams", [])
@@ -2054,27 +2042,73 @@ def is_valid_video_file(path: str) -> bool:
     except Exception:
         return False
 
-def remux_if_needed(path):
-    ext = os.path.splitext(path)[1].lower()
+_CODECS_MP4_SAFE = {"h264", "hevc", "mpeg4", "mjpeg", "av1"}
 
-    # Somente MKV tem esse problema estrutural de index/keyframes
+_INTERMEDIATE_PATTERNS = ("_fixed.mp4", "_fixed.mkv", "_temp.mp4", "_temp.mkv")
+
+
+def get_video_codec(path):
+    """Return the video codec name (lowercase) or empty string."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            path
+        ]
+        return subprocess.check_output(cmd).decode().strip().lower()
+    except Exception:
+        return ""
+
+
+def get_best_output_ext(video_path):
+    """Choose .mp4 for codecs that support MP4 well, .mkv otherwise."""
+    codec = get_video_codec(video_path)
+    if codec in _CODECS_MP4_SAFE:
+        return ".mp4"
+    return ".mkv"
+
+
+def cleanup_intermediates(source_path):
+    """Remove intermediate remux files produced during processing."""
+    base = os.path.splitext(source_path)[0]
+    for pattern in _INTERMEDIATE_PATTERNS:
+        tmp = base + pattern
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+
+
+def remux_if_needed(path):
+    """Re-mux MKV to MP4 usando reencode rápido para timestamps limpos.
+
+    Stream-copy (-c copy) preserva timestamps deslocados do MKV, fazendo
+    com que os frame numbers detectados não batam com os frames originais.
+    Reencode com CRF 23 + ultrafast gera frames/PTS do zero, frame-exatos.
+    """
+    ext = os.path.splitext(path)[1].lower()
     if ext != ".mkv":
         return path
 
-    fixed = path[:-4] + "_fixed.mkv"
+    fixed = path[:-4] + "_fixed.mp4"
     if os.path.exists(fixed) and is_valid_video_file(fixed):
         return fixed
 
     cmd = [
-        "ffmpeg",
-        "-y",
+        "ffmpeg", "-y",
         "-fflags", "+genpts+igndts",
         "-err_detect", "ignore_err",
         "-i", path,
-        "-map", "0:v:0",
-        "-map", "0:a?",
-        "-c", "copy",
-        "-max_interleave_delta", "0",
+        # Reencode rápido — timestamps regenerados do zero
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "23",
+        "-c:a", "copy",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
         "-avoid_negative_ts", "make_zero",
         fixed
     ]
