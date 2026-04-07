@@ -2142,8 +2142,10 @@ class SceneCutterApp(ctk.CTk):
             for rb in self.profile_radios:
                 rb.configure(state="disabled")
         else:
-            if self.cut_mode.get() != "interval":
-                for rb in self.profile_radios:
+            for rb in self.profile_radios:
+                if self.cut_mode.get() == "faces" and rb.cget("value") == "Auto":
+                    rb.configure(state="disabled")
+                else:
                     rb.configure(state="normal")
 
         # interval entry
@@ -2167,8 +2169,16 @@ class SceneCutterApp(ctk.CTk):
         if mode == "interval":
             for rb in self.profile_radios:
                 rb.configure(state="disabled")
+        elif mode == "faces":
+            if self.profile.get() == "Auto":
+                self.profile.set("Normal")
+            state = "disabled" if self.running else "normal"
+            for rb in self.profile_radios:
+                if rb.cget("value") == "Auto":
+                    rb.configure(state="disabled")
+                else:
+                    rb.configure(state=state)
         else:
-            # respeita estado global (ex: running)
             state = "disabled" if self.running else "normal"
             for rb in self.profile_radios:
                 rb.configure(state=state)
