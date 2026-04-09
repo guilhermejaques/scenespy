@@ -160,9 +160,10 @@ venv.bak/
 .mypy_cache/
 .dmypy.json
 dmypy.json
-
+.qwen
 # Pyre type checker
 .pyre/
+.idea
 
 # pytype static type analyzer
 .pytype/
