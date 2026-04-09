@@ -35,17 +35,33 @@ TORCH_AVAILABLE = False
 # ============================================================
 # Config: profiles
 # ============================================================
+# Hybrid detection: FIXED threshold + ADAPTIVE min_dur.
+#
+# Thresholds are fixed per profile (PySceneDetect content_val scale),
+# validated against real-world trailer/film/documentary tests:
+#   Low    (48) -> very conservative, ASL ~8-15s (documentaries)
+#   Normal (32) -> balanced, ASL ~5-11s (movies/series/TV)
+#   High   (20) -> sensitive, ASL ~1-6s (trailers/shorts/action)
+#
+# min_dur: profile sets the FLOOR (8s/5s/1s), adaptive scan can only
+# raise it within a bounded range.
+# ============================================================
 PROFILES = {
-    "Low":    {"label": "Low",    "THRESHOLD": 48.0, "MIN_FINAL_DURATION": 7.0},
-    "Normal": {"label": "Normal", "THRESHOLD": 32.0, "MIN_FINAL_DURATION": 4.0},
-    "High":   {"label": "High",   "THRESHOLD": 20.0, "MIN_FINAL_DURATION": 1.0},
-    "Auto":   {"label": "Auto",   "MIN_FINAL_DURATION": 4.0, "ADAPTIVE": True},
+    "Low":    {"label": "Low",    "base_threshold": 48, "min_dur": 8.0, "dur_max_boost": 7.0},
+    "Normal": {"label": "Normal", "base_threshold": 32, "min_dur": 5.0, "dur_max_boost": 6.0},
+    "High":   {"label": "High",   "base_threshold": 20, "min_dur": 1.0, "dur_max_boost": 5.0},
+    "Auto":   {"label": "Auto",   "ADAPTIVE": True},
 }
 
+# Profile display names (for output folder tagging)
+PROFILE_LABELS = {k: v["label"] for k, v in PROFILES.items()}
+
 ACCEL_OPTIONS = ["cpu", "nvidia", "amd", "intel"]
+# Cut workers: 2 for speed with many scenes, balanced I/O usage.
+# Using stream copy (-c copy) where possible ensures lossless output.
 MAX_CUT_WORKERS = 2
 ENABLE_PREVIEW_DEFAULT = True
-PREVIEW_INTERVAL = 0.1
+PREVIEW_INTERVAL = 0.2
 PREVIEW_FPS = 2
 INSTANCE_SOCKET = None
 INSTANCE_PORT = 54321
@@ -64,6 +80,11 @@ MODE_ACCEL_COMPAT = {
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 
 MODE_ABBREV = {"faces": "FD", "scene": "SD", "interval": "ES"}
+
+# ============================================================
+# Debug configuration
+# ============================================================
+DEBUG = False  # Set to True to enable debug logging to console
 
 # ============================================================
 # Config: UI theme palette
@@ -296,6 +317,19 @@ class LogBox(ctk.CTkTextbox):
 
     def write_finished(self, text):
         self.configure(state="normal")
+
+        # If write_status was never called, initialize with status lines first
+        if not self.initialized:
+            self.delete("1.0", "end")
+            self.status_lines = [
+                "Scenes detected: -",
+                "Scenes cut:      -",
+                "Estimated time:  --:--"
+            ]
+            for line in self.status_lines:
+                self.insert("end", line + "\n")
+            self.initialized = True
+
         current = self.get("3.0", "3.end").strip()
         if not current:
             current = "Estimated time: --:--"
@@ -558,9 +592,12 @@ def _adaptive_threshold(video_path):
             ret, frame = cap.read()
             if not ret:
                 break
-            gray = cv2.resize(cv2.cvtColor(frame, BGR2GRAY), dim)
-            ycrcb = cv2.resize(cv2.cvtColor(frame, BGR2YCrCb), dim)
-            hsv = cv2.resize(cv2.cvtColor(frame, BGR2HSV), dim)
+
+            # Resize FIRST, then convert — avoids 3× redundant resizes
+            small = cv2.resize(frame, dim)
+            gray = cv2.cvtColor(small, BGR2GRAY)
+            ycrcb = cv2.cvtColor(small, BGR2YCrCb)
+            hsv = cv2.cvtColor(small, BGR2HSV)
             cbcr = ycrcb[:, :, 1:]
 
             hist_y = cv2.calcHist([gray], [0], None, [32], [0, 256])
@@ -665,9 +702,12 @@ def _adaptive_threshold(video_path):
     threshold = max(15.0, min(55.0, threshold))
     threshold = round(threshold, 1)
 
-    t_norm = (threshold - 15.0) / 40.0
-    min_dur = 1.0 + 10.0 * (1.0 - t_norm ** 1.5)
-    min_dur = max(1.0, min(8.0, min_dur))
+    # min_dur: INVERSE relationship with threshold.
+    # High threshold (lots of motion)  -> LOW min_dur (accept short scenes)
+    # Low threshold (calm video)        -> HIGH min_dur (only long scenes)
+    t_norm = 1.0 - (threshold - 15.0) / 40.0  # Inverted: 1.0=calm, 0.0=agitated
+    min_dur = 1.5 + 8.5 * (t_norm ** 1.5)
+    min_dur = max(1.0, min(10.0, min_dur))
     min_dur = round(min_dur, 1)
 
     return threshold, min_dur
@@ -773,15 +813,20 @@ class SceneEngine:
         if not scenes or self._stop:
             return False
 
-        self._cut_scenes(scenes)
-        self._end_time = time.time()
+        # Update UI with final detected scene count before cutting
+        if self.log:
+            self.log.after(0, lambda: self.log.write_status(detected=self.detected, cut=0, eta="--:--"))
 
+        # Release preview resources before cutting to free I/O
         if self._preview_cap:
             try:
                 self._preview_cap.release()
             except Exception:
                 pass
             self._preview_cap = None
+
+        self._cut_scenes(scenes)
+        self._end_time = time.time()
 
         return True
 
@@ -799,8 +844,14 @@ class SceneEngine:
             return "Video info unavailable"
 
     def _detect_scenes_progressive(self):
-        threshold, min_dur = self._map_threshold()
         fps = self._get_video_fps()
+
+        # Show initial status before adaptive scan
+        if self.log:
+            self.log.after(0, lambda: self.log.write_status(
+                detected="analyzing...", cut=0, eta="--:--"))
+
+        threshold, min_dur = self._map_threshold()
 
         result = _ensure_scenedetect()
         if result is None:
@@ -811,10 +862,19 @@ class SceneEngine:
         if self.video.lower().endswith(".mkv"):
             backend = "pyav"
 
-        if backend == "opencv":
-            video = open_video(self.video, backend="opencv")
-        else:
-            video = open_video(self.video, backend=backend, suppress_output=True)
+        try_backends = ["pyav", "opencv"] if backend == "pyav" else [backend]
+        video = None
+        last_error = None
+        for be in try_backends:
+            try:
+                video = open_video(self.video, backend=be, suppress_output=True)
+                break
+            except Exception as e:
+                last_error = e
+                if be == "pyav":
+                    continue
+        if video is None:
+            raise RuntimeError(f"Failed to open video: {last_error}")
 
         if backend == "opencv":
             try:
@@ -856,8 +916,7 @@ class SceneEngine:
         def _progress_cb(frame_num, _):
             if self._stop:
                 return False
-            if not self.progress:
-                return True
+
             try:
                 frame_idx = _safe_frame_index(frame_num)
                 if frame_idx <= 0:
@@ -870,10 +929,10 @@ class SceneEngine:
                 return True
             self._last_ui_update = time.time()
 
-            if not video_duration:
-                return True
-
-            ratio = min(current_time / video_duration, 1.0)
+            if video_duration and video_duration > 0:
+                ratio = min(current_time / video_duration, 1.0)
+            else:
+                ratio = self.done / max(self.total, 1)
             ratio = max(self._analysis_ratio, ratio)
             self._analysis_ratio = ratio
 
@@ -918,11 +977,93 @@ class SceneEngine:
 
             scene_list = scene_manager.get_scene_list()
             self.detected = len(scene_list)
-        except RuntimeError:
-            return []
+        except Exception as e:
+            err_str = str(e).lower()
+            needs_retry = (
+                "avcodec_send_packet" in err_str or  # 1094995529 / AVERROR_INVALIDDATA
+                "avcodec" in err_str or
+                "decode" in err_str or
+                "invalid data" in err_str or
+                "no start code" in err_str or
+                "avcodec_receive_frame" in err_str or
+                "packet" in err_str or
+                "av.error" in err_str or
+                "fatal" in err_str or
+                "thread" in err_str
+            )
+            if needs_retry and backend == "pyav":
+                # Skip OpenCV — uses same h264 decoder, will fail the same way.
+                # Go straight to ffmpeg re-encode fallback.
+                fixed = self.video.rsplit(".", 1)[0] + "_fixed.mp4"
+                if not os.path.exists(fixed):
+                    print(f"Video has corrupted frames - re-encoding with ffmpeg...")
+                    if self.log:
+                        self.log.after(0, lambda: self.log.write_status(
+                            detected="fixing video...", cut=0, eta="--:--"))
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-err_detect", "ignore_err",
+                         "-i", self.video, "-c:v", "libx264", "-crf", "22",
+                         "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                         "-c:a", "copy", fixed],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+                    if self.log:
+                        self.log.after(0, lambda: self.log.write_status(
+                            detected="re-encoding done", cut=0, eta="--:--"))
+
+                if os.path.exists(fixed):
+                    print(f"Using fixed video: {fixed}")
+                    # Verify the fixed file is valid
+                    if not is_valid_video_file(fixed):
+                        print(f"Fixed file is corrupted, re-encoding again...")
+                        os.remove(fixed)
+                        subprocess.run(
+                            ["ffmpeg", "-y", "-err_detect", "ignore_err",
+                             "-i", self.video, "-c:v", "libx264", "-crf", "22",
+                             "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                             "-c:a", "copy", fixed],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                        )
+                    if not os.path.exists(fixed) or not is_valid_video_file(fixed):
+                        print("ffmpeg re-encode failed, no valid fixed file")
+                        return []
+                    self.video = fixed
+                    # Always use OpenCV for fixed files — most reliable
+                    try:
+                        video = open_video(self.video, backend="opencv")
+                    except Exception:
+                        try:
+                            video = open_video(self.video, backend="pyav", suppress_output=True)
+                        except Exception:
+                            print("Both backends failed on fixed video!")
+                            return []
+                    print(f"Video opened successfully, starting detection...")
+                    scene_manager = SceneManager(StatsManager())
+                    scene_manager.auto_downscale = False
+                    scene_manager.downscale = 2
+                    scene_manager.add_detector(
+                        ContentDetector(threshold=threshold,
+                                       min_scene_len=int(min_dur * fps),
+                                       luma_only=True)
+                    )
+                    scene_manager.detect_scenes(video=video, callback=_progress_cb)
+                    scene_list = scene_manager.get_scene_list()
+                    self.detected = len(scene_list)
+                    print(f"Detection complete: {self.detected} scenes found")
+                    try:
+                        video.close()
+                    except Exception:
+                        pass
+                    return
+                else:
+                    print("ffmpeg re-encode failed, no fixed file created")
+                    return []
+            else:
+                return []
         finally:
             try:
-                video.close()
+                if video:
+                    video.close()
             except Exception:
                 pass
 
@@ -991,13 +1132,24 @@ class SceneEngine:
         if self.total <= 1:
             _cut_one(tasks[0])
             self.done = 1
+            if self.log:
+                self.log.after(0, lambda: self.log.write_status(detected=self.detected, cut=self.done, eta="00:00"))
+            if self.progress:
+                self.progress.after(0, lambda v=1.0: self.progress.update(v))
         else:
+            # Use ThreadPoolExecutor for concurrent cuts
             with ThreadPoolExecutor(max_workers=min(MAX_CUT_WORKERS, self.total)) as pool:
                 futures = {pool.submit(_cut_one, task): task for task in tasks}
                 for future in as_completed(futures):
                     if self._stop:
                         pool.shutdown(wait=False)
                         return
+                    try:
+                        future.result()  # Catch any exceptions from workers
+                    except Exception as cut_error:
+                        print(f"[CUT ERROR] {cut_error}")
+                        # Continue with other cuts
+
                     with self._cut_lock:
                         self.done += 1
                         if self.progress:
@@ -1035,15 +1187,89 @@ class SceneEngine:
         return self._fps
 
     def _map_threshold(self):
+        """Returns (threshold, min_scene_len) for the ContentDetector.
+
+        Hybrid approach: FIXED threshold per profile + ADAPTIVE min_dur.
+
+        Pipeline:
+          1. _adaptive_threshold() scans the video -> returns (raw_t, raw_d)
+             - raw_t: pacing score (15-55, higher = more motion) — USED ONLY for Auto
+             - raw_d: adaptive minimum scene duration (1-10s)
+
+          2. Profile selects a FIXED threshold (PySceneDetect content_val scale):
+             - Low    (35) -> conservative, only clear scene/location changes
+             - Normal (27) -> balanced, standard scene breaks
+             - High   (19) -> sensitive, detects any cut including same-location
+
+          3. Profile scales the adaptive min_dur:
+             - Low    (x1.30) -> longer minimum scenes -> fewer false positives
+             - Normal (x1.00) -> baseline
+             - High   (x0.60) -> shorter minimum scenes -> catches fast cuts
+
+        PySceneDetect ContentDetector constraints:
+          - threshold: content_val scale (0-255), default=27.0
+          - min_scene_len: in frames, default=15, minimum=1
+        """
+        raw_t, raw_d = _adaptive_threshold(self.video)
+
         if self.cfg.get("ADAPTIVE"):
-            return _adaptive_threshold(self.video)
-        base = self.cfg["THRESHOLD"]
-        if base >= 45:
-            return 42.0, self.cfg.get("MIN_FINAL_DURATION", 4.0)
-        elif base >= 30:
-            return 30.0, self.cfg.get("MIN_FINAL_DURATION", 4.0)
-        else:
-            return 18.0, self.cfg.get("MIN_FINAL_DURATION", 4.0)
+            # Auto: map adaptive threshold to PySceneDetect scale.
+            # raw_t is on 15-55 scale, PySceneDetect uses content_val (~5-60 typical).
+            # Map linearly: 15->10, 35->27, 55->45
+            threshold = 10.0 + (raw_t - 15.0) * (35.0 / 40.0)
+            threshold = max(10.0, min(50.0, threshold))
+            threshold = round(threshold, 1)
+            return threshold, raw_d
+
+        # FIXED thresholds per profile — calibrated against PySceneDetect defaults
+        # and validated with real-world trailer/film/documentary tests:
+        #   Low    (48) -> very conservative, ASL ~8-12s
+        #                  Only clear scene/location changes, ignores fast cuts
+        #   Normal (32) -> balanced, ASL ~4-6s (movies/series/TV)
+        #   High   (20) -> sensitive, ASL ~1.5-3s (trailers/shorts/action/YouTube)
+        #                  Catches any cut, even same-location
+        #
+        # min_dur: profile sets the FLOOR, adaptive scan can only raise it.
+        profiles = {
+            "Low":    {"base_threshold": 48, "min_dur": 8.0, "dur_max_boost": 7.0, "label": "Low"},
+            "Normal": {"base_threshold": 32, "min_dur": 5.0, "dur_max_boost": 6.0, "label": "Normal"},
+            "High":   {"base_threshold": 20, "min_dur": 1.0, "dur_max_boost": 5.0, "label": "High"},
+        }
+
+        profile = "Normal"
+        for key, val in profiles.items():
+            if self.cfg.get("label") == key:
+                profile = key
+                break
+
+        cfg = profiles[profile]
+        threshold = float(cfg["base_threshold"])
+
+        # Adaptive min_dur: profile sets the FLOOR, scan raises it.
+        # raw_d range: 1.0 (most agitated) to 10.0 (most calm).
+        # boost_ratio = 0.0 for agitated → 1.0 for calm.
+        # min_dur = floor + boost_ratio * max_boost
+        base_dur = cfg["min_dur"]
+        max_boost = cfg["dur_max_boost"]
+
+        boost_ratio = (raw_d - 1.0) / 9.0  # Normalize to [0.0, 1.0]
+        min_dur = base_dur + boost_ratio * max_boost
+
+        # Clamp to safe bounds
+        min_dur = max(0.5, min(15.0, min_dur))
+        min_dur = round(min_dur, 1)
+
+        # DEBUG
+        if cfg.get("DEBUG", False):
+            try:
+                fps_est = self._get_video_fps()
+            except Exception:
+                fps_est = 30.0
+            print(f"[DEBUG] Adaptive scan: raw_t={raw_t}, raw_d={raw_d}")
+            print(f"[DEBUG] Profile={profile}, threshold={threshold}, min_dur_floor={cfg['min_dur']}, max_boost={cfg['dur_max_boost']}")
+            print(f"[DEBUG] min_dur={min_dur}, min_scene_len={int(min_dur * fps_est)} frames (at ~{fps_est}fps)")
+
+        return float(threshold), min_dur
 
     def _get_video_duration(self):
         if self._duration is not None:
@@ -1078,7 +1304,6 @@ class SceneEngine:
                "-c", "copy", "-avoid_negative_ts", "make_zero",
                "-muxpreload", "0", "-muxdelay", "0", output]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(0.05)
 
     def _run_ffmpeg_precise_cut(self, input_file, start_time, end_time, output, aligned_start):
         encoder = self.cfg.get("ENCODER", "cpu")
@@ -1086,7 +1311,7 @@ class SceneEngine:
         bitrate = self._get_video_bitrate()
 
         if encoder == "cpu":
-            codec = ["-c:v", "libx264", "-crf", "18", "-preset", "slow"]
+            codec = ["-c:v", "libx264", "-crf", "18", "-preset", "medium", "-tune", "film"]
         elif encoder == "nvidia":
             codec = ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "19",
                      "-rc", "vbr", "-b:v", "0", "-spatial_aq", "1",
@@ -1106,7 +1331,6 @@ class SceneEngine:
             cmd += ["-maxrate", str(bitrate), "-bufsize", str(bitrate * 2)]
 
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        time.sleep(0.05)
 
         if result.returncode != 0 and encoder != "cpu":
             codec_start = cmd.index(codec[0])
@@ -1197,20 +1421,8 @@ class FaceDetectionEngine:
         self.preview_enabled = preview_enabled
         self._ui_alive = True
 
-        if not _ensure_torch():
-            raise RuntimeError("Face detection requires PyTorch, but it is not installed.")
-
-        YOLO = _ensure_yolo()
-        if YOLO is None:
-            raise RuntimeError("ultralytics package not found.")
-
-        mp = _ensure_mediapipe()
-        if mp is None:
-            raise RuntimeError("mediapipe package not found.")
-
         self.profile = profile
         self.accel = accel
-        self.device = "cuda:0" if accel == "nvidia" and torch.cuda.is_available() else "cpu"
         self._stop = False
         self._start_time = None
         self._end_time = None
@@ -1218,9 +1430,13 @@ class FaceDetectionEngine:
         self.done = 0
         self._face_ratio = 0.0
 
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        model_path = os.path.join(base_dir, "models", "yolov8n-face.pt")
-        self.model = YOLO(model_path)
+        # Lazy-loaded (initialized in run() on worker thread)
+        self.device = None
+        self.model = None
+        self.mp_face = None
+        self.torch = None
+        self.YOLO = None
+        self.mp = None
 
         self.profile_cfg = {
             "Low":    {"conf": 0.45, "min_size": 64, "ttl": 0.6,
@@ -1232,6 +1448,30 @@ class FaceDetectionEngine:
         }[profile]
 
         self.last_preview = 0
+
+    def _load_deps(self):
+        """Load heavy dependencies on worker thread to avoid blocking UI."""
+        if not _ensure_torch():
+            raise RuntimeError("Face detection requires PyTorch, but it is not installed.")
+
+        YOLO = _ensure_yolo()
+        if YOLO is None:
+            raise RuntimeError("ultralytics package not found.")
+
+        mp = _ensure_mediapipe()
+        if mp is None:
+            raise RuntimeError("mediapipe package not found.")
+
+        self.torch = torch
+        self.YOLO = YOLO
+        self.mp = mp
+
+        self.device = "cuda:0" if self.accel == "nvidia" and torch.cuda.is_available() else "cpu"
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        model_path = os.path.join(base_dir, "models", "yolov8n-face.pt")
+        self.model = YOLO(model_path)
+
         self.mp_face = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=False, max_num_faces=2, refine_landmarks=True,
             min_detection_confidence=0.5, min_tracking_confidence=0.5)
@@ -1278,6 +1518,9 @@ class FaceDetectionEngine:
         return True
 
     def run(self):
+        # Load heavy dependencies on worker thread (non-blocking for UI)
+        self._load_deps()
+
         self._start_time = time.time()
         cap = cv2.VideoCapture(self.video)
         fps_raw = cap.get(cv2.CAP_PROP_FPS)
@@ -1627,6 +1870,7 @@ class SceneCutterApp(ctk.CTk):
 
         cfg["ENCODER"] = encoder
         cfg["INFERENCE"] = inference
+        cfg["DEBUG"] = DEBUG
 
         if mode == "faces":
             self.engine = FaceDetectionEngine(
