@@ -1027,7 +1027,7 @@ class SceneEngine:
                     print(f"Video has corrupted frames - re-encoding with ffmpeg...")
                     if self.log:
                         self.log.after(0, lambda: self.log.write_status(
-                            detected="fixing video...", cut=0, eta="--:--"))
+                            detected="Fixing corrupted video...", cut=0, eta="--:--"))
                     subprocess.run(
                         ["ffmpeg", "-y", "-err_detect", "ignore_err",
                          "-i", self.video, "-c:v", "libx264", "-crf", "22",
@@ -1038,7 +1038,7 @@ class SceneEngine:
                     )
                     if self.log:
                         self.log.after(0, lambda: self.log.write_status(
-                            detected="re-encoding done", cut=0, eta="--:--"))
+                            detected="Re-encoding complete", cut=0, eta="--:--"))
 
                 if os.path.exists(fixed):
                     print(f"Using fixed video: {fixed}")
@@ -1056,6 +1056,9 @@ class SceneEngine:
                         )
                     if not os.path.exists(fixed) or not is_valid_video_file(fixed):
                         print("ffmpeg re-encode failed, no valid fixed file")
+                        if self.log:
+                            self.log.after(0, lambda: self.log.write_status(
+                                detected="Failed to fix corrupted video", cut=0, eta="--:--"))
                         return []
                     self.video = fixed
                     # FIX: invalidate caches when video changes
@@ -1070,6 +1073,9 @@ class SceneEngine:
                             video = open_video(self.video, backend="pyav", suppress_output=True)
                         except Exception:
                             print("Both backends failed on fixed video!")
+                            if self.log:
+                                self.log.after(0, lambda: self.log.write_status(
+                                    detected="Failed to open fixed video", cut=0, eta="--:--"))
                             return []
                     print(f"Video opened successfully, starting detection...")
                     scene_manager = SceneManager(StatsManager())
@@ -1084,6 +1090,9 @@ class SceneEngine:
                     scene_list = scene_manager.get_scene_list()
                     self.detected = len(scene_list)
                     print(f"Detection complete: {self.detected} scenes found")
+                    if self.log:
+                        self.log.after(0, lambda d=self.detected: self.log.write_status(
+                            detected=f"{d} scenes detected", cut=0, eta="--:--"))
                     try:
                         video.close()
                     except Exception:
@@ -1091,6 +1100,9 @@ class SceneEngine:
                     return scene_list  # FIX: return scene_list instead of bare return
                 else:
                     print("ffmpeg re-encode failed, no fixed file created")
+                    if self.log:
+                        self.log.after(0, lambda: self.log.write_status(
+                            detected="Failed to create fixed video", cut=0, eta="--:--"))
                     return []
             else:
                 return []
@@ -1182,6 +1194,10 @@ class SceneEngine:
                         future.result()  # Catch any exceptions from workers
                     except Exception as cut_error:
                         print(f"[CUT ERROR] {cut_error}")
+                        if self.log:
+                            err_msg = str(cut_error)[:60]
+                            self.log.after(0, lambda e=err_msg: self.log.write_status(
+                                detected=f"Cut error: {e}", cut=self.done, eta="--:--"))
                         # Continue with other cuts
 
                     with self._cut_lock:
@@ -1394,6 +1410,10 @@ class SceneEngine:
             if result2.returncode == 0:
                 return
             print("FFMPEG ERROR:\n", result.stderr.decode())
+            if self.log:
+                err_msg = result.stderr.decode()[:80]
+                self.log.after(0, lambda e=err_msg: self.log.write_status(
+                    detected=f"FFmpeg error: {e}", cut=self.done, eta="--:--"))
 
     def _nearest_keyframe_before(self, t, keyframes):
         idx = bisect.bisect_right(keyframes, t)
@@ -2138,7 +2158,7 @@ class SceneCutterApp(ctk.CTk):
     def confirm_stop(self):
         if not self.running or self.engine is None or self.stop_pending:
             return
-        answer = mb.askyesno("Confirm stop",
+        answer = mb.askyesno("Confirm Stop",
                               "The process is still running.\nDo you really want to stop it?")
         if not answer:
             return
@@ -2161,8 +2181,8 @@ class SceneCutterApp(ctk.CTk):
 # ============================================================
 if __name__ == "__main__":
     if not single_instance():
-        mb.showerror("Aplicativo já em execução",
-                      "Este aplicativo já está aberto.")
+        mb.showerror("Application Already Running",
+                      "This application is already running.")
         sys.exit(0)
 
     ctk.set_appearance_mode("dark")
