@@ -942,6 +942,7 @@ class SceneEngine:
             if self.progress:
                 self.progress.after(0, lambda v=ratio * 0.4: self.progress.update(v))
 
+            # Update log - ETA will show "--:--" during detection, real time during cuts
             if self.log:
                 eta = self._calculate_eta()
                 self.log.after(0, lambda d=self.detected, c=self.done, e=eta:
@@ -1175,15 +1176,27 @@ class SceneEngine:
         return self._analysis_ratio
 
     def _calculate_eta(self):
-        if self.done == 0:
-            return "--:--"
+        """Calculate ETA - only during cut phase, not during detection.
+
+        Returns "--:--" during detection phase to avoid showing stale/misleading estimates.
+        Shows real ETA based on actual cut rate during cutting phase.
+        """
         elapsed = time.time() - self._start_time
-        avg_per_scene = elapsed / self.done
-        remaining = self.total - self.done
-        eta_seconds = int(avg_per_scene * remaining)
-        m, s = divmod(eta_seconds, 60)
-        h, m = divmod(m, 60)
-        return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+        if elapsed < 1:
+            return "--:--"
+
+        # Only show ETA during cut phase (when we have actual cut progress)
+        if self.total > 0 and self.done > 0:
+            rate = self.done / elapsed  # scenes per second
+            remaining = self.total - self.done
+            eta_seconds = int(remaining / rate) if rate > 0 else 0
+            if 0 < eta_seconds < 86400:
+                m, s = divmod(eta_seconds, 60)
+                h, m = divmod(m, 60)
+                return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+        # Detection phase: don't show ETA (it will be reset anyway)
+        return "--:--"
 
     def _get_video_fps(self):
         if self._fps is not None:
@@ -1431,6 +1444,7 @@ class FaceDetectionEngine:
         self.previewer = previewer
         self.preview_enabled = preview_enabled
         self._ui_alive = True
+        self._last_eta_update = 0  # FIX: Initialize for ETA throttling
 
         self.profile = profile
         self.accel = accel
@@ -1663,12 +1677,16 @@ class FaceDetectionEngine:
                         self.last_preview = now
 
                 # FIX: Use after() for thread-safe UI updates
+                # Only update ETA every ~0.5 seconds to avoid wasteful calculations
                 if self.log:
-                    detected_val = self.detected
-                    done_val = self.done
-                    eta_val = self._calculate_eta(frame_idx, total_frames)
-                    self.log.after(0, lambda d=detected_val, c=done_val, e=eta_val:
-                        self.log.write_status(detected=d, cut=c, eta=e))
+                    now = time.time()
+                    if now - getattr(self, "_last_eta_update", 0) >= 0.5:
+                        self._last_eta_update = now
+                        detected_val = self.detected
+                        done_val = self.done
+                        eta_val = self._calculate_eta(frame_idx, total_frames)
+                        self.log.after(0, lambda d=detected_val, c=done_val, e=eta_val:
+                            self.log.write_status(detected=d, cut=c, eta=e))
 
                 # FIX: Use after() for thread-safe UI updates
                 if self.progress:
@@ -1702,13 +1720,26 @@ class FaceDetectionEngine:
         return not self._stop
 
     def _calculate_eta(self, frame_idx, total_frames):
-        if frame_idx == 0:
+        """Calculate ETA for face detection - optimized and realistic.
+
+        Based on frame processing rate with sanity checks.
+        """
+        if frame_idx == 0 or total_frames == 0:
             return "--:--"
         elapsed = time.time() - self._start_time
-        avg = elapsed / frame_idx
+        if elapsed < 1:
+            return "--:--"
+
+        # Frames per second
+        rate = frame_idx / elapsed
         remaining = total_frames - frame_idx
-        eta = int(avg * remaining)
-        m, s = divmod(eta, 60)
+        eta_seconds = int(remaining / rate) if rate > 0 else 0
+
+        # Sanity check
+        if eta_seconds < 0 or eta_seconds > 86400:
+            return "--:--"
+
+        m, s = divmod(eta_seconds, 60)
         h, m = divmod(m, 60)
         return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
