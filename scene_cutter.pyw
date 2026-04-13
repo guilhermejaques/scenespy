@@ -33,6 +33,30 @@ torch = None
 TORCH_AVAILABLE = False
 
 # ============================================================
+# Config: user settings persistence
+# ============================================================
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+
+def load_settings():
+    """Load user settings from JSON file."""
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {"last_video": "", "last_output": ""}
+
+def save_settings(video="", output=""):
+    """Save user settings to JSON file."""
+    try:
+        settings = {"last_video": video, "last_output": output}
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+    except Exception:
+        pass
+
+# ============================================================
 # Config: profiles
 # ============================================================
 # Hybrid detection: FIXED threshold + ADAPTIVE min_dur.
@@ -1758,6 +1782,10 @@ class SceneCutterApp(ctk.CTk):
         self.resizable(False, False)
         self.preview_enabled = ENABLE_PREVIEW_DEFAULT
         self.available_accel = detect_available_accel()
+        
+        # Load saved settings
+        self.saved_settings = load_settings()
+        
         self._build_ui()
 
     def _build_ui(self):
@@ -1773,6 +1801,14 @@ class SceneCutterApp(ctk.CTk):
         self.video_selector.pack(fill="x", padx=12)
         self.output_selector = DirectorySelector(files, "Output folder")
         self.output_selector.pack(fill="x", padx=12)
+        
+        # Restore saved paths
+        last_video = self.saved_settings.get("last_video", "")
+        last_output = self.saved_settings.get("last_output", "")
+        if last_video:
+            self.video_selector.entry.insert(0, last_video)
+        if last_output:
+            self.output_selector.entry.insert(0, last_output)
 
         # Cut mode
         mode = Section(self.left, "Cut Mode")
@@ -1876,6 +1912,9 @@ class SceneCutterApp(ctk.CTk):
     def start_process(self):
         video = self.video_selector.get().strip()
         output = self.output_selector.get().strip()
+
+        # Save paths for next session
+        save_settings(video=video, output=output)
 
         if not video and not output:
             return
