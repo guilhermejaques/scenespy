@@ -364,7 +364,7 @@ class ProgressBar(ctk.CTkFrame):
         self._logical_value = 0.0
         self._visual_value = 0.0
         self._animating = False
-        self._speed = 0.03  # Faster animation to keep up with progress
+        self._speed = 0.008
 
     def update(self, value):
         if not self._enabled:
@@ -809,26 +809,23 @@ class SceneEngine:
             self.previewer.update_info(self._get_video_info_text())
             self._video_info_shown = True
 
-        try:  # FIX: ensure preview_cap is released on exception
-            scenes = self._detect_scenes_progressive() if scene_mode else self._fixed_interval()
-            if not scenes or self._stop:
-                return False
+        scenes = self._detect_scenes_progressive() if scene_mode else self._fixed_interval()
+        if not scenes or self._stop:
+            return False
 
-            # Update UI with final detected scene count before cutting
-            if self.log:
-                self.log.after(0, lambda: self.log.write_status(detected=self.detected, cut=0, eta="--:--"))
+        # Update UI with final detected scene count before cutting
+        if self.log:
+            self.log.after(0, lambda: self.log.write_status(detected=self.detected, cut=0, eta="--:--"))
 
-            # Keep preview active during cuts - release only after all cuts are done
-            self._cut_scenes(scenes)
-        finally:
-            # FIX: always release preview cap
-            if self._preview_cap:
-                try:
-                    self._preview_cap.release()
-                except Exception:
-                    pass
-                self._preview_cap = None
+        # Release preview resources before cutting to free I/O
+        if self._preview_cap:
+            try:
+                self._preview_cap.release()
+            except Exception:
+                pass
+            self._preview_cap = None
 
+        self._cut_scenes(scenes)
         self._end_time = time.time()
 
         return True
@@ -1008,8 +1005,7 @@ class SceneEngine:
                          "-i", self.video, "-c:v", "libx264", "-crf", "22",
                          "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                          "-c:a", "copy", fixed],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        timeout=300  # FIX: add timeout to prevent hanging
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                     )
                     if self.log:
                         self.log.after(0, lambda: self.log.write_status(
@@ -1026,17 +1022,12 @@ class SceneEngine:
                              "-i", self.video, "-c:v", "libx264", "-crf", "22",
                              "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                              "-c:a", "copy", fixed],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            timeout=300  # FIX: add timeout to prevent hanging
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                         )
                     if not os.path.exists(fixed) or not is_valid_video_file(fixed):
                         print("ffmpeg re-encode failed, no valid fixed file")
                         return []
                     self.video = fixed
-                    # FIX: invalidate caches when video changes
-                    self._fps = None
-                    self._duration = None
-                    self._keyframes_cache = None
                     # Always use OpenCV for fixed files — most reliable
                     try:
                         video = open_video(self.video, backend="opencv")
@@ -1063,7 +1054,7 @@ class SceneEngine:
                         video.close()
                     except Exception:
                         pass
-                    return scene_list  # FIX: return scene_list instead of bare return
+                    return
                 else:
                     print("ffmpeg re-encode failed, no fixed file created")
                     return []
@@ -1312,8 +1303,7 @@ class SceneEngine:
                "-i", self.video, "-t", f"{duration:.6f}",
                "-c", "copy", "-avoid_negative_ts", "make_zero",
                "-muxpreload", "0", "-muxdelay", "0", output]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=300)  # FIX: add timeout
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def _run_ffmpeg_precise_cut(self, input_file, start_time, end_time, output, aligned_start):
         encoder = self.cfg.get("ENCODER", "cpu")
@@ -1340,8 +1330,7 @@ class SceneEngine:
         if bitrate and encoder == "cpu":
             cmd += ["-maxrate", str(bitrate), "-bufsize", str(bitrate * 2)]
 
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                timeout=300)  # FIX: add timeout
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
         if result.returncode != 0 and encoder != "cpu":
             codec_start = cmd.index(codec[0])
@@ -1534,170 +1523,157 @@ class FaceDetectionEngine:
 
         self._start_time = time.time()
         cap = cv2.VideoCapture(self.video)
-        try:  # FIX: ensure cap is always released
-            fps_raw = cap.get(cv2.CAP_PROP_FPS)
-            fps = float(fps_raw) if fps_raw and fps_raw > 0 else 30.0
-            total_frames_raw = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-            try:
-                total_frames = int(float(total_frames_raw))
-            except Exception:
-                total_frames = 1
+        fps_raw = cap.get(cv2.CAP_PROP_FPS)
+        fps = float(fps_raw) if fps_raw and fps_raw > 0 else 30.0
+        total_frames_raw = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        try:
+            total_frames = int(float(total_frames_raw))
+        except Exception:
+            total_frames = 1
 
-            ttl_frames = int(fps * self.profile_cfg["ttl"])
-            tracks = []
-            outdir = build_output_dir(self.output, mode="faces",
-                                      profile=self.profile, accel=self.accel)
-            frame_idx = 0
-            track_id = 0
-            min_lm_frames = 1 if self.profile == "High" else 2
-            iou_thresh = 0.45
+        ttl_frames = int(fps * self.profile_cfg["ttl"])
+        tracks = []
+        outdir = build_output_dir(self.output, mode="faces",
+                                  profile=self.profile, accel=self.accel)
+        frame_idx = 0
+        track_id = 0
+        min_lm_frames = 1 if self.profile == "High" else 2
+        iou_thresh = 0.45
 
-            while cap.isOpened():
-                if self._stop:
-                    break
-                ret, frame = cap.read()
-                if not ret:
-                    break
+        while cap.isOpened():
+            if self._stop:
+                break
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-                frame_idx += 1
-                use_cuda = self.device.startswith("cuda")
-                results = self.model.predict(
-                    frame, conf=self.profile_cfg["conf"], iou=iou_thresh,
-                    imgsz=640 if frame.shape[1] <= 1280 else 800,
-                    device=self.device, half=use_cuda, verbose=False)[0]
+            frame_idx += 1
+            use_cuda = self.device.startswith("cuda")
+            results = self.model.predict(
+                frame, conf=self.profile_cfg["conf"], iou=iou_thresh,
+                imgsz=640 if frame.shape[1] <= 1280 else 800,
+                device=self.device, half=use_cuda, verbose=False)[0]
 
-                new_tracks = []
-                for box in results.boxes.xyxy:
-                    box = box.squeeze()
-                    x1, y1, x2, y2 = map(int, box.tolist())
-                    face_raw = frame[y1:y2, x1:x2]
-                    w, h = x2 - x1, y2 - y1
-                    if w < self.profile_cfg["min_size"] or h < self.profile_cfg["min_size"]:
-                        continue
-                    aspect = w / h
-                    if not (0.65 <= aspect <= 1.35):
-                        continue
+            new_tracks = []
+            for box in results.boxes.xyxy:
+                box = box.squeeze()
+                x1, y1, x2, y2 = map(int, box.tolist())
+                face_raw = frame[y1:y2, x1:x2]
+                w, h = x2 - x1, y2 - y1
+                if w < self.profile_cfg["min_size"] or h < self.profile_cfg["min_size"]:
+                    continue
+                aspect = w / h
+                if not (0.65 <= aspect <= 1.35):
+                    continue
 
-                    h_frame, w_frame, _ = frame.shape
-                    expand_x = int(w * 0.15)
-                    expand_y = int(h * 0.15)  # FIX: simplify duplicate variables
-                    cx1 = max(0, x1 - expand_x)
-                    cy1 = max(0, y1 - expand_y)
-                    cx2 = min(w_frame, x2 + expand_x)
-                    cy2 = min(h_frame, y2 + expand_y)
+                h_frame, w_frame, _ = frame.shape
+                expand_x = int(w * 0.15)
+                expand_y_top = int(h * 0.15)
+                expand_y_bot = int(h * 0.15)
+                cx1 = max(0, x1 - expand_x)
+                cy1 = max(0, y1 - expand_y_top)
+                cx2 = min(w_frame, x2 + expand_x)
+                cy2 = min(h_frame, y2 + expand_y_bot)
 
-                    skin_min = 0.12 if self.profile != "High" else 0.10
-                    face_crop = frame[cy1:cy2, cx1:cx2]
-                    if face_raw.size == 0 or self._skin_ratio(face_raw) < skin_min:
-                        continue
+                skin_min = 0.12 if self.profile != "High" else 0.10
+                face_crop = frame[cy1:cy2, cx1:cx2]
+                if face_raw.size == 0 or self._skin_ratio(face_raw) < skin_min:
+                    continue
 
-                    matched = False
-                    for t in tracks:
-                        if self._iou(t["box"], (x1, y1, x2, y2)) > iou_thresh:
-                            t["box"] = (x1, y1, x2, y2)
-                            t["ttl"] = ttl_frames
-                            t["frames"] += 1
+                matched = False
+                for t in tracks:
+                    if self._iou(t["box"], (x1, y1, x2, y2)) > iou_thresh:
+                        t["box"] = (x1, y1, x2, y2)
+                        t["ttl"] = ttl_frames
+                        t["frames"] += 1
 
-                            fh, fw = face_raw.shape[:2]
-                            center_face = face_raw[int(fh*0.25):int(fh*0.75),
-                                                   int(fw*0.25):int(fw*0.75)]
-                            if center_face.size == 0:
-                                center_face = face_raw
-                            sharp = cv2.Laplacian(center_face, cv2.CV_64F).var()
-                            if sharp > t["score"]:
-                                t["score"] = sharp
-                                t["face"] = face_crop.copy()
-                            if t["frames"] >= min_lm_frames and self._valid_landmarks(face_raw):
-                                t["valid"] = min(t["valid"] + 1, t["frames"])
-                            matched = True
-                            break
-
-                    if not matched:
-                        track_id += 1
                         fh, fw = face_raw.shape[:2]
                         center_face = face_raw[int(fh*0.25):int(fh*0.75),
                                                int(fw*0.25):int(fw*0.75)]
                         if center_face.size == 0:
                             center_face = face_raw
                         sharp = cv2.Laplacian(center_face, cv2.CV_64F).var()
-                        new_tracks.append({
-                            "id": track_id,
-                            "box": (x1, y1, x2, y2),
-                            "ttl": ttl_frames,
-                            "frames": 1,
-                            "valid": 0,
-                            "score": sharp,  # FIX: reuse calculated sharp value
-                            "face": face_crop.copy()
-                        })
+                        if sharp > t["score"]:
+                            t["score"] = sharp
+                            t["face"] = face_crop.copy()
+                        if t["frames"] >= min_lm_frames and self._valid_landmarks(face_raw):
+                            t["valid"] = min(t["valid"] + 1, t["frames"])
+                        matched = True
+                        break
 
-                for t in tracks:
-                    t["ttl"] -= 1
-                    if t["ttl"] <= 0:
-                        cfg = self.profile_cfg
-                        min_required = max(3, int(fps * cfg["min_frames"]))
-                        if (t["frames"] >= min_required and
-                            (t["valid"] / max(t["frames"], 1)) >= cfg["min_valid_ratio"] and
-                                t["score"] >= cfg["min_sharpness"]):
-                            fname = f"face_{self.done + 1:04d}.png"
-                            path = os.path.join(outdir, fname)
-                            if cv2.imwrite(path, t["face"]):
-                                self.done += 1
-                                self.detected += 1
+                if not matched:
+                    track_id += 1
+                    fh, fw = face_raw.shape[:2]
+                    center_face = face_raw[int(fh*0.25):int(fh*0.75),
+                                           int(fw*0.25):int(fw*0.75)]
+                    if center_face.size == 0:
+                        center_face = face_raw
+                    new_tracks.append({
+                        "id": track_id,
+                        "box": (x1, y1, x2, y2),
+                        "ttl": ttl_frames,
+                        "frames": 1,
+                        "valid": 0,
+                        "score": cv2.Laplacian(center_face, cv2.CV_64F).var(),
+                        "face": face_crop.copy()
+                    })
 
-                tracks = [t for t in tracks if t["ttl"] > 0] + new_tracks
-
-                if self.previewer and self.preview_enabled:
-                    now = time.time()
-                    if now - self.last_preview >= PREVIEW_INTERVAL:
-                        draw = frame.copy()
-                        for t in tracks:
-                            x1, y1, x2, y2 = t["box"]
-                            cv2.rectangle(draw, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        img = resize_for_preview(
-                            Image.fromarray(cv2.cvtColor(draw, cv2.COLOR_BGR2RGB)))
-                        if img and self._ui_alive:
-                            self.previewer.after(
-                                0, lambda img=img: (
-                                    self.previewer.update_image(img)
-                                    if self._ui_alive else None))
-                        self.last_preview = now
-
-                # FIX: Use after() for thread-safe UI updates
-                if self.log:
-                    detected_val = self.detected
-                    done_val = self.done
-                    eta_val = self._calculate_eta(frame_idx, total_frames)
-                    self.log.after(0, lambda d=detected_val, c=done_val, e=eta_val:
-                        self.log.write_status(detected=d, cut=c, eta=e))
-
-                # FIX: Use after() for thread-safe UI updates
-                if self.progress:
-                    ratio = max(self._face_ratio, frame_idx / total_frames)
-                    self._face_ratio = ratio
-                    progress_ratio = ratio
-                    if self._ui_alive:
-                        self.progress.after(0, lambda v=progress_ratio: self.progress.update(v))
-
-            # Process remaining tracks
-            cfg = self.profile_cfg
             for t in tracks:
-                min_required = max(3, int(fps * cfg["min_frames"]))
-                if (t["frames"] >= min_required and
-                    (t["valid"] / max(t["frames"], 1)) >= cfg["min_valid_ratio"] and
-                        t["score"] >= cfg["min_sharpness"]):
-                    fname = f"face_{self.done + 1:04d}.png"
-                    path = os.path.join(outdir, fname)
-                    if cv2.imwrite(path, t["face"]):
-                        self.done += 1
-                        self.detected += 1
-        finally:
-            # FIX: always release cap
-            if cap:
-                try:
-                    cap.release()
-                except Exception:
-                    pass
+                t["ttl"] -= 1
+                if t["ttl"] <= 0:
+                    cfg = self.profile_cfg
+                    min_required = max(3, int(fps * cfg["min_frames"]))
+                    if (t["frames"] >= min_required and
+                        (t["valid"] / max(t["frames"], 1)) >= cfg["min_valid_ratio"] and
+                            t["score"] >= cfg["min_sharpness"]):
+                        fname = f"face_{self.done + 1:04d}.png"
+                        path = os.path.join(outdir, fname)
+                        if cv2.imwrite(path, t["face"]):
+                            self.done += 1
+                            self.detected += 1
 
+            tracks = [t for t in tracks if t["ttl"] > 0] + new_tracks
+
+            if self.previewer and self.preview_enabled:
+                now = time.time()
+                if now - self.last_preview >= PREVIEW_INTERVAL:
+                    draw = frame.copy()
+                    for t in tracks:
+                        x1, y1, x2, y2 = t["box"]
+                        cv2.rectangle(draw, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    img = resize_for_preview(
+                        Image.fromarray(cv2.cvtColor(draw, cv2.COLOR_BGR2RGB)))
+                    if img and self._ui_alive:
+                        self.previewer.after(
+                            0, lambda img=img: (
+                                self.previewer.update_image(img)
+                                if self._ui_alive else None))
+                    self.last_preview = now
+
+            if self.log:
+                self.log.write_status(detected=self.detected, cut=self.done,
+                                      eta=self._calculate_eta(frame_idx, total_frames))
+
+            if self.progress:
+                ratio = max(self._face_ratio, frame_idx / total_frames)
+                self._face_ratio = ratio
+                if self._ui_alive:
+                    self.progress.after(0, lambda v=ratio: self.progress.update(v))
+
+        # Process remaining tracks
+        cfg = self.profile_cfg
+        for t in tracks:
+            min_required = max(3, int(fps * cfg["min_frames"]))
+            if (t["frames"] >= min_required and
+                (t["valid"] / max(t["frames"], 1)) >= cfg["min_valid_ratio"] and
+                    t["score"] >= cfg["min_sharpness"]):
+                fname = f"face_{self.done + 1:04d}.png"
+                path = os.path.join(outdir, fname)
+                if cv2.imwrite(path, t["face"]):
+                    self.done += 1
+                    self.detected += 1
+
+        cap.release()
         self._end_time = time.time()
         return not self._stop
 
@@ -1927,12 +1903,10 @@ class SceneCutterApp(ctk.CTk):
 
     def run_engine(self, scene_mode):
         result = False
-        error_msg = None
         try:
             self.engine.video = remux_if_needed(self.engine.video)
             result = self.engine.run(scene_mode=scene_mode)
         except Exception as e:
-            error_msg = str(e)
             print("Error:", e)
         finally:
             total_time = None
@@ -1942,21 +1916,15 @@ class SceneCutterApp(ctk.CTk):
                 total_time = engine.total_time()
             self.engine = None
             self.stop_pending = False
-            # FIX: show error in UI if occurred
-            if error_msg:
-                self.after(0, lambda: self.log.write_status(
-                    detected=f"Error: {error_msg[:50]}", cut=0, eta="--:--"))
             self.after(0, lambda: self.reset_ui(
                 finished=result, total_time=total_time, stopped=stopped))
 
     def run_face_engine(self):
         result = False
-        error_msg = None
         try:
             self.engine.video = remux_if_needed(self.engine.video)
             result = self.engine.run()
         except Exception as e:
-            error_msg = str(e)
             print("Face engine error:", e)
         finally:
             total_time = None
@@ -1966,10 +1934,6 @@ class SceneCutterApp(ctk.CTk):
                 total_time = engine.total_time()
             self.engine = None
             self.stop_pending = False
-            # FIX: show error in UI if occurred
-            if error_msg:
-                self.after(0, lambda: self.log.write_status(
-                    detected=f"Error: {error_msg[:50]}", cut=0, eta="--:--"))
             self.after(0, lambda: self.reset_ui(
                 finished=result, total_time=total_time, stopped=stopped))
 
@@ -2048,11 +2012,7 @@ class SceneCutterApp(ctk.CTk):
         if self.preview_frame and reason in ("stop", "finish"):
             self.preview_frame.clear_all()
         if self.progress and reason in ("stop", "reset"):
-            # Reset progress bar
             self.after(0, self.progress.reset)
-        elif self.progress and reason == "finish":
-            # Ensure progress bar shows 100% before cleanup
-            self.after(0, self.progress.mark_finished)
         if self.log:
             if reason == "stop":
                 self.log.clear_status()
