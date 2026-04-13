@@ -766,6 +766,7 @@ class SceneEngine:
         self._last_preview_ratio = -1
         self._keyframes_cache = None
         self._preview_cap = None
+        self._video_obj = None  # scenedetect video object for cleanup
 
     def stop(self):
         self._stop = True
@@ -782,6 +783,12 @@ class SceneEngine:
         except Exception:
             pass
         try:
+            if self._video_obj:
+                self._video_obj.close()
+        except Exception:
+            pass
+        self._video_obj = None
+        try:
             if self._thumb_container:
                 self._thumb_container.close()
         except Exception:
@@ -793,6 +800,10 @@ class SceneEngine:
         except Exception:
             pass
         self._preview_cap = None
+        # Clear cache and heavy vars
+        self._keyframes_cache = None
+        self._duration = None
+        self._total_frames = None
 
     def total_time(self):
         if not self._start_time:
@@ -895,6 +906,7 @@ class SceneEngine:
         for be in try_backends:
             try:
                 video = open_video(self.video, backend=be, suppress_output=True)
+                self._video_obj = video  # Store for cleanup
                 break
             except Exception as e:
                 last_error = e
@@ -908,6 +920,7 @@ class SceneEngine:
                 _ = video.frame_rate
             except Exception:
                 video.close()
+                self._video_obj = None  # Clear ref after close
                 raise RuntimeError("Failed to read video stream")
 
         stats_manager = StatsManager()
@@ -991,6 +1004,7 @@ class SceneEngine:
                 if self._stop:
                     try:
                         video.close()
+                        self._video_obj = None  # Clear ref after close
                     except Exception:
                         pass
                     break
@@ -1068,9 +1082,11 @@ class SceneEngine:
                     # Always use OpenCV for fixed files — most reliable
                     try:
                         video = open_video(self.video, backend="opencv")
+                        self._video_obj = video  # Store for cleanup
                     except Exception:
                         try:
                             video = open_video(self.video, backend="pyav", suppress_output=True)
+                            self._video_obj = video  # Store for cleanup
                         except Exception:
                             print("Both backends failed on fixed video!")
                             if self.log:
@@ -1095,9 +1111,11 @@ class SceneEngine:
                             detected=f"{d} scenes detected", cut=0, eta="--:--"))
                     try:
                         video.close()
+                        self._video_obj = None  # Clear ref after close
                     except Exception:
                         pass
-                    return scene_list  # FIX: return scene_list instead of bare return
+                    # FIX: Return frames as integers, matching normal flow format
+                    return [(s.get_frames(), e.get_frames()) for s, e in scene_list]
                 else:
                     print("ffmpeg re-encode failed, no fixed file created")
                     if self.log:
@@ -1110,6 +1128,7 @@ class SceneEngine:
             try:
                 if video:
                     video.close()
+                    self._video_obj = None  # Clear ref after close
             except Exception:
                 pass
 
@@ -1517,6 +1536,7 @@ class FaceDetectionEngine:
         }[profile]
 
         self.last_preview = 0
+        self._cap = None  # cv2.VideoCapture for cleanup
 
     def _load_deps(self):
         """Load heavy dependencies on worker thread to avoid blocking UI."""
@@ -1548,6 +1568,30 @@ class FaceDetectionEngine:
     def stop(self):
         self._stop = True
         self._ui_alive = False
+        # Release cv2.VideoCapture if open
+        try:
+            if self._cap:
+                self._cap.release()
+        except Exception:
+            pass
+        self._cap = None
+        # Delete heavy objects to free VRAM/RAM
+        self.model = None
+        if self.mp_face:
+            try:
+                self.mp_face.close()
+            except Exception:
+                pass
+        self.mp_face = None
+        # Clear GPU memory if torch was loaded
+        if self.torch is not None:
+            try:
+                if self.torch.cuda.is_available():
+                    self.torch.cuda.empty_cache()
+            except Exception:
+                pass
+        self.torch = None
+        self.device = None
 
     def total_time(self):
         if not self._start_time:
@@ -1592,6 +1636,7 @@ class FaceDetectionEngine:
 
         self._start_time = time.time()
         cap = cv2.VideoCapture(self.video)
+        self._cap = cap  # Store for cleanup
         try:  # FIX: ensure cap is always released
             fps_raw = cap.get(cv2.CAP_PROP_FPS)
             fps = float(fps_raw) if fps_raw and fps_raw > 0 else 30.0
@@ -1757,6 +1802,14 @@ class FaceDetectionEngine:
             if cap:
                 try:
                     cap.release()
+                except Exception:
+                    pass
+            self._cap = None
+            # Clear GPU memory after face detection
+            if self.torch is not None:
+                try:
+                    if self.torch.cuda.is_available():
+                        self.torch.cuda.empty_cache()
                 except Exception:
                     pass
 
