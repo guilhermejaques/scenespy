@@ -262,7 +262,7 @@ def _ensure_scenedetect():
         from scenedetect import open_video, SceneManager
         from scenedetect.detectors import ContentDetector
         from scenedetect.stats_manager import StatsManager
-        return open_video, SceneManager, ContentDetector, StatsManager
+        return open_video, SceneManager, ContentDetector, StatsManager, ContentDetector.Components
     except Exception:
         return None
 
@@ -894,7 +894,7 @@ class SceneEngine:
         result = _ensure_scenedetect()
         if result is None:
             raise RuntimeError("scenedetect not installed")
-        open_video, SceneManager, ContentDetector, StatsManager = result
+        open_video, SceneManager, ContentDetector, StatsManager, CompWeights = result
 
         backend = "pyav"
         if self.video.lower().endswith(".mkv"):
@@ -930,7 +930,9 @@ class SceneEngine:
         scene_manager.add_detector(
             ContentDetector(threshold=threshold,
                            min_scene_len=int(min_dur * fps),
-                           luma_only=True)
+                           luma_only=True,
+                           weights=CompWeights(
+                               delta_hue=1.0, delta_sat=1.0, delta_lum=1.0, delta_edges=1.0))
         )
         video_duration = None
         try:
@@ -1100,7 +1102,9 @@ class SceneEngine:
                     scene_manager.add_detector(
                         ContentDetector(threshold=threshold,
                                        min_scene_len=int(min_dur * fps),
-                                       luma_only=True)
+                                       luma_only=True,
+                                       weights=CompWeights(
+                                           delta_hue=1.0, delta_sat=1.0, delta_lum=1.0, delta_edges=1.0))
                     )
                     scene_manager.detect_scenes(video=video, callback=_progress_cb)
                     scene_list = scene_manager.get_scene_list()
