@@ -91,6 +91,7 @@ INSTANCE_SOCKET = None
 INSTANCE_PORT = 54321
 PREVIEW_MAX_WIDTH = 420
 PREVIEW_MAX_HEIGHT = 240
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 # ============================================================
 # Config: compatibility / constants
@@ -131,7 +132,7 @@ DANGER     = "#ef4444"
 # ============================================================
 def test_ffmpeg_encoder(encoder: str) -> bool:
     try:
-        result = subprocess.run(
+        result = run_hidden(
             ["ffmpeg", "-y", "-f", "lavfi", "-i",
              "color=c=black:s=160x120:d=0.1",
              "-c:v", encoder, "-f", "null", "-"],
@@ -167,7 +168,7 @@ def build_output_dir(base_output, mode, profile, accel):
 
 def is_valid_video_file(path: str) -> bool:
     try:
-        out = subprocess.check_output(
+        out = check_output_hidden(
             ["ffprobe", "-v", "error", "-show_streams",
              "-select_streams", "v", "-of", "json", path],
             stderr=subprocess.DEVNULL
@@ -190,7 +191,7 @@ def remux_if_needed(path):
     if os.path.exists(fixed) and is_valid_video_file(fixed):
         return fixed
 
-    subprocess.run(
+    run_hidden(
         ["ffmpeg", "-y", "-fflags", "+genpts+igndts", "-err_detect", "ignore_err",
          "-i", path, "-map", "0:v:0", "-map", "0:a?", "-c", "copy",
          "-max_interleave_delta", "0", "-avoid_negative_ts", "make_zero", fixed],
@@ -278,6 +279,19 @@ def single_instance():
         return False
     return True
 
+def run_hidden(cmd, **kwargs):
+    return subprocess.run(
+        cmd,
+        creationflags=CREATE_NO_WINDOW,
+        **kwargs
+    )
+
+def check_output_hidden(cmd, **kwargs):
+    return subprocess.check_output(
+        cmd,
+        creationflags=CREATE_NO_WINDOW,
+        **kwargs
+    )
 
 # ============================================================
 # Widgets
@@ -873,7 +887,7 @@ class SceneEngine:
                "-show_entries", "stream=width,height,r_frame_rate:format=bit_rate",
                "-of", "default=noprint_wrappers=1:nokey=1", self.video]
         try:
-            out = subprocess.check_output(cmd).decode().splitlines()
+            out = check_output_hidden(cmd).decode().splitlines()
             width, height, fps, bitrate = out
             num, den = fps.split("/")
             fps_float = round(int(num) / int(den), 2)
@@ -948,7 +962,7 @@ class SceneEngine:
                 cmd = ["ffprobe", "-v", "error",
                        "-show_entries", "format=duration",
                        "-of", "default=noprint_wrappers=1:nokey=1", self.video]
-                video_duration = float(subprocess.check_output(cmd).decode().strip())
+                video_duration = float(check_output_hidden(cmd).decode().strip())
                 self._total_frames = int(video_duration * fps)
             except Exception:
                 if self._total_frames is None:
@@ -1044,7 +1058,7 @@ class SceneEngine:
                     if self.log:
                         self.log.after(0, lambda: self.log.write_status(
                             detected="Fixing corrupted video...", cut=0, eta="--:--"))
-                    subprocess.run(
+                    run_hidden(
                         ["ffmpeg", "-y", "-err_detect", "ignore_err",
                          "-i", self.video, "-c:v", "libx264", "-crf", "22",
                          "-preset", "ultrafast", "-pix_fmt", "yuv420p",
@@ -1062,7 +1076,7 @@ class SceneEngine:
                     if not is_valid_video_file(fixed):
                         print(f"Fixed file is corrupted, re-encoding again...")
                         os.remove(fixed)
-                        subprocess.run(
+                        run_hidden(
                             ["ffmpeg", "-y", "-err_detect", "ignore_err",
                              "-i", self.video, "-c:v", "libx264", "-crf", "22",
                              "-preset", "ultrafast", "-pix_fmt", "yuv420p",
@@ -1150,7 +1164,7 @@ class SceneEngine:
         cmd = ["ffprobe", "-v", "error",
                "-show_entries", "format=duration",
                "-of", "default=noprint_wrappers=1:nokey=1", self.video]
-        duration = float(subprocess.check_output(cmd).decode().strip())
+        duration = float(check_output_hidden(cmd).decode().strip())
         fps = self._get_video_fps()
         self._total_frames = int(duration * fps)
 
@@ -1267,7 +1281,7 @@ class SceneEngine:
         cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
                "-show_entries", "stream=avg_frame_rate",
                "-of", "default=noprint_wrappers=1:nokey=1", self.video]
-        num, den = subprocess.check_output(cmd).decode().strip().split("/")
+        num, den = check_output_hidden(cmd).decode().strip().split("/")
         self._fps = float(num) / float(den)
         return self._fps
 
@@ -1362,7 +1376,7 @@ class SceneEngine:
         cmd = ["ffprobe", "-v", "error",
                "-show_entries", "format=duration",
                "-of", "default=noprint_wrappers=1:nokey=1", self.video]
-        self._duration = float(subprocess.check_output(cmd).decode().strip())
+        self._duration = float(check_output_hidden(cmd).decode().strip())
         return self._duration
 
     def _get_keyframes(self):
@@ -1371,7 +1385,7 @@ class SceneEngine:
         cmd = ["ffprobe", "-select_streams", "v", "-skip_frame", "nokey",
                "-show_entries", "frame=pkt_pts_time",
                "-loglevel", "error", "-of", "csv=p=0", self.video]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = run_hidden(cmd, capture_output=True, text=True)
         keyframes = []
         for line in result.stdout.splitlines():
             try:
@@ -1388,7 +1402,7 @@ class SceneEngine:
                "-i", self.video, "-t", f"{duration:.6f}",
                "-c", "copy", "-avoid_negative_ts", "make_zero",
                "-muxpreload", "0", "-muxdelay", "0", output]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        run_hidden(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        timeout=300)  # FIX: add timeout
 
     def _run_ffmpeg_precise_cut(self, input_file, start_time, end_time, output, aligned_start):
@@ -1416,7 +1430,7 @@ class SceneEngine:
         if bitrate and encoder == "cpu":
             cmd += ["-maxrate", str(bitrate), "-bufsize", str(bitrate * 2)]
 
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        result = run_hidden(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 timeout=300)  # FIX: add timeout
 
         if result.returncode != 0 and encoder != "cpu":
@@ -1429,7 +1443,7 @@ class SceneEngine:
                 del cmd[idx:idx + 2]
             except ValueError:
                 pass
-            result2 = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            result2 = run_hidden(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if result2.returncode == 0:
                 return
             print("FFMPEG ERROR:\n", result.stderr.decode())
@@ -1455,7 +1469,7 @@ class SceneEngine:
                "-show_entries", "stream=bit_rate",
                "-of", "default=noprint_wrappers=1:nokey=1", self.video]
         try:
-            return int(subprocess.check_output(cmd).decode().strip())
+            return int(check_output_hidden(cmd).decode().strip())
         except Exception:
             return None
 
