@@ -37,6 +37,7 @@ TORCH_AVAILABLE = False
 # ============================================================
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 
+
 def load_settings():
     """Load user settings from JSON file."""
     try:
@@ -47,6 +48,7 @@ def load_settings():
         pass
     return {"last_video": "", "last_output": ""}
 
+
 def save_settings(video="", output=""):
     """Save user settings to JSON file."""
     try:
@@ -55,6 +57,7 @@ def save_settings(video="", output=""):
             json.dump(settings, f, indent=2)
     except Exception:
         pass
+
 
 # ============================================================
 # Config: profiles
@@ -71,10 +74,10 @@ def save_settings(video="", output=""):
 # raise it within a bounded range.
 # ============================================================
 PROFILES = {
-    "Low":    {"label": "Low",    "base_threshold": 48, "min_dur": 8.0, "dur_max_boost": 7.0},
+    "Low": {"label": "Low", "base_threshold": 48, "min_dur": 8.0, "dur_max_boost": 7.0},
     "Normal": {"label": "Normal", "base_threshold": 32, "min_dur": 5.0, "dur_max_boost": 6.0},
-    "High":   {"label": "High",   "base_threshold": 20, "min_dur": 1.0, "dur_max_boost": 5.0},
-    "Auto":   {"label": "Auto",   "ADAPTIVE": True},
+    "High": {"label": "High", "base_threshold": 20, "min_dur": 1.0, "dur_max_boost": 5.0},
+    "Auto": {"label": "Auto", "ADAPTIVE": True},
 }
 
 # Profile display names (for output folder tagging)
@@ -97,9 +100,9 @@ CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 # Config: compatibility / constants
 # ============================================================
 MODE_ACCEL_COMPAT = {
-    "scene":    {"encoder": {"cpu", "nvidia", "amd", "intel"}, "inference": {"cpu"}},
+    "scene": {"encoder": {"cpu", "nvidia", "amd", "intel"}, "inference": {"cpu"}},
     "interval": {"encoder": {"cpu", "nvidia", "amd", "intel"}, "inference": {"cpu"}},
-    "faces":    {"encoder": {"cpu"}, "inference": {"cpu", "nvidia"}},
+    "faces": {"encoder": {"cpu"}, "inference": {"cpu", "nvidia"}},
 }
 
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
@@ -109,22 +112,21 @@ MODE_ABBREV = {"faces": "FD", "scene": "SD", "interval": "ES"}
 # ============================================================
 # Debug configuration
 # ============================================================
-DEBUG = False  # Set to True to enable debug logging to console
-
+DEBUG = False
 # ============================================================
 # Config: UI theme palette
 # ============================================================
-BG_MAIN    = "#1a1a1a"
-BG_PANEL   = "#313131"
-BG_CARD    = "#404040"
-BG_INPUT   = "#1a1a1a"
-BORDER_SOFT  = "#787474"
+BG_MAIN = "#1a1a1a"
+BG_PANEL = "#313131"
+BG_CARD = "#404040"
+BG_INPUT = "#1a1a1a"
+BORDER_SOFT = "#787474"
 BORDER_SOFT2 = "#4C4848"
-TEXT_MAIN  = "#e5e7eb"
+TEXT_MAIN = "#e5e7eb"
 TEXT_MUTED = "#9ca3af"
-ACCENT     = "#1f538d"
-SUCCESS    = "#22c55e"
-DANGER     = "#ef4444"
+ACCENT = "#1f538d"
+SUCCESS = "#22c55e"
+DANGER = "#ef4444"
 
 
 # ============================================================
@@ -279,6 +281,7 @@ def single_instance():
         return False
     return True
 
+
 def run_hidden(cmd, **kwargs):
     return subprocess.run(
         cmd,
@@ -286,12 +289,122 @@ def run_hidden(cmd, **kwargs):
         **kwargs
     )
 
+
 def check_output_hidden(cmd, **kwargs):
     return subprocess.check_output(
         cmd,
         creationflags=CREATE_NO_WINDOW,
         **kwargs
     )
+
+
+# ============================================================
+# NEW: Structural & Motion Feature Extractors (Priority 1)
+# ============================================================
+
+def _compute_ssim_simplified(img1, img2, window_size=11):
+    """
+    Simplified SSIM using only OpenCV (no skimage dependency).
+    Returns similarity score [0.0, 1.0] — lower = more different.
+    """
+    import numpy as np
+    if img1.shape != img2.shape:
+        return 0.0
+
+    # Convert to float32 for computation
+    img1 = img1.astype(np.float32)
+    img2 = img2.astype(np.float32)
+
+    # Gaussian blur for local means
+    mu1 = cv2.GaussianBlur(img1, (window_size, window_size), 1.5)
+    mu2 = cv2.GaussianBlur(img2, (window_size, window_size), 1.5)
+
+    mu1_sq = mu1 ** 2
+    mu2_sq = mu2 ** 2
+    mu1_mu2 = mu1 * mu2
+
+    # Variance and covariance
+    sigma1_sq = cv2.GaussianBlur(img1 ** 2, (window_size, window_size), 1.5) - mu1_sq
+    sigma2_sq = cv2.GaussianBlur(img2 ** 2, (window_size, window_size), 1.5) - mu2_sq
+    sigma12 = cv2.GaussianBlur(img1 * img2, (window_size, window_size), 1.5) - mu1_mu2
+
+    # SSIM constants (for 8-bit images)
+    C1 = (0.01 * 255) ** 2
+    C2 = (0.03 * 255) ** 2
+
+    # SSIM formula
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / \
+               ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2 + 1e-8))
+
+    return float(ssim_map.mean())
+
+
+def _compute_ecr(img1, img2, canny_low=30, canny_high=60):
+    """
+    Edge Change Ratio: detects structural changes via edge comparison.
+    Returns ratio [0.0, 1.0] — higher = more structural change.
+    """
+    import numpy as np
+
+    # Convert to grayscale if needed
+    if len(img1.shape) == 3:
+        img1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+    if len(img2.shape) == 3:
+        img2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+
+    # Edge detection with Canny
+    edges1 = cv2.Canny(img1, canny_low, canny_high)
+    edges2 = cv2.Canny(img2, canny_low, canny_high)
+
+    # XOR to find changed edges
+    edge_diff = cv2.bitwise_xor(edges1, edges2)
+
+    # ECR = changed edges / total unique edges
+    total_edges = cv2.countNonZero(cv2.bitwise_or(edges1, edges2))
+    if total_edges == 0:
+        return 0.0
+
+    changed_edges = cv2.countNonZero(edge_diff)
+    return changed_edges / total_edges
+
+
+def _compute_optical_flow_magnitude(prev_frame, curr_frame, max_dim=240):
+    """
+    Compute average optical flow magnitude using Farneback method.
+    Returns motion intensity — higher = more pixel movement.
+    """
+    import numpy as np
+
+    # Convert to grayscale
+    if len(prev_frame.shape) == 3:
+        prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+    else:
+        prev_gray = prev_frame.copy()
+    if len(curr_frame.shape) == 3:
+        curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
+    else:
+        curr_gray = curr_frame.copy()
+
+    # Downsample for performance (critical for real-time)
+    h, w = prev_gray.shape
+    if max(h, w) > max_dim:
+        scale = max_dim / max(h, w)
+        prev_gray = cv2.resize(prev_gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+        curr_gray = cv2.resize(curr_gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+
+    try:
+        flow = cv2.calcOpticalFlowFarneback(
+            prev_gray, curr_gray, None,
+            pyr_scale=0.5, levels=3, winsize=15,
+            iterations=3, poly_n=5, poly_sigma=1.2,
+            flags=0
+        )
+        # Compute magnitude of flow vectors
+        magnitude = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
+        return float(magnitude.mean())
+    except Exception:
+        # Fallback if flow computation fails
+        return 0.0
 
 # ============================================================
 # Widgets
@@ -580,12 +693,14 @@ def _otsu_1d(sorted_vals):
     return best_t
 
 
-def _adaptive_threshold(video_path):
+def _adaptive_threshold(video_path, skip_flow=False):
     """Pipeline avancado: multi-metrica + Otsu + pesos dinamicos."""
+    _start_time = time.time()
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return 32.0, 4.0
 
+    _frame_cache = {}
     fps_cap = cap.get(cv2.CAP_PROP_FPS)
     total = cap.get(cv2.CAP_PROP_FRAME_COUNT)
     fps = max(1, fps_cap if fps_cap > 0 else 30)
@@ -597,6 +712,10 @@ def _adaptive_threshold(video_path):
     sample_interval_s = 2.5
     frame_interval = max(3, int(fps * sample_interval_s))
     num_clips = max(15, min(50, int(total / frame_interval)))
+
+    if total > 30000:  # ~20min @ 25fps
+        num_clips = min(num_clips, 30)  # Cap sampling for very long videos
+        frame_interval = max(frame_interval, int(fps * 5))  # Sample every 5s
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     _, probe = cap.read()
@@ -618,43 +737,67 @@ def _adaptive_threshold(video_path):
     BGR2HSV = cv2.COLOR_BGR2HSV
     HIST_NORM = cv2.NORM_MINMAX
 
-    diff_y_list, diff_c_list, diff_hy_list, diff_hs_list, clip_motion = [], [], [], [], []
+    diff_y_list, diff_c_list, diff_hy_list, diff_hs_list = [], [], [], []
+    ecr_list, ssim_list, flow_list, clip_motion = [], [], [], []
 
     for _i in range(num_clips):
         pos = min(_i * frame_interval, max(0, int(total) - frames_per_clip))
         cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
-        prev_y, prev_cbcr, prev_hist_y, prev_hist_hs = None, None, None, None
+        prev_frame, prev_gray, prev_cbcr, prev_hist_y, prev_hist_hs = None, None, None, None, None
         clip_y_diffs = []
 
         for _j in range(frames_per_clip):
             ret, frame = cap.read()
-            if not ret:
+            if not ret or frame is None:
                 break
 
-            # Resize FIRST, then convert — avoids 3× redundant resizes
-            small = cv2.resize(frame, dim)
-            gray = cv2.cvtColor(small, BGR2GRAY)
-            ycrcb = cv2.cvtColor(small, BGR2YCrCb)
-            hsv = cv2.cvtColor(small, BGR2HSV)
-            cbcr = ycrcb[:, :, 1:]
+            frame_key = pos + _j
+            if frame_key not in _frame_cache:
+                small = cv2.resize(frame, dim)
+                gray = cv2.cvtColor(small, BGR2GRAY)
+                ycrcb = cv2.cvtColor(small, BGR2YCrCb)
+                hsv = cv2.cvtColor(small, BGR2HSV)
+                _frame_cache[frame_key] = (small, gray, ycrcb, hsv)
+            else:
+                small, gray, ycrcb, hsv = _frame_cache[frame_key]
 
+            cbcr = ycrcb[:, :, 1:]
             hist_y = cv2.calcHist([gray], [0], None, [32], [0, 256])
             cv2.normalize(hist_y, hist_y, 0, 1, HIST_NORM)
             hist_hs = cv2.calcHist([hsv], [0, 1], None, [16, 16], [0, 180, 0, 256])
             cv2.normalize(hist_hs, hist_hs, 0, 1, HIST_NORM)
 
-            if prev_y is not None:
-                d_y = cv2.absdiff(gray, prev_y).mean()
+            if prev_frame is not None:
+                # === EXISTING METRICS ===
+                d_y = cv2.absdiff(gray, prev_gray).mean()
                 d_c = cv2.absdiff(cbcr, prev_cbcr).mean()
                 d_hy = cv2.compareHist(prev_hist_y, hist_y, cv2.HISTCMP_BHATTACHARYYA)
                 d_hs = cv2.compareHist(prev_hist_hs, hist_hs, cv2.HISTCMP_BHATTACHARYYA)
+
                 diff_y_list.append(d_y)
                 diff_c_list.append(d_c)
                 diff_hy_list.append(d_hy)
                 diff_hs_list.append(d_hs)
                 clip_y_diffs.append(d_y)
 
-            prev_y, prev_cbcr, prev_hist_y, prev_hist_hs = gray, cbcr, hist_y, hist_hs
+                # === NEW: STRUCTURAL & MOTION METRICS ===
+                # SSIM: 1.0 = identical, 0.0 = totally different → invert for "difference" scale
+                ssim_val = _compute_ssim_simplified(prev_gray, gray)
+                ssim_list.append(1.0 - ssim_val)  # Convert to "difference"
+
+                # ECR: already a difference metric [0, 1]
+                ecr_val = _compute_ecr(prev_frame, small)
+                ecr_list.append(ecr_val)
+
+                if not skip_flow:
+                    if _j % 3 == 0:  # Amostrar 1/3 dos frames
+                        flow_val = _compute_optical_flow_magnitude(prev_frame, small)
+                        flow_list.append(flow_val)
+                    else:
+                        # Interpola com último valor válido
+                        flow_list.append(flow_list[-1] if flow_list else 0.0)
+
+            prev_frame, prev_gray, prev_cbcr, prev_hist_y, prev_hist_hs = small, gray, cbcr, hist_y, hist_hs
 
         if clip_y_diffs:
             clip_motion.append(sum(clip_y_diffs) / len(clip_y_diffs))
@@ -666,6 +809,8 @@ def _adaptive_threshold(video_path):
 
     def _robust_rank(vals):
         s = sorted(vals)
+        if len(s) <= 1:
+            return [0.5] * len(vals)
         rank = {}
         for idx, v in enumerate(s):
             if v not in rank:
@@ -673,34 +818,99 @@ def _adaptive_threshold(video_path):
         return [rank[v] / max(1, len(s) - 1) for v in vals]
 
     def _var(vals):
+        if not vals:  # ← Proteger contra lista vazia
+            return 0.0
         m = sum(vals) / len(vals)
         return sum((v - m) ** 2 for v in vals) / max(1, len(vals) - 1)
 
+    # Rank all 7 features
     ry = _robust_rank(diff_y_list)
     rc = _robust_rank(diff_c_list)
     rhy = _robust_rank(diff_hy_list)
     rhs = _robust_rank(diff_hs_list)
+    rec = _robust_rank(ecr_list) if ecr_list else [0] * n
+    rssim = _robust_rank(ssim_list) if ssim_list else [0] * n
+    rflow = _robust_rank(flow_list) if flow_list else [0] * n
 
-    vars_list = [_var(diff_y_list), _var(diff_c_list),
-                 _var(diff_hy_list), _var(diff_hs_list)]
+    # No ranking de flow:
+    if flow_list and len(flow_list) == n:
+        rflow = _robust_rank(flow_list)
+    elif flow_list and len(flow_list) < n:
+        # Interpola para tamanho completo se necessário
+        from numpy import interp
+        import numpy as np
+        x_old = np.linspace(0, n - 1, len(flow_list))
+        x_new = np.arange(n)
+        flow_interp = interp(x_new, x_old, flow_list)
+        rflow = _robust_rank(flow_interp.tolist())
+    else:
+        rflow = [0.0] * n  # Fallback
+
+    # Dynamic weights: prioritize structural (ECR/SSIM) + visual, deprioritize flow for cut detection
+    vars_list = [
+        _var(diff_y_list), _var(diff_c_list), _var(diff_hy_list),
+        _var(diff_hs_list), _var(ecr_list) if ecr_list else 0,
+        _var(ssim_list) if ssim_list else 0, _var(flow_list) if flow_list else 0
+    ]
     v_total = sum(vars_list)
     if v_total < 1e-15:
-        weights = [0.50, 0.25, 0.15, 0.10]
+        # Fallback weights: structural > visual > motion
+        weights = [0.20, 0.10, 0.10, 0.10, 0.25, 0.20, 0.05]  # y, c, hy, hs, ecr, ssim, flow
     else:
-        weights = [v / v_total for v in vars_list]
-        weights = [0.10 + 0.40 * w for w in weights]
-        w_sum = sum(weights)
-        weights = [w / w_sum for w in weights]
+        # Base weights on variance, then apply semantic boost
+        base_weights = [v / v_total for v in vars_list]
+        # Boost structural features (ECR, SSIM) by 1.5x, reduce flow weight
+        boosted = [
+            base_weights[0] * 0.9, base_weights[1] * 0.9, base_weights[2] * 0.9, base_weights[3] * 0.9,
+            base_weights[4] * 1.5 if len(base_weights) > 4 else 0.25,  # ECR boost
+            base_weights[5] * 1.5 if len(base_weights) > 5 else 0.20,  # SSIM boost
+            base_weights[6] * 0.3 if len(base_weights) > 6 else 0.05  # Flow reduced
+        ]
+        w_sum = sum(boosted)
+        weights = [w / w_sum for w in boosted]
 
-    composite = [weights[0]*a + weights[1]*b + weights[2]*c + weights[3]*d
-                 for a, b, c, d in zip(ry, rc, rhy, rhs)]
+    # === MOTION-AWARE FUSION ===
+    # Key insight: high diff + high flow = motion (suppress), high diff + low flow = cut (enhance)
+    flow_median = sorted(flow_list)[n // 2] if flow_list else 0
+    diff_median = sorted(diff_y_list)[n // 2]
 
+    if flow_list and len(flow_list) > 0:
+        sorted_flow = sorted(flow_list)
+        median_idx = min(len(sorted_flow) // 2, len(sorted_flow) - 1)  # ← Seguro
+        flow_median = sorted_flow[median_idx]
+    else:
+        flow_median = 0.0
+
+    composite = []
+    for i in range(n):
+        base_score = (
+                weights[0] * ry[i] + weights[1] * rc[i] + weights[2] * rhy[i] + weights[3] * rhs[i] +
+                (weights[4] * rec[i] if len(weights) > 4 else 0) +
+                (weights[5] * rssim[i] if len(weights) > 5 else 0) +
+                (weights[6] * rflow[i] if len(weights) > 6 else 0)
+        )
+
+        # Motion-aware adjustment: só se flow_list tiver valor válido neste índice
+        flow_val = flow_list[i] if i < len(flow_list) else 0.0
+        if flow_val > flow_median * 1.5 and diff_y_list[i] > diff_median * 0.8:
+            base_score *= 0.4
+        elif diff_y_list[i] > diff_median * 1.2 and flow_val < flow_median * 0.7:
+            base_score *= 1.4
+        composite.append(base_score)
+
+    # Median filter to reduce noise
     mf = list(composite)
     for i in range(1, n - 1):
         w = sorted([composite[i - 1], composite[i], composite[i + 1]])
         mf[i] = w[1]
 
+    # === PERCENTILE-BASED THRESHOLD (more stable than Otsu) ===
     s = sorted(mf)
+    # Use 90-95th percentile as base threshold
+    percentile_idx = int(len(s) * 0.93)  # 93rd percentile — adjustable per profile later
+    raw_t = s[min(percentile_idx, len(s) - 1)]
+
+    # IQR-based spike capping (keep your existing logic)
     q1 = s[n // 4]
     q3 = s[3 * n // 4]
     iqr_v = q3 - q1
@@ -717,36 +927,32 @@ def _adaptive_threshold(video_path):
             else:
                 clean[i] = spike_cap + (mf[i] - spike_cap) * 0.3
 
+    # Motion index for final adjustment
     motion_index = sum(clip_motion) / max(1, len(clip_motion)) if clip_motion else 0.0
-    otsu_t = _otsu_1d(sorted(clean))
 
-    if otsu_t is not None:
-        grp0 = [v for v in clean if v <= otsu_t]
-        grp1 = [v for v in clean if v > otsu_t]
-        if grp0 and grp1:
-            noise_m = sum(grp0) / len(grp0)
-            trans_m = sum(grp1) / len(grp1)
-            sep = trans_m - noise_m
-            raw_t = noise_m + sep * 0.35
-        else:
-            raw_t = otsu_t
-    else:
-        raw_t = sorted(clean)[n // 2]
-
+    # Map to PySceneDetect scale (15-55)
     threshold = 15.0 + raw_t * 40.0
+
+    # Motion boost (your existing logic, kept)
     if motion_index > 12:
         motion_boost = min(5.0, (motion_index - 12) * 0.2)
         threshold = min(55.0, threshold + motion_boost)
+
     threshold = max(15.0, min(55.0, threshold))
     threshold = round(threshold, 1)
 
-    # min_dur: INVERSE relationship with threshold.
-    # High threshold (lots of motion)  -> LOW min_dur (accept short scenes)
-    # Low threshold (calm video)        -> HIGH min_dur (only long scenes)
-    t_norm = 1.0 - (threshold - 15.0) / 40.0  # Inverted: 1.0=calm, 0.0=agitated
+    # min_dur: INVERSE relationship with threshold (your logic, kept)
+    t_norm = 1.0 - (threshold - 15.0) / 40.0
     min_dur = 1.5 + 8.5 * (t_norm ** 1.5)
     min_dur = max(1.0, min(10.0, min_dur))
     min_dur = round(min_dur, 1)
+
+    if DEBUG:
+        elapsed = time.time() - _start_time  # ← Usar _start_time
+        print(f"[PERF] _adaptive_threshold: {elapsed:.2f}s for {n} samples")
+        print(f"[FEATURES] ECR: min={min(ecr_list):.3f}, max={max(ecr_list):.3f}")
+        if flow_list:
+            print(f"[FEATURES] FLOW: min={min(flow_list):.3f}, max={max(flow_list):.3f}")
 
     return threshold, min_dur
 
@@ -891,7 +1097,7 @@ class SceneEngine:
             width, height, fps, bitrate = out
             num, den = fps.split("/")
             fps_float = round(int(num) / int(den), 2)
-            return f"{width}x{height} | FPS: {fps_float} | Bitrate: {int(bitrate)/1000:.0f} kbps"
+            return f"{width}x{height} | FPS: {fps_float} | Bitrate: {int(bitrate) / 1000:.0f} kbps"
         except Exception:
             return "Video info unavailable"
 
@@ -943,10 +1149,10 @@ class SceneEngine:
         scene_manager.downscale = 2
         scene_manager.add_detector(
             ContentDetector(threshold=threshold,
-                           min_scene_len=int(min_dur * fps),
-                           luma_only=True,
-                           weights=CompWeights(
-                               delta_hue=1.0, delta_sat=1.0, delta_lum=1.0, delta_edges=1.0))
+                            min_scene_len=int(min_dur * fps),
+                            luma_only=True,
+                            weights=CompWeights(
+                                delta_hue=1.0, delta_sat=1.0, delta_lum=1.0, delta_edges=1.0))
         )
         video_duration = None
         try:
@@ -999,7 +1205,7 @@ class SceneEngine:
             if self.log:
                 eta = self._calculate_eta()
                 self.log.after(0, lambda d=self.detected, c=self.done, e=eta:
-                    self.log.write_status(detected=d, cut=c, eta=e))
+                self.log.write_status(detected=d, cut=c, eta=e))
             return True
 
         scene_list = []
@@ -1038,16 +1244,16 @@ class SceneEngine:
         except Exception as e:
             err_str = str(e).lower()
             needs_retry = (
-                "avcodec_send_packet" in err_str or  # 1094995529 / AVERROR_INVALIDDATA
-                "avcodec" in err_str or
-                "decode" in err_str or
-                "invalid data" in err_str or
-                "no start code" in err_str or
-                "avcodec_receive_frame" in err_str or
-                "packet" in err_str or
-                "av.error" in err_str or
-                "fatal" in err_str or
-                "thread" in err_str
+                    "avcodec_send_packet" in err_str or  # 1094995529 / AVERROR_INVALIDDATA
+                    "avcodec" in err_str or
+                    "decode" in err_str or
+                    "invalid data" in err_str or
+                    "no start code" in err_str or
+                    "avcodec_receive_frame" in err_str or
+                    "packet" in err_str or
+                    "av.error" in err_str or
+                    "fatal" in err_str or
+                    "thread" in err_str
             )
             if needs_retry and backend == "pyav":
                 # Skip OpenCV — uses same h264 decoder, will fail the same way.
@@ -1115,10 +1321,10 @@ class SceneEngine:
                     scene_manager.downscale = 2
                     scene_manager.add_detector(
                         ContentDetector(threshold=threshold,
-                                       min_scene_len=int(min_dur * fps),
-                                       luma_only=True,
-                                       weights=CompWeights(
-                                           delta_hue=1.0, delta_sat=1.0, delta_lum=1.0, delta_edges=1.0))
+                                        min_scene_len=int(min_dur * fps),
+                                        luma_only=True,
+                                        weights=CompWeights(
+                                            delta_hue=1.0, delta_sat=1.0, delta_lum=1.0, delta_edges=1.0))
                     )
                     scene_manager.detect_scenes(video=video, callback=_progress_cb)
                     scene_list = scene_manager.get_scene_list()
@@ -1245,7 +1451,7 @@ class SceneEngine:
                         if self.log:
                             eta = self._calculate_eta()
                             self.log.after(0, lambda d=self.detected, c=self.done, e=eta:
-                                self.log.write_status(d, c, e))
+                            self.log.write_status(d, c, e))
 
     def _get_progress_ratio(self):
         if self.total > 0:
@@ -1330,9 +1536,9 @@ class SceneEngine:
         #
         # min_dur: profile sets the FLOOR, adaptive scan can only raise it.
         profiles = {
-            "Low":    {"base_threshold": 48, "min_dur": 8.0, "dur_max_boost": 7.0, "label": "Low"},
+            "Low": {"base_threshold": 48, "min_dur": 8.0, "dur_max_boost": 7.0, "label": "Low"},
             "Normal": {"base_threshold": 32, "min_dur": 5.0, "dur_max_boost": 6.0, "label": "Normal"},
-            "High":   {"base_threshold": 20, "min_dur": 1.0, "dur_max_boost": 5.0, "label": "High"},
+            "High": {"base_threshold": 20, "min_dur": 1.0, "dur_max_boost": 5.0, "label": "High"},
         }
 
         profile = "Normal"
@@ -1365,7 +1571,8 @@ class SceneEngine:
             except Exception:
                 fps_est = 30.0
             print(f"[DEBUG] Adaptive scan: raw_t={raw_t}, raw_d={raw_d}")
-            print(f"[DEBUG] Profile={profile}, threshold={threshold}, min_dur_floor={cfg['min_dur']}, max_boost={cfg['dur_max_boost']}")
+            print(
+                f"[DEBUG] Profile={profile}, threshold={threshold}, min_dur_floor={cfg['min_dur']}, max_boost={cfg['dur_max_boost']}")
             print(f"[DEBUG] min_dur={min_dur}, min_scene_len={int(min_dur * fps_est)} frames (at ~{fps_est}fps)")
 
         return float(threshold), min_dur
@@ -1403,7 +1610,7 @@ class SceneEngine:
                "-c", "copy", "-avoid_negative_ts", "make_zero",
                "-muxpreload", "0", "-muxdelay", "0", output]
         run_hidden(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=300)  # FIX: add timeout
+                   timeout=300)  # FIX: add timeout
 
     def _run_ffmpeg_precise_cut(self, input_file, start_time, end_time, output, aligned_start):
         encoder = self.cfg.get("ENCODER", "cpu")
@@ -1431,7 +1638,7 @@ class SceneEngine:
             cmd += ["-maxrate", str(bitrate), "-bufsize", str(bitrate * 2)]
 
         result = run_hidden(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                timeout=300)  # FIX: add timeout
+                            timeout=300)  # FIX: add timeout
 
         if result.returncode != 0 and encoder != "cpu":
             codec_start = cmd.index(codec[0])
@@ -1545,12 +1752,12 @@ class FaceDetectionEngine:
         self.mp = None
 
         self.profile_cfg = {
-            "Low":    {"conf": 0.45, "min_size": 64, "ttl": 0.6,
-                       "min_frames": 0.8, "min_valid_ratio": 0.75, "min_sharpness": 60},
+            "Low": {"conf": 0.45, "min_size": 64, "ttl": 0.6,
+                    "min_frames": 0.8, "min_valid_ratio": 0.75, "min_sharpness": 60},
             "Normal": {"conf": 0.35, "min_size": 40, "ttl": 1.2,
                        "min_frames": 0.5, "min_valid_ratio": 0.6, "min_sharpness": 40},
-            "High":   {"conf": 0.22, "min_size": 24, "ttl": 2.5,
-                       "min_frames": 0.25, "min_valid_ratio": 0.35, "min_sharpness": 20},
+            "High": {"conf": 0.22, "min_size": 24, "ttl": 2.5,
+                     "min_frames": 0.25, "min_valid_ratio": 0.35, "min_sharpness": 20},
         }[profile]
 
         self.last_preview = 0
@@ -1720,8 +1927,8 @@ class FaceDetectionEngine:
                             t["frames"] += 1
 
                             fh, fw = face_raw.shape[:2]
-                            center_face = face_raw[int(fh*0.25):int(fh*0.75),
-                                                   int(fw*0.25):int(fw*0.75)]
+                            center_face = face_raw[int(fh * 0.25):int(fh * 0.75),
+                            int(fw * 0.25):int(fw * 0.75)]
                             if center_face.size == 0:
                                 center_face = face_raw
                             sharp = cv2.Laplacian(center_face, cv2.CV_64F).var()
@@ -1736,8 +1943,8 @@ class FaceDetectionEngine:
                     if not matched:
                         track_id += 1
                         fh, fw = face_raw.shape[:2]
-                        center_face = face_raw[int(fh*0.25):int(fh*0.75),
-                                               int(fw*0.25):int(fw*0.75)]
+                        center_face = face_raw[int(fh * 0.25):int(fh * 0.75),
+                        int(fw * 0.25):int(fw * 0.75)]
                         if center_face.size == 0:
                             center_face = face_raw
                         sharp = cv2.Laplacian(center_face, cv2.CV_64F).var()
@@ -1757,7 +1964,7 @@ class FaceDetectionEngine:
                         cfg = self.profile_cfg
                         min_required = max(3, int(fps * cfg["min_frames"]))
                         if (t["frames"] >= min_required and
-                            (t["valid"] / max(t["frames"], 1)) >= cfg["min_valid_ratio"] and
+                                (t["valid"] / max(t["frames"], 1)) >= cfg["min_valid_ratio"] and
                                 t["score"] >= cfg["min_sharpness"]):
                             fname = f"face_{self.done + 1:04d}.png"
                             path = os.path.join(outdir, fname)
@@ -1793,7 +2000,7 @@ class FaceDetectionEngine:
                         done_val = self.done
                         eta_val = self._calculate_eta(frame_idx, total_frames)
                         self.log.after(0, lambda d=detected_val, c=done_val, e=eta_val:
-                            self.log.write_status(detected=d, cut=c, eta=e))
+                        self.log.write_status(detected=d, cut=c, eta=e))
 
                 # FIX: Use after() for thread-safe UI updates
                 if self.progress:
@@ -1808,7 +2015,7 @@ class FaceDetectionEngine:
             for t in tracks:
                 min_required = max(3, int(fps * cfg["min_frames"]))
                 if (t["frames"] >= min_required and
-                    (t["valid"] / max(t["frames"], 1)) >= cfg["min_valid_ratio"] and
+                        (t["valid"] / max(t["frames"], 1)) >= cfg["min_valid_ratio"] and
                         t["score"] >= cfg["min_sharpness"]):
                     fname = f"face_{self.done + 1:04d}.png"
                     path = os.path.join(outdir, fname)
@@ -1873,10 +2080,10 @@ class SceneCutterApp(ctk.CTk):
         self.resizable(False, False)
         self.preview_enabled = ENABLE_PREVIEW_DEFAULT
         self.available_accel = detect_available_accel()
-        
+
         # Load saved settings
         self.saved_settings = load_settings()
-        
+
         self._build_ui()
 
     def _build_ui(self):
@@ -1892,7 +2099,7 @@ class SceneCutterApp(ctk.CTk):
         self.video_selector.pack(fill="x", padx=12)
         self.output_selector = DirectorySelector(files, "Output folder")
         self.output_selector.pack(fill="x", padx=12)
-        
+
         # Restore saved paths
         last_video = self.saved_settings.get("last_video", "")
         last_output = self.saved_settings.get("last_output", "")
@@ -2138,7 +2345,7 @@ class SceneCutterApp(ctk.CTk):
         self.stop_pending = False
         self.running = False
         self.start_btn.configure(text="Start", fg_color=ACCENT,
-                                  hover_color="#4f46e5", state="normal")
+                                 hover_color="#4f46e5", state="normal")
         self.set_ui_state(False)
         if stopped:
             self.cleanup_process(reason="stop")
@@ -2230,7 +2437,7 @@ class SceneCutterApp(ctk.CTk):
         if not self.running or self.engine is None or self.stop_pending:
             return
         answer = mb.askyesno("Confirm Stop",
-                              "The process is still running.\nDo you really want to stop it?")
+                             "The process is still running.\nDo you really want to stop it?")
         if not answer:
             return
         self.stop_pending = True
@@ -2253,7 +2460,7 @@ class SceneCutterApp(ctk.CTk):
 if __name__ == "__main__":
     if not single_instance():
         mb.showerror("Application Already Running",
-                      "This application is already running.")
+                     "This application is already running.")
         sys.exit(0)
 
     ctk.set_appearance_mode("dark")
