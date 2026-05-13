@@ -12,6 +12,8 @@ import json
 import gc
 import bisect
 import textwrap
+import traceback
+import faulthandler
 import tkinter.filedialog as fd
 import tkinter.messagebox as mb
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -38,6 +40,36 @@ TORCH_AVAILABLE = False
 # Config: user settings persistence
 # ============================================================
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+CRASH_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scene_cutter_crash.log")
+_CRASH_LOG_HANDLE = None
+
+
+def log_crash(message):
+    try:
+        with open(CRASH_LOG_FILE, "a", encoding="utf-8") as f:
+            ts = datetime.datetime.now().isoformat(timespec="seconds")
+            f.write(f"\n[{ts}] {message}\n")
+    except Exception:
+        pass
+
+
+def install_crash_logging():
+    global _CRASH_LOG_HANDLE
+    try:
+        _CRASH_LOG_HANDLE = open(CRASH_LOG_FILE, "a", encoding="utf-8")
+        faulthandler.enable(file=_CRASH_LOG_HANDLE, all_threads=True)
+    except Exception:
+        pass
+
+    def _sys_hook(exc_type, exc, tb):
+        log_crash("Unhandled exception:\n" + "".join(traceback.format_exception(exc_type, exc, tb)))
+
+    def _thread_hook(args):
+        log_crash("Unhandled thread exception:\n" + "".join(
+            traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+
+    sys.excepthook = _sys_hook
+    threading.excepthook = _thread_hook
 
 
 def load_settings():
@@ -97,6 +129,7 @@ INSTANCE_PORT = 54321
 PREVIEW_MAX_WIDTH = 420
 PREVIEW_MAX_HEIGHT = 240
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+PROCESS_COOLDOWN_SECONDS = 1.25
 
 # ============================================================
 # Config: compatibility / constants
@@ -459,13 +492,8 @@ class LogBox(ctk.CTkTextbox):
         start = self.index("end")
         self.insert("end", message)
         end = self.index("end")
-        color = {
-            "error": DANGER,
-            "warning": "#f59e0b",
-            "success": SUCCESS,
-        }.get(kind, TEXT_MAIN)
         self.tag_add(tag, start, end)
-        self.tag_config(tag, foreground=color)
+        self.tag_config(tag, foreground=TEXT_MAIN)
         self.configure(state="disabled")
 
     def write_finished(self, text):
@@ -1477,6 +1505,9 @@ class SceneEngine:
         self._keyframes_cache = None
         self._has_audio_cache = None
         self._preview_cap = None
+        self._preview_lock = threading.Lock()
+        self._preview_thread = None
+        self._preview_stop = False
         self._video_obj = None  # scenedetect video object for cleanup
         self._scene_candidates = []
         self._rejected_scene_candidates = []
@@ -1496,6 +1527,7 @@ class SceneEngine:
     def stop(self):
         self._stop = True
         self._ui_alive = False
+        self._preview_stop = True
         try:
             procs = []
             if self._ffmpeg_proc:
@@ -1529,7 +1561,9 @@ class SceneEngine:
         self._thumb_container = None
         try:
             if self._preview_cap:
-                self._preview_cap.release()
+                with self._preview_lock:
+                    if self._preview_cap:
+                        self._preview_cap.release()
         except Exception:
             pass
         self._preview_cap = None
@@ -1561,6 +1595,9 @@ class SceneEngine:
 
     def run(self, scene_mode=True):
         self.scene_mode = scene_mode
+        self._stop = False
+        self._preview_stop = False
+        self._ui_alive = True
         self._analysis_ratio = 0.0
         self._start_time = time.time()
         self._end_time = None
@@ -1585,14 +1622,17 @@ class SceneEngine:
 
         if self.preview_enabled:
             try:
-                self._preview_cap = cv2.VideoCapture(self.video)
+                with self._preview_lock:
+                    self._preview_cap = cv2.VideoCapture(self.video)
             except Exception:
                 self._preview_cap = None
 
-        threading.Thread(target=self._preview_loop, daemon=True).start()
+        self._preview_thread = threading.Thread(target=self._preview_loop, daemon=False)
+        self._preview_thread.start()
 
         if self.previewer and not self._video_info_shown:
-            self.previewer.update_info(self._get_video_info_text())
+            info_text = self._get_video_info_text()
+            self.previewer.after(0, lambda t=info_text: self.previewer.update_info(t))
             self._video_info_shown = True
 
         try:  # FIX: ensure preview_cap is released on exception
@@ -1607,13 +1647,22 @@ class SceneEngine:
             # Keep preview active during cuts - release only after all cuts are done
             self._cut_scenes(scenes)
         finally:
-            # FIX: always release preview cap
-            if self._preview_cap:
+            self._ui_alive = False
+            self._preview_stop = True
+            if self._preview_thread and self._preview_thread.is_alive():
                 try:
-                    self._preview_cap.release()
+                    self._preview_thread.join(timeout=1.0)
                 except Exception:
                     pass
-                self._preview_cap = None
+            self._preview_thread = None
+            # FIX: always release preview cap
+            try:
+                with self._preview_lock:
+                    if self._preview_cap:
+                        self._preview_cap.release()
+                    self._preview_cap = None
+            except Exception:
+                pass
             self.cleanup_temp_files()
 
         self._end_time = time.time()
@@ -2609,7 +2658,7 @@ class SceneEngine:
             return None
 
     def _preview_loop(self):
-        while not self._stop:
+        while not self._preview_stop:
             if self.previewer and self.preview_enabled:
                 now = time.time()
                 if now - self.last_preview >= PREVIEW_INTERVAL:
@@ -2634,11 +2683,12 @@ class SceneEngine:
             time.sleep(0.05)
 
     def _get_preview_frame_at(self, t):
-        if not self._preview_cap:
-            return None
         try:
-            self._preview_cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
-            ret, frame = self._preview_cap.read()
+            with self._preview_lock:
+                if not self._preview_cap:
+                    return None
+                self._preview_cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+                ret, frame = self._preview_cap.read()
             if not ret or frame is None:
                 return None
             return resize_for_preview(
@@ -3182,7 +3232,7 @@ class SceneCutterApp(ctk.CTk):
             self.log.clear_status()
             if len(videos) > 1:
                 self.log.append_message(
-                    f"Queue: {len(valid_videos)} video(s) ready, {len(skipped)} skipped.",
+                    f"Queue: {len(valid_videos)} videos ready, {len(skipped)} skipped",
                     kind="info")
             for video, reason in skipped[:8]:
                 self.log.append_message(
@@ -3238,6 +3288,11 @@ class SceneCutterApp(ctk.CTk):
         if not self.engine:
             return
         self.engine.stop()
+
+    def _cooldown_between_videos(self):
+        gc.collect()
+        time.sleep(PROCESS_COOLDOWN_SECONDS)
+        gc.collect()
 
     def run_batch(self, videos, output, cfg, mode, scene_mode, inference):
         started = time.time()
@@ -3315,6 +3370,10 @@ class SceneCutterApp(ctk.CTk):
                     gc.collect()
                     for temp_file in temp_files:
                         remove_temp_file(temp_file)
+                    if not self.batch_stop and not self.stop_pending and index < len(videos):
+                        if self.progress:
+                            self.after(0, self.progress.reset)
+                        self._cooldown_between_videos()
 
             elapsed = max(1, int(time.time() - started))
             m, s = divmod(elapsed, 60)
@@ -3530,6 +3589,8 @@ class SceneCutterApp(ctk.CTk):
 # Main
 # ============================================================
 if __name__ == "__main__":
+    install_crash_logging()
+
     if not single_instance():
         mb.showerror("Application Already Running",
                      "This application is already running.")
