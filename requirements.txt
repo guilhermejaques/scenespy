@@ -2,5 +2,7 @@ customtkinter
 opencv-python
 av
 pillow
+numpy
+scenedetect
 ultralytics
 mediapipe==0.10.9
