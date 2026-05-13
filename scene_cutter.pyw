@@ -11,6 +11,7 @@ import datetime
 import json
 import gc
 import bisect
+import textwrap
 import tkinter.filedialog as fd
 import tkinter.messagebox as mb
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -163,7 +164,7 @@ def detect_available_accel():
 
 
 def build_output_dir(base_output, mode, profile, accel):
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
     mode_tag = MODE_ABBREV.get(mode, mode.upper())
     path = os.path.join(base_output, f"{mode_tag}_{ts}_{profile}_{accel}")
     os.makedirs(path, exist_ok=True)
@@ -186,14 +187,27 @@ def is_valid_video_file(path: str) -> bool:
     return False
 
 
-def remux_if_needed(path):
+def remove_temp_file(path):
+    if not path:
+        return
+    for _ in range(20):
+        try:
+            if not os.path.exists(path):
+                return
+            os.remove(path)
+            return
+        except Exception:
+            gc.collect()
+            time.sleep(0.15)
+
+
+def remux_if_needed(path, temp_files=None):
     ext = os.path.splitext(path)[1].lower()
     if ext != ".mkv":
         return path
 
     fixed = path[:-4] + "_fixed.mkv"
-    if os.path.exists(fixed) and is_valid_video_file(fixed):
-        return fixed
+    remove_temp_file(fixed)
 
     run_hidden(
         ["ffmpeg", "-y", "-fflags", "+genpts+igndts", "-err_detect", "ignore_err",
@@ -202,8 +216,53 @@ def remux_if_needed(path):
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
     if os.path.exists(fixed) and is_valid_video_file(fixed):
+        if temp_files is not None:
+            temp_files.append(fixed)
         return fixed
+    remove_temp_file(fixed)
     return path
+
+
+def video_decode_error_summary(path, timeout=120):
+    try:
+        result = run_hidden(
+            ["ffmpeg", "-v", "error", "-i", path, "-f", "null", "NUL"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, timeout=timeout
+        )
+        if result.returncode == 0 and not result.stderr.strip():
+            return ""
+        return (result.stderr or "FFmpeg decode check failed").strip()
+    except Exception as e:
+        return str(e)
+
+
+def reencode_fixed_video(path, temp_files=None, timeout=300):
+    fixed = path.rsplit(".", 1)[0] + "_fixed.mp4"
+    remove_temp_file(fixed)
+    result = run_hidden(
+        ["ffmpeg", "-y", "-err_detect", "ignore_err",
+         "-i", path, "-c:v", "libx264", "-crf", "22",
+         "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+         "-c:a", "copy", fixed],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        timeout=timeout
+    )
+    if result.returncode == 0 and os.path.exists(fixed) and is_valid_video_file(fixed):
+        if temp_files is not None:
+            temp_files.append(fixed)
+        return fixed
+    remove_temp_file(fixed)
+    err = result.stderr.decode(errors="ignore") if isinstance(result.stderr, bytes) else str(result.stderr or "")
+    raise RuntimeError(err[:300] or "FFmpeg could not repair the video")
+
+
+def prepare_video_for_processing(path, temp_files=None):
+    prepared = remux_if_needed(path, temp_files=temp_files)
+    decode_error = video_decode_error_summary(prepared)
+    if not decode_error:
+        return prepared
+    return reencode_fixed_video(prepared, temp_files=temp_files)
 
 
 def resize_for_preview(img, max_w=PREVIEW_MAX_WIDTH, max_h=PREVIEW_MAX_HEIGHT):
@@ -331,10 +390,40 @@ class LogBox(ctk.CTkTextbox):
     def __init__(self, master, height=140):
         super().__init__(master, height=height, fg_color=BG_MAIN,
                          corner_radius=15, border_color=BORDER_SOFT2, border_width=1)
-        self.configure(state="disabled", font=("Consolas", 12))
+        self.configure(state="disabled", font=("Consolas", 12), wrap="char")
         self.pack_propagate(False)
         self.status_lines = []
         self.initialized = False
+
+    def _terminal_wrap_width(self):
+        width_px = self.winfo_width()
+        if width_px <= 1:
+            width_px = 640
+        return max(42, min(96, int(width_px / 8)))
+
+    def _format_terminal_message(self, text, max_chars=900):
+        cleaned = " ".join(str(text or "").replace("\r", " ").replace("\n", " ").split())
+        if len(cleaned) > max_chars:
+            cleaned = cleaned[:max_chars].rstrip() + "..."
+        return "\n".join(textwrap.wrap(
+            cleaned,
+            width=self._terminal_wrap_width(),
+            break_long_words=True,
+            break_on_hyphens=False,
+        )) or "Unknown error"
+
+    def _ensure_initialized(self):
+        if self.initialized:
+            return
+        self.delete("1.0", "end")
+        self.status_lines = [
+            "Scenes detected: -",
+            "Scenes cut:      -",
+            "Estimated time:  --:--"
+        ]
+        for line in self.status_lines:
+            self.insert("end", line + "\n")
+        self.initialized = True
 
     def write_status(self, detected=None, cut=None, eta=None):
         lines = [
@@ -360,20 +449,28 @@ class LogBox(ctk.CTkTextbox):
         self.initialized = False
         self._render()
 
+    def append_message(self, text, kind="info"):
+        self.configure(state="normal")
+        self._ensure_initialized()
+        tag = f"msg_{kind}"
+        message = self._format_terminal_message(text)
+        if self.index("end-1c") != "1.0":
+            self.insert("end", "\n")
+        start = self.index("end")
+        self.insert("end", message)
+        end = self.index("end")
+        color = {
+            "error": DANGER,
+            "warning": "#f59e0b",
+            "success": SUCCESS,
+        }.get(kind, TEXT_MAIN)
+        self.tag_add(tag, start, end)
+        self.tag_config(tag, foreground=color)
+        self.configure(state="disabled")
+
     def write_finished(self, text):
         self.configure(state="normal")
-
-        # If write_status was never called, initialize with status lines first
-        if not self.initialized:
-            self.delete("1.0", "end")
-            self.status_lines = [
-                "Scenes detected: -",
-                "Scenes cut:      -",
-                "Estimated time:  --:--"
-            ]
-            for line in self.status_lines:
-                self.insert("end", line + "\n")
-            self.initialized = True
+        self._ensure_initialized()
 
         current = self.get("3.0", "3.end").strip()
         if not current:
@@ -499,6 +596,7 @@ class PreviewFrame(ctk.CTkFrame):
 class FileSelector(ctk.CTkFrame):
     def __init__(self, master, label="File", width=400):
         super().__init__(master, fg_color="transparent")
+        self.paths = []
         ctk.CTkLabel(self, text=label, font=("Consolas", 12)).pack(anchor="w")
         row = ctk.CTkFrame(self, fg_color="transparent")
         row.pack(fill="x", pady=(4, 8))
@@ -520,13 +618,29 @@ class FileSelector(ctk.CTkFrame):
         self.button.pack_propagate(False)
 
     def select(self):
-        path = fd.askopenfilename()
-        if path:
+        paths = list(fd.askopenfilenames(
+            filetypes=[("Video files", "*.mp4 *.mkv *.mov *.avi *.webm *.m4v"),
+                       ("All files", "*.*")]
+        ))
+        if paths:
+            self.paths = paths
             self.entry.delete(0, "end")
-            self.entry.insert(0, path)
+            if len(paths) == 1:
+                self.entry.insert(0, paths[0])
+            else:
+                self.entry.insert(0, f"{len(paths)} videos selected")
 
     def get(self):
         return self.entry.get()
+
+    def get_paths(self):
+        value = self.get().strip()
+        if self.paths:
+            if len(self.paths) > 1 and value == f"{len(self.paths)} videos selected":
+                return list(self.paths)
+            if len(self.paths) == 1 and value == self.paths[0]:
+                return list(self.paths)
+        return [value] if value else []
 
 
 class DirectorySelector(FileSelector):
@@ -1346,6 +1460,8 @@ class SceneEngine:
         self.detected = 0
         self.total = 0
         self.done = 0
+        self.failed = 0
+        self.completed_attempts = 0
         self._start_time = None
         self._end_time = None
         self._video_info_shown = False
@@ -1363,6 +1479,19 @@ class SceneEngine:
         self._preview_cap = None
         self._video_obj = None  # scenedetect video object for cleanup
         self._scene_candidates = []
+        self._rejected_scene_candidates = []
+        self._cut_failures = []
+        self._cut_output_dir = None
+        self._temp_files = []
+
+    def add_temp_file(self, path):
+        if path and path not in self._temp_files:
+            self._temp_files.append(path)
+
+    def cleanup_temp_files(self):
+        for path in list(self._temp_files):
+            remove_temp_file(path)
+        self._temp_files = []
 
     def stop(self):
         self._stop = True
@@ -1417,6 +1546,9 @@ class SceneEngine:
             pass
         self._scene_candidates = []
         self._rejected_scene_candidates = []
+        self._cut_failures = []
+        self._cut_output_dir = None
+        self.cleanup_temp_files()
 
     def total_time(self):
         if not self._start_time:
@@ -1433,11 +1565,15 @@ class SceneEngine:
         self._start_time = time.time()
         self._end_time = None
         self.done = 0
+        self.failed = 0
+        self.completed_attempts = 0
         self.detected = 0
         self.last_preview = 0
         self._last_thumb_time = 0
         self._scene_candidates = []
         self._rejected_scene_candidates = []
+        self._cut_failures = []
+        self._cut_output_dir = None
 
         if self.previewer and self.preview_enabled:
             try:
@@ -1478,6 +1614,7 @@ class SceneEngine:
                 except Exception:
                     pass
                 self._preview_cap = None
+            self.cleanup_temp_files()
 
         self._end_time = time.time()
 
@@ -1512,15 +1649,18 @@ class SceneEngine:
         open_video, SceneManager, ContentDetector, StatsManager, CompWeights = result
 
         backend = "pyav"
-        if self.video.lower().endswith(".mkv"):
-            backend = "pyav"
+        if "_fixed" in os.path.splitext(os.path.basename(self.video))[0].lower():
+            backend = "opencv"
 
         try_backends = ["pyav", "opencv"] if backend == "pyav" else [backend]
         video = None
         last_error = None
         for be in try_backends:
             try:
-                video = open_video(self.video, backend=be, suppress_output=True)
+                if be == "pyav":
+                    video = open_video(self.video, backend=be, suppress_output=True)
+                else:
+                    video = open_video(self.video, backend=be)
                 self._video_obj = video  # Store for cleanup
                 break
             except Exception as e:
@@ -1654,17 +1794,18 @@ class SceneEngine:
                 # Skip OpenCV — uses same h264 decoder, will fail the same way.
                 # Go straight to ffmpeg re-encode fallback.
                 fixed = self.video.rsplit(".", 1)[0] + "_fixed.mp4"
-                if not os.path.exists(fixed):
+                remove_temp_file(fixed)
+                self.add_temp_file(fixed)
+                if True:
                     print(f"Video has corrupted frames - re-encoding with ffmpeg...")
                     if self.log:
                         self.log.after(0, lambda: self.log.write_status(
                             detected="Fixing corrupted video...", cut=0, eta="--:--"))
-                    run_hidden(
+                    self._run_ffmpeg_tracked(
                         ["ffmpeg", "-y", "-err_detect", "ignore_err",
                          "-i", self.video, "-c:v", "libx264", "-crf", "22",
                          "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                          "-c:a", "copy", fixed],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                         timeout=300  # FIX: add timeout to prevent hanging
                     )
                     if self.log:
@@ -1676,13 +1817,12 @@ class SceneEngine:
                     # Verify the fixed file is valid
                     if not is_valid_video_file(fixed):
                         print(f"Fixed file is corrupted, re-encoding again...")
-                        os.remove(fixed)
-                        run_hidden(
+                        remove_temp_file(fixed)
+                        self._run_ffmpeg_tracked(
                             ["ffmpeg", "-y", "-err_detect", "ignore_err",
                              "-i", self.video, "-c:v", "libx264", "-crf", "22",
                              "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                              "-c:a", "copy", fixed],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             timeout=300  # FIX: add timeout to prevent hanging
                         )
                     if not os.path.exists(fixed) or not is_valid_video_file(fixed):
@@ -1990,6 +2130,55 @@ class SceneEngine:
         self.detected = len(scenes)
         return scenes
 
+    def _record_cut_failure(self, task, error):
+        idx, output_file, start_time, end_time, _aligned_start, _aligned_end, start_frame, end_frame, _precise = task
+        message = str(error) or "Unknown error"
+        failure = {
+            "scene_number": int(idx),
+            "file": os.path.basename(output_file),
+            "start_frame": int(start_frame),
+            "end_frame": int(end_frame),
+            "start_time": round(float(start_time), 4),
+            "end_time": round(float(end_time), 4),
+            "duration": round(max(0.0, float(end_time) - float(start_time)), 4),
+            "error_type": type(error).__name__,
+            "error": message[:1000],
+        }
+        self._cut_failures.append(failure)
+        self.failed = len(self._cut_failures)
+        return failure
+
+    def _write_cut_failure_report(self, outdir):
+        if not self._cut_failures:
+            return None
+        path = os.path.join(outdir, "cut_errors.json")
+        report = {
+            "video": self.video,
+            "failed_scene_count": len(self._cut_failures),
+            "failed_duration": round(sum(float(f.get("duration", 0.0)) for f in self._cut_failures), 4),
+            "failed_scenes": self._cut_failures,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        return path
+
+    def _validate_cut_output(self, output, expected_duration):
+        if not os.path.exists(output):
+            raise RuntimeError("Output file was not created")
+        if not is_valid_video_file(output):
+            raise RuntimeError("Output file has no valid video stream")
+        cmd = ["ffprobe", "-v", "error",
+               "-show_entries", "format=duration",
+               "-of", "default=noprint_wrappers=1:nokey=1", output]
+        try:
+            actual_duration = float(check_output_hidden(cmd).decode().strip())
+        except Exception as e:
+            raise RuntimeError(f"Could not validate output duration: {e}") from e
+        if expected_duration > 0.2 and actual_duration < expected_duration * 0.5:
+            raise RuntimeError(
+                f"Output duration is too short ({actual_duration:.2f}s of {expected_duration:.2f}s)")
+        return actual_duration
+
     def _cut_scenes(self, scenes):
         outdir = build_output_dir(
             self.output,
@@ -1997,9 +2186,13 @@ class SceneEngine:
             profile=self.cfg.get("label", "NA"),
             accel=self.cfg.get("ENCODER", "cpu")
         )
+        self._cut_output_dir = outdir
+        self._cut_failures = []
+        self.failed = 0
         fps = self._get_video_fps()
         self.total = len(scenes)
         self.done = 0
+        self.completed_attempts = 0
         self._cut_lock = threading.Lock()
 
         # Pre-compute all tasks (decoding is sequential: keyframes/fps first)
@@ -2031,10 +2224,20 @@ class SceneEngine:
                     self.video, start_frame, end_frame, output_file, aligned_start)
             else:
                 self._run_ffmpeg_copy(start_time, end_time, output_file)
+            self._validate_cut_output(output_file, end_time - start_time)
 
         if self.total <= 1:
-            _cut_one(tasks[0])
-            self.done = 1
+            try:
+                _cut_one(tasks[0])
+                self.done = 1
+            except Exception as cut_error:
+                failure = self._record_cut_failure(tasks[0], cut_error)
+                if self.log:
+                    err_msg = str(cut_error)[:80] or "Unknown error"
+                    err_type = failure["error_type"]
+                    self.log.after(0, lambda e=err_msg, t=err_type: self.log.append_message(
+                        f"Error: scene_000 could not be exported [{t}] ({e})", kind="error"))
+            self.completed_attempts = 1
             if self.log:
                 self.log.after(0, lambda: self.log.write_status(detected=self.detected, cut=self.done, eta="00:00"))
             if self.progress:
@@ -2049,18 +2252,24 @@ class SceneEngine:
                         return
                     try:
                         future.result()  # Catch any exceptions from workers
+                        with self._cut_lock:
+                            self.done += 1
                     except Exception as cut_error:
+                        task = futures[future]
+                        failure = self._record_cut_failure(task, cut_error)
                         print(f"[CUT ERROR] {cut_error}")
                         if self.log:
                             err_msg = str(cut_error)[:60]
-                            self.log.after(0, lambda e=err_msg: self.log.write_status(
-                                detected=f"Cut error: {e}", cut=self.done, eta="--:--"))
+                            scene_name = failure["file"]
+                            err_type = failure["error_type"]
+                            self.log.after(0, lambda n=scene_name, e=err_msg, t=err_type: self.log.append_message(
+                                f"Warning: {n} could not be exported [{t}] ({e})", kind="warning"))
                         # Continue with other cuts
 
                     with self._cut_lock:
-                        self.done += 1
+                        self.completed_attempts += 1
                         if self.progress:
-                            ratio = self.done / self.total
+                            ratio = self.completed_attempts / self.total
                             self.progress.after(0, lambda v=ratio: self.progress.update(v))
                         if self.log:
                             eta = self._calculate_eta()
@@ -2068,6 +2277,10 @@ class SceneEngine:
                             self.log.write_status(d, c, e))
 
         self._write_scene_metadata(outdir, scenes, fps)
+        self._write_cut_failure_report(outdir)
+
+        if self.done <= 0 and self._cut_failures and not self._stop:
+            raise RuntimeError("No scenes could be exported. See cut_errors.json for details.")
 
     def _write_scene_metadata(self, outdir, scenes, fps):
         try:
@@ -2079,21 +2292,29 @@ class SceneEngine:
                 "profile": self.cfg.get("label", "NA"),
                 "fps": fps,
                 "scene_count": len(scenes),
+                "successful_cuts": int(self.done),
+                "failed_cuts": getattr(self, "_cut_failures", []),
                 "accepted_cuts": getattr(self, "_scene_candidates", []),
                 "rejected_cuts": getattr(self, "_rejected_scene_candidates", []),
                 "scenes": [],
             }
+            failures_by_index = {
+                int(f.get("scene_number", -1)): f for f in getattr(self, "_cut_failures", [])
+            }
             for idx, (start_frame, end_frame) in enumerate(scenes):
                 cut_candidate = candidates_by_frame.get(int(start_frame)) if idx > 0 else None
+                failure = failures_by_index.get(idx)
                 metadata["scenes"].append({
                     "index": idx,
                     "file": f"scene_{idx:03d}.mp4",
+                    "status": "failed" if failure else "exported",
                     "start_frame": int(start_frame),
                     "end_frame": int(end_frame),
                     "start_time": round(start_frame / fps, 4),
                     "end_time": round(end_frame / fps, 4),
                     "duration": round((end_frame - start_frame) / fps, 4),
                     "cut": cut_candidate,
+                    "error": failure,
                 })
             with open(os.path.join(outdir, "scenes.json"), "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=2)
@@ -2117,9 +2338,10 @@ class SceneEngine:
             return "--:--"
 
         # Only show ETA during cut phase (when we have actual cut progress)
-        if self.total > 0 and self.done > 0:
-            rate = self.done / elapsed  # scenes per second
-            remaining = self.total - self.done
+        completed = getattr(self, "completed_attempts", self.done)
+        if self.total > 0 and completed > 0:
+            rate = completed / elapsed  # scene attempts per second
+            remaining = self.total - completed
             eta_seconds = int(remaining / rate) if rate > 0 else 0
             if 0 < eta_seconds < 86400:
                 m, s = divmod(eta_seconds, 60)
@@ -2359,8 +2581,8 @@ class SceneEngine:
             print("FFMPEG ERROR:\n", result.stderr.decode(errors="ignore"))
             if self.log:
                 err_msg = result.stderr.decode(errors="ignore")[:80]
-                self.log.after(0, lambda e=err_msg: self.log.write_status(
-                    detected=f"FFmpeg error: {e}", cut=self.done, eta="--:--"))
+                self.log.after(0, lambda e=err_msg: self.log.append_message(
+                    f"FFmpeg error: {e}", kind="error"))
             raise RuntimeError(result2.stderr.decode(errors="ignore")[:300] or "FFmpeg fallback failed")
         if result.returncode != 0:
             raise RuntimeError(result.stderr.decode(errors="ignore")[:300] or "FFmpeg precise cut failed")
@@ -2783,6 +3005,7 @@ class SceneCutterApp(ctk.CTk):
         self.engine = None
         self.running = False
         self.stop_pending = False
+        self.batch_stop = False
         self.resizable(False, False)
         self.preview_enabled = ENABLE_PREVIEW_DEFAULT
         self.available_accel = detect_available_accel()
@@ -2801,7 +3024,7 @@ class SceneCutterApp(ctk.CTk):
 
         files = Section(self.left, "Files")
         files.pack(fill="x", padx=12, pady=12)
-        self.video_selector = FileSelector(files, "Source video")
+        self.video_selector = FileSelector(files, "Source video(s)")
         self.video_selector.pack(fill="x", padx=12)
         self.output_selector = DirectorySelector(files, "Output folder")
         self.output_selector.pack(fill="x", padx=12)
@@ -2811,6 +3034,7 @@ class SceneCutterApp(ctk.CTk):
         last_output = self.saved_settings.get("last_output", "")
         if last_video:
             self.video_selector.entry.insert(0, last_video)
+            self.video_selector.paths = [last_video]
         if last_output:
             self.output_selector.entry.insert(0, last_output)
 
@@ -2914,44 +3138,66 @@ class SceneCutterApp(ctk.CTk):
             self.start_process()
 
     def start_process(self):
-        video = self.video_selector.get().strip()
+        videos = self.video_selector.get_paths()
         output = self.output_selector.get().strip()
+        first_video = videos[0] if videos else ""
 
         # Save paths for next session
-        save_settings(video=video, output=output)
+        save_settings(video=first_video, output=output)
 
-        if not video and not output:
+        if not videos and not output:
             return
-        if not video or not output:
+        if not videos or not output:
             self.log.clear_status()
             self.log.status_lines[0] = "Select input video and output folder"
             self.log._render()
             return
-
-        ext = os.path.splitext(video)[1].lower()
-        if ext not in ALLOWED_VIDEO_EXTENSIONS:
+        if not os.path.isdir(output):
             self.log.clear_status()
-            self.log.status_lines[0] = "Unsupported file type"
+            self.log.status_lines[0] = "Invalid output folder"
             self.log._render()
             return
 
-        if not os.path.isfile(video) or not os.path.isdir(output):
-            self.log.clear_status()
-            self.log.status_lines[0] = "Invalid paths!"
-            self.log._render()
-            return
-
-        if not is_valid_video_file(video):
-            self.log.clear_status()
-            self.log.status_lines[0] = "Invalid or unsupported video file"
-            self.log._render()
-            return
+        valid_videos = []
+        skipped = []
+        for video in videos:
+            name_no_ext = os.path.splitext(os.path.basename(video))[0].lower()
+            if name_no_ext.endswith("_fixed") or "_fixed_fixed" in name_no_ext:
+                skipped.append((video, "Temporary repaired file"))
+                continue
+            ext = os.path.splitext(video)[1].lower()
+            if ext not in ALLOWED_VIDEO_EXTENSIONS:
+                skipped.append((video, "Unsupported file type"))
+                continue
+            if not os.path.isfile(video):
+                skipped.append((video, "File does not exist"))
+                continue
+            if not is_valid_video_file(video):
+                skipped.append((video, "Invalid or unsupported video file"))
+                continue
+            valid_videos.append(video)
 
         self.cleanup_process(reason="reset")
         if self.log:
             self.log.clear_status()
+            if len(videos) > 1:
+                self.log.append_message(
+                    f"Queue: {len(valid_videos)} video(s) ready, {len(skipped)} skipped.",
+                    kind="info")
+            for video, reason in skipped[:8]:
+                self.log.append_message(
+                    f"Skipped: {os.path.basename(video)} ({reason})", kind="warning")
+            if len(skipped) > 8:
+                self.log.append_message(
+                    f"Skipped: {len(skipped) - 8} more invalid file(s).", kind="warning")
+
+        if not valid_videos:
+            if self.log:
+                self.log.append_message("Error: no valid videos to process.", kind="error")
+            return
 
         self.running = True
+        self.batch_stop = False
         self.set_ui_state(True)
         self.after(0, self._finalize_start_ui)
 
@@ -2970,14 +3216,6 @@ class SceneCutterApp(ctk.CTk):
         cfg["INFERENCE"] = inference
         cfg["DEBUG"] = DEBUG
 
-        if mode == "faces":
-            self.engine = FaceDetectionEngine(
-                video, output, logbox=self.log, progressbar=self.progress,
-                previewer=self.preview_frame, profile=self.profile.get(),
-                accel=inference, preview_enabled=self.preview_enabled)
-            threading.Thread(target=self.run_face_engine, daemon=True).start()
-            return
-
         scene_mode = mode == "scene"
         if mode == "interval":
             value = self.interval_entry.get()
@@ -2989,24 +3227,132 @@ class SceneCutterApp(ctk.CTk):
                 return
             cfg["FIXED_INTERVAL"] = int(value)
 
-        self.engine = SceneEngine(
-            video, output, cfg, logbox=self.log, progressbar=self.progress,
-            previewer=self.preview_frame, preview_enabled=self.preview_enabled)
-        threading.Thread(target=self.run_engine, args=(scene_mode,), daemon=True).start()
+        threading.Thread(
+            target=self.run_batch,
+            args=(valid_videos, output, cfg, mode, scene_mode, inference),
+            daemon=True
+        ).start()
 
     def stop_process(self):
+        self.batch_stop = True
         if not self.engine:
             return
         self.engine.stop()
 
+    def run_batch(self, videos, output, cfg, mode, scene_mode, inference):
+        started = time.time()
+        completed = 0
+        failed = 0
+        partial = 0
+        stopped = False
+
+        try:
+            for index, video in enumerate(videos, start=1):
+                if self.batch_stop or self.stop_pending:
+                    stopped = True
+                    break
+
+                basename = os.path.basename(video)
+                if self.log and len(videos) > 1:
+                    self.after(0, lambda i=index, n=len(videos), b=basename: self.log.append_message(
+                        f"Processing {i}/{n}: {b}", kind="info"))
+                if self.progress:
+                    self.after(0, self.progress.reset)
+
+                result = False
+                error_msg = None
+                error_type = None
+                warning_msg = None
+                temp_files = []
+                engine = None
+                try:
+                    current_video = prepare_video_for_processing(video, temp_files=temp_files)
+                    if mode == "faces":
+                        engine = FaceDetectionEngine(
+                            current_video, output, logbox=self.log, progressbar=self.progress,
+                            previewer=self.preview_frame, profile=self.profile.get(),
+                            accel=inference, preview_enabled=self.preview_enabled)
+                        self.engine = engine
+                        result = engine.run()
+                    else:
+                        engine = SceneEngine(
+                            current_video, output, cfg.copy(), logbox=self.log, progressbar=self.progress,
+                            previewer=self.preview_frame, preview_enabled=self.preview_enabled)
+                        for temp_file in temp_files:
+                            engine.add_temp_file(temp_file)
+                        self.engine = engine
+                        result = engine.run(scene_mode=scene_mode)
+
+                    failed_cuts = int(getattr(engine, "failed", 0))
+                    if result and failed_cuts:
+                        partial += 1
+                        warning_msg = (
+                            f"Warning: {basename} finished with {failed_cuts} failed scene(s). "
+                            "See cut_errors.json in its output folder."
+                        )
+                    if result:
+                        completed += 1
+                    elif not self.batch_stop:
+                        failed += 1
+                        error_msg = "the video could not be processed"
+                        error_type = "ProcessingError"
+                    else:
+                        stopped = True
+                        break
+                except Exception as e:
+                    failed += 1
+                    error_msg = str(e) or "Unknown error"
+                    error_type = type(e).__name__
+                    print("Batch item error:", e)
+                finally:
+                    if warning_msg and self.log:
+                        self.after(0, lambda m=warning_msg: self.log.append_message(m, kind="warning"))
+                    if error_msg and self.log:
+                        self.after(0, lambda b=basename, t=error_type, e=error_msg: self.log.append_message(
+                            f"Error processing {b} [{t}]: {e}", kind="error"))
+                    self.engine = None
+                    engine = None
+                    gc.collect()
+                    for temp_file in temp_files:
+                        remove_temp_file(temp_file)
+
+            elapsed = max(1, int(time.time() - started))
+            m, s = divmod(elapsed, 60)
+            h, m = divmod(m, 60)
+            total_time = f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+            summary = (
+                f"Queue finished: {completed}/{len(videos)} video(s) processed, "
+                f"{failed} failed"
+            )
+            if partial:
+                summary += f", {partial} with failed scene(s)"
+            summary += "."
+            final_warning = summary if (failed or partial) else None
+
+            self.after(0, lambda: self.reset_ui(
+                finished=completed > 0 and not stopped,
+                total_time=total_time,
+                stopped=stopped,
+                warning_message=final_warning if not stopped else None))
+            if completed <= 0 and not stopped and self.log:
+                self.after(0, lambda: self.log.append_message(summary, kind="error"))
+        finally:
+            self.engine = None
+            self.batch_stop = False
+            self.stop_pending = False
+
     def run_engine(self, scene_mode):
         result = False
         error_msg = None
+        error_type = None
+        warning_msg = None
+        temp_files = []
         try:
-            self.engine.video = remux_if_needed(self.engine.video)
+            self.engine.video = prepare_video_for_processing(self.engine.video, temp_files=temp_files)
             result = self.engine.run(scene_mode=scene_mode)
         except Exception as e:
             error_msg = str(e)
+            error_type = type(e).__name__
             print("Error:", e)
         finally:
             total_time = None
@@ -3014,23 +3360,38 @@ class SceneCutterApp(ctk.CTk):
             stopped = engine._stop if engine else False
             if result and engine:
                 total_time = engine.total_time()
+                failed = len(getattr(engine, "_cut_failures", []))
+                if failed:
+                    warning_msg = (
+                        f"Warning: {failed} scene(s) could not be exported. "
+                        "See cut_errors.json in the output folder."
+                    )
             self.engine = None
             self.stop_pending = False
-            # FIX: show error in UI if occurred
             if error_msg:
-                self.after(0, lambda: self.log.write_status(
-                    detected=f"Error: {error_msg[:50]}", cut=0, eta="--:--"))
+                self.after(0, lambda e=error_msg[:160], t=error_type: self.log.append_message(
+                    f"Error [{t}]: {e}", kind="error"))
+            elif not result and not stopped:
+                self.after(0, lambda: self.log.append_message(
+                    "Error: the video could not be processed.", kind="error"))
             self.after(0, lambda: self.reset_ui(
-                finished=result, total_time=total_time, stopped=stopped))
+                finished=result, total_time=total_time, stopped=stopped,
+                warning_message=warning_msg))
+            gc.collect()
+            for temp_file in temp_files:
+                remove_temp_file(temp_file)
 
     def run_face_engine(self):
         result = False
         error_msg = None
+        error_type = None
+        temp_files = []
         try:
-            self.engine.video = remux_if_needed(self.engine.video)
+            self.engine.video = prepare_video_for_processing(self.engine.video, temp_files=temp_files)
             result = self.engine.run()
         except Exception as e:
             error_msg = str(e)
+            error_type = type(e).__name__
             print("Face engine error:", e)
         finally:
             total_time = None
@@ -3040,14 +3401,16 @@ class SceneCutterApp(ctk.CTk):
                 total_time = engine.total_time()
             self.engine = None
             self.stop_pending = False
-            # FIX: show error in UI if occurred
             if error_msg:
-                self.after(0, lambda: self.log.write_status(
-                    detected=f"Error: {error_msg[:50]}", cut=0, eta="--:--"))
+                self.after(0, lambda e=error_msg, t=error_type: self.log.append_message(
+                    f"Error [{t}]: {e}", kind="error"))
             self.after(0, lambda: self.reset_ui(
                 finished=result, total_time=total_time, stopped=stopped))
+            gc.collect()
+            for temp_file in temp_files:
+                remove_temp_file(temp_file)
 
-    def reset_ui(self, finished=False, total_time=None, stopped=False):
+    def reset_ui(self, finished=False, total_time=None, stopped=False, warning_message=None):
         self.stop_pending = False
         self.running = False
         self.start_btn.configure(text="Start", fg_color=ACCENT,
@@ -3056,7 +3419,8 @@ class SceneCutterApp(ctk.CTk):
         if stopped:
             self.cleanup_process(reason="stop")
         elif finished:
-            self.cleanup_process(reason="finish", total_time=total_time)
+            self.cleanup_process(reason="finish", total_time=total_time,
+                                 warning_message=warning_message)
 
     def set_ui_state(self, disabled):
         state = "disabled" if disabled else "normal"
@@ -3118,7 +3482,7 @@ class SceneCutterApp(ctk.CTk):
         if self.accel.get() not in enabled:
             self.accel.set("cpu")
 
-    def cleanup_process(self, reason="reset", total_time=None):
+    def cleanup_process(self, reason="reset", total_time=None, warning_message=None):
         if self.preview_frame and reason in ("stop", "finish"):
             self.preview_frame.clear_all()
         if self.progress and reason in ("stop", "reset"):
@@ -3137,10 +3501,12 @@ class SceneCutterApp(ctk.CTk):
                 if total_time:
                     msg += f" {total_time}"
                 self.log.write_finished(msg)
+                if warning_message:
+                    self.log.append_message(warning_message, kind="warning")
         self.after(1000, gc.collect)
 
     def confirm_stop(self):
-        if not self.running or self.engine is None or self.stop_pending:
+        if not self.running or self.stop_pending:
             return
         answer = mb.askyesno("Confirm Stop",
                              "The process is still running.\nDo you really want to stop it?")

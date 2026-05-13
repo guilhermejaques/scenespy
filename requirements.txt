@@ -1,8 +1,17 @@
-customtkinter
-opencv-python
-av
-pillow
-numpy
-scenedetect
-ultralytics
+# Runtime dependencies for scene_cutter.pyw.
+# Keep these pinned so scene detection/cutting behavior stays reproducible.
+customtkinter==5.2.2
+pillow==12.1.0
+numpy==2.4.2
+opencv-contrib-python==4.13.0.90
+av==16.1.0
+scenedetect==0.6.7.1
+ultralytics==8.4.9
 mediapipe==0.10.9
+
+# External executables required at runtime:
+# - ffmpeg
+# - ffprobe
+#
+# Optional for CUDA face detection:
+# Install torch/torchvision separately for the target machine and CUDA version.
