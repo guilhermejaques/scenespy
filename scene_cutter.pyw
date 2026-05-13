@@ -14,6 +14,7 @@ import bisect
 import textwrap
 import traceback
 import faulthandler
+import random
 import tkinter.filedialog as fd
 import tkinter.messagebox as mb
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Imports: third-party (lightweight / always needed)
 # ============================================================
 import customtkinter as ctk
-from PIL import Image
+from PIL import Image, ImageOps
 import numpy as np
 
 # ============================================================
@@ -127,9 +128,17 @@ PREVIEW_FPS = 2
 INSTANCE_SOCKET = None
 INSTANCE_PORT = 54321
 PREVIEW_MAX_WIDTH = 420
-PREVIEW_MAX_HEIGHT = 240
+PREVIEW_MAX_HEIGHT = 280
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 PROCESS_COOLDOWN_SECONDS = 1.25
+ANALYSIS_MOSAIC_INTERVAL_MIN = 10.0
+ANALYSIS_MOSAIC_INTERVAL_MAX = 20.0
+ANALYSIS_MOSAIC_MAX_SOURCES = 1
+ANALYSIS_MOSAIC_COLUMNS = 3
+ANALYSIS_MOSAIC_ROWS = 2
+ANALYSIS_MOSAIC_TILE_W = 144
+ANALYSIS_MOSAIC_TILE_H = 112
+ANALYSIS_MOSAIC_GAP = 4
 
 # ============================================================
 # Config: compatibility / constants
@@ -304,6 +313,148 @@ def resize_for_preview(img, max_w=PREVIEW_MAX_WIDTH, max_h=PREVIEW_MAX_HEIGHT):
         return None
     scale = min(max_w / w, max_h / h)
     return img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.BILINEAR)
+
+
+class AnalysisMosaicPreview:
+    def __init__(self, videos, previewer, stop_cb=None):
+        self.videos = [v for v in videos if v and os.path.isfile(v)]
+        self.previewer = previewer
+        self.stop_cb = stop_cb or (lambda: False)
+        self._stop = False
+        self._thread = None
+        self._caps = []
+        self._durations = {}
+        self._tiles = []
+        self._lock = threading.Lock()
+
+    def start(self):
+        if not self.previewer or not self.videos:
+            return
+        self._stop = False
+        self._thread = threading.Thread(target=self._run, daemon=False)
+        self._thread.start()
+
+    def stop(self):
+        self._stop = True
+        if self._thread and self._thread.is_alive():
+            try:
+                self._thread.join(timeout=1.0)
+            except Exception:
+                pass
+        self._thread = None
+        self._release_caps()
+
+    def _release_caps(self):
+        with self._lock:
+            for cap, _path in self._caps:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            self._caps = []
+
+    def _open_sources(self):
+        sources = list(self.videos)
+        random.shuffle(sources)
+        for path in sources[:ANALYSIS_MOSAIC_MAX_SOURCES]:
+            if self._stop or self.stop_cb():
+                break
+            try:
+                cap = cv2.VideoCapture(path)
+                if not cap.isOpened():
+                    cap.release()
+                    continue
+                duration = self._probe_duration(path, cap)
+                if duration <= 0:
+                    cap.release()
+                    continue
+                self._caps.append((cap, path))
+                self._durations[path] = duration
+            except Exception:
+                pass
+
+    def _probe_duration(self, path, cap):
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0
+        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+        if fps > 0 and frames > 0:
+            return frames / fps
+        try:
+            return float(check_output_hidden(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", path]
+            ).decode().strip())
+        except Exception:
+            return 0.0
+
+    def _read_random_tile(self):
+        with self._lock:
+            if not self._caps:
+                return None
+            cap, path = random.choice(self._caps)
+            duration = self._durations.get(path, 0.0)
+            if duration <= 0:
+                return None
+            t = random.uniform(0.05, max(0.06, duration * 0.95))
+            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+            ret, frame = cap.read()
+        if not ret or frame is None:
+            return None
+        image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        return ImageOps.fit(
+            image,
+            (ANALYSIS_MOSAIC_TILE_W, ANALYSIS_MOSAIC_TILE_H),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5))
+
+    def _compose(self):
+        tile_count = ANALYSIS_MOSAIC_COLUMNS * ANALYSIS_MOSAIC_ROWS
+        if len(self._tiles) < tile_count:
+            return None
+        width = (ANALYSIS_MOSAIC_COLUMNS * ANALYSIS_MOSAIC_TILE_W +
+                 (ANALYSIS_MOSAIC_COLUMNS + 1) * ANALYSIS_MOSAIC_GAP)
+        height = (ANALYSIS_MOSAIC_ROWS * ANALYSIS_MOSAIC_TILE_H +
+                  (ANALYSIS_MOSAIC_ROWS + 1) * ANALYSIS_MOSAIC_GAP)
+        canvas = Image.new("RGB", (width, height), BG_MAIN)
+        for idx, img in enumerate(self._tiles[:tile_count]):
+            x = ANALYSIS_MOSAIC_GAP + (idx % ANALYSIS_MOSAIC_COLUMNS) * (
+                ANALYSIS_MOSAIC_TILE_W + ANALYSIS_MOSAIC_GAP)
+            y = ANALYSIS_MOSAIC_GAP + (idx // ANALYSIS_MOSAIC_COLUMNS) * (
+                ANALYSIS_MOSAIC_TILE_H + ANALYSIS_MOSAIC_GAP)
+            canvas.paste(img, (x, y))
+        return canvas
+
+    def _wait_for_next_update(self):
+        deadline = time.time() + random.uniform(
+            ANALYSIS_MOSAIC_INTERVAL_MIN, ANALYSIS_MOSAIC_INTERVAL_MAX)
+        while not self._stop and not self.stop_cb() and time.time() < deadline:
+            time.sleep(min(0.25, max(0.0, deadline - time.time())))
+
+    def _run(self):
+        self._open_sources()
+        if not self._caps:
+            return
+        self._tiles = []
+        tile_count = ANALYSIS_MOSAIC_COLUMNS * ANALYSIS_MOSAIC_ROWS
+        for _ in range(tile_count):
+            tile = self._read_random_tile()
+            if tile is not None:
+                self._tiles.append(tile)
+        if len(self._tiles) < tile_count:
+            self._release_caps()
+            return
+
+        while not self._stop and not self.stop_cb():
+            image = self._compose()
+            if image and self.previewer:
+                self.previewer.after(0, lambda img=image: self.previewer.update_image(img))
+            self._wait_for_next_update()
+            if self._stop or self.stop_cb():
+                break
+            for idx in random.sample(range(len(self._tiles)), k=min(2, len(self._tiles))):
+                tile = self._read_random_tile()
+                if tile is not None:
+                    self._tiles[idx] = tile
+        self._release_caps()
 
 
 def _safe_frame_index(v):
@@ -602,14 +753,22 @@ class PreviewFrame(ctk.CTkFrame):
         self.label = ctk.CTkLabel(self, text="")
         self.label.pack(expand=True, anchor="center")
         self._img_ref = None
+        self._enabled = True
+
+    def set_enabled(self, enabled):
+        self._enabled = bool(enabled)
+        if not self._enabled:
+            self.clear_all()
 
     def update_image(self, image):
-        if not image or not self.winfo_exists():
+        if not self._enabled or not image or not self.winfo_exists():
             return
         self._img_ref = ctk.CTkImage(light_image=image, size=image.size)
         self.label.configure(image=self._img_ref)
 
     def update_info(self, text):
+        if not self._enabled:
+            return
         self.info_label.configure(text=text)
 
     def clear_image(self):
@@ -1476,7 +1635,7 @@ def _add_candidate_context_scores(video_path, candidates, fps, total_frames, sto
 # ============================================================
 class SceneEngine:
     def __init__(self, video, output, cfg, logbox=None, progressbar=None,
-                 previewer=None, preview_enabled=True):
+                 previewer=None, preview_enabled=True, preview_pool=None):
         self.video = video
         self.output = output
         self.cfg = cfg
@@ -1484,6 +1643,7 @@ class SceneEngine:
         self.progress = progressbar
         self.previewer = previewer
         self.preview_enabled = preview_enabled
+        self.preview_pool = preview_pool or [video]
         self._stop = False
         self.detected = 0
         self.total = 0
@@ -1508,6 +1668,7 @@ class SceneEngine:
         self._preview_lock = threading.Lock()
         self._preview_thread = None
         self._preview_stop = False
+        self._analysis_mosaic = None
         self._video_obj = None  # scenedetect video object for cleanup
         self._scene_candidates = []
         self._rejected_scene_candidates = []
@@ -1582,7 +1743,30 @@ class SceneEngine:
         self._rejected_scene_candidates = []
         self._cut_failures = []
         self._cut_output_dir = None
+        if self._analysis_mosaic:
+            self._analysis_mosaic.stop()
+            self._analysis_mosaic = None
         self.cleanup_temp_files()
+
+    def disable_preview(self):
+        self.preview_enabled = False
+        if self._analysis_mosaic:
+            self._analysis_mosaic.stop()
+            self._analysis_mosaic = None
+        self._preview_stop = True
+        if self._preview_thread and self._preview_thread.is_alive() and threading.current_thread() is not self._preview_thread:
+            try:
+                self._preview_thread.join(timeout=1.0)
+            except Exception:
+                pass
+        self._preview_thread = None
+        try:
+            with self._preview_lock:
+                if self._preview_cap:
+                    self._preview_cap.release()
+                self._preview_cap = None
+        except Exception:
+            pass
 
     def total_time(self):
         if not self._start_time:
@@ -1611,6 +1795,7 @@ class SceneEngine:
         self._rejected_scene_candidates = []
         self._cut_failures = []
         self._cut_output_dir = None
+        self._analysis_mosaic = None
 
         if self.previewer and self.preview_enabled:
             try:
@@ -1636,7 +1821,14 @@ class SceneEngine:
             self._video_info_shown = True
 
         try:  # FIX: ensure preview_cap is released on exception
+            if self.preview_enabled and self.previewer:
+                self._analysis_mosaic = AnalysisMosaicPreview(
+                    self.preview_pool, self.previewer, stop_cb=lambda: self._stop)
+                self._analysis_mosaic.start()
             scenes = self._detect_scenes_progressive() if scene_mode else self._fixed_interval()
+            if self._analysis_mosaic:
+                self._analysis_mosaic.stop()
+                self._analysis_mosaic = None
             if not scenes or self._stop:
                 return False
 
@@ -1647,6 +1839,9 @@ class SceneEngine:
             # Keep preview active during cuts - release only after all cuts are done
             self._cut_scenes(scenes)
         finally:
+            if self._analysis_mosaic:
+                self._analysis_mosaic.stop()
+                self._analysis_mosaic = None
             self._ui_alive = False
             self._preview_stop = True
             if self._preview_thread and self._preview_thread.is_alive():
@@ -2663,6 +2858,12 @@ class SceneEngine:
                 now = time.time()
                 if now - self.last_preview >= PREVIEW_INTERVAL:
                     try:
+                        if self._analysis_mosaic:
+                            time.sleep(0.05)
+                            continue
+                        if self.total <= 0:
+                            time.sleep(0.05)
+                            continue
                         ratio = self._get_progress_ratio()
                         ratio = max(0.0, min(1.0, ratio))
                         if abs(ratio - self._last_preview_ratio) < 0.02:
@@ -2795,6 +2996,9 @@ class FaceDetectionEngine:
                 pass
         self.torch = None
         self.device = None
+
+    def disable_preview(self):
+        self.preview_enabled = False
 
     def total_time(self):
         if not self._start_time:
@@ -3165,6 +3369,7 @@ class SceneCutterApp(ctk.CTk):
             self.toggle_preview()
 
         self.preview_frame = PreviewFrame(self.right)
+        self.preview_frame.set_enabled(self.preview_enabled)
         self.preview_frame.pack(fill="both", expand=True, padx=10, pady=10)
         self.progress = ProgressBar(self.right)
         self.progress.pack(fill="x", padx=20, pady=10)
@@ -3176,8 +3381,11 @@ class SceneCutterApp(ctk.CTk):
     # --- App callbacks ---
     def toggle_preview(self):
         self.preview_enabled = self.preview_switch.get()
+        if hasattr(self, "preview_frame"):
+            self.preview_frame.set_enabled(self.preview_enabled)
         if not self.preview_enabled:
-            self.preview_frame.clear_all()
+            if self.engine and hasattr(self.engine, "disable_preview"):
+                self.engine.disable_preview()
 
     def toggle_start(self):
         if self.running:
@@ -3332,7 +3540,8 @@ class SceneCutterApp(ctk.CTk):
                     else:
                         engine = SceneEngine(
                             current_video, output, cfg.copy(), logbox=self.log, progressbar=self.progress,
-                            previewer=self.preview_frame, preview_enabled=self.preview_enabled)
+                            previewer=self.preview_frame, preview_enabled=self.preview_enabled,
+                            preview_pool=[current_video])
                         for temp_file in temp_files:
                             engine.add_temp_file(temp_file)
                         self.engine = engine
