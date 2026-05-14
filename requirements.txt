@@ -1,4 +1,4 @@
-# Runtime dependencies for scene_cutter.pyw.
+# Runtime dependencies for Scenespy.
 # Keep these pinned so scene detection/cutting behavior stays reproducible.
 customtkinter==5.2.2
 pillow==12.1.0

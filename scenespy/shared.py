@@ -1,0 +1,606 @@
+﻿# ============================================================
+# Imports: stdlib
+# ============================================================
+import sys
+import os
+import socket
+import subprocess
+import threading
+import time
+import datetime
+import json
+import gc
+import bisect
+import textwrap
+import traceback
+import faulthandler
+import random
+import importlib.util
+import shutil
+import tkinter.filedialog as fd
+import tkinter.messagebox as mb
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# ============================================================
+# Imports: third-party (lightweight / always needed)
+# ============================================================
+import customtkinter as ctk
+from PIL import Image, ImageOps
+import numpy as np
+
+# ============================================================
+# Imports: third-party (heavy / always used by engines)
+# ============================================================
+import cv2
+
+# ============================================================
+# Lazy import: torch (deferred until face engine starts)
+# ============================================================
+torch = None
+TORCH_AVAILABLE = False
+
+# ============================================================
+# Config: user settings persistence
+# ============================================================
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
+CRASH_LOG_FILE = os.path.join(APP_DIR, "scenespy_crash.log")
+LOADING_GIF_FILE = os.path.join(APP_DIR, "loading.gif")
+BIN_DIR = os.path.join(APP_DIR, "bin")
+EXECUTABLE_PATHS = {}
+_CRASH_LOG_HANDLE = None
+
+
+def log_crash(message):
+    try:
+        with open(CRASH_LOG_FILE, "a", encoding="utf-8") as f:
+            ts = datetime.datetime.now().isoformat(timespec="seconds")
+            f.write(f"\n[{ts}] {message}\n")
+    except Exception:
+        pass
+
+
+def install_crash_logging():
+    global _CRASH_LOG_HANDLE
+    try:
+        _CRASH_LOG_HANDLE = open(CRASH_LOG_FILE, "a", encoding="utf-8")
+        faulthandler.enable(file=_CRASH_LOG_HANDLE, all_threads=True)
+    except Exception:
+        pass
+
+    def _sys_hook(exc_type, exc, tb):
+        log_crash("Unhandled exception:\n" + "".join(traceback.format_exception(exc_type, exc, tb)))
+
+    def _thread_hook(args):
+        log_crash("Unhandled thread exception:\n" + "".join(
+            traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+
+    sys.excepthook = _sys_hook
+    threading.excepthook = _thread_hook
+
+
+def load_settings():
+    """Load user settings from JSON file."""
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {"last_video": "", "last_output": ""}
+
+
+def save_settings(video="", output=""):
+    """Save user settings to JSON file."""
+    try:
+        settings = {"last_video": video, "last_output": output}
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+    except Exception:
+        pass
+
+
+# ============================================================
+# Config: profiles
+# ============================================================
+# Hybrid detection: FIXED threshold + ADAPTIVE min_dur.
+#
+# Thresholds are fixed per profile (PySceneDetect content_val scale),
+# validated against real-world trailer/film/documentary tests:
+#   Low    (42) -> conservative, ASL ~5-10s (documentaries/films)
+#   Normal (27) -> balanced, ASL ~2-6s (movies/series/TV/web)
+#   High   (18) -> sensitive, ASL ~0.7-3s (trailers/shorts/action)
+#
+# min_dur: profile sets the FLOOR (5s/2s/0.7s), adaptive scan can only
+# raise it within a bounded range.
+# ============================================================
+PROFILES = {
+    "Low": {"label": "Low", "base_threshold": 42, "min_dur": 5.0, "dur_max_boost": 5.0},
+    "Normal": {"label": "Normal", "base_threshold": 27, "min_dur": 2.0, "dur_max_boost": 4.0},
+    "High": {"label": "High", "base_threshold": 18, "min_dur": 0.7, "dur_max_boost": 2.5},
+    "Auto": {"label": "Auto", "ADAPTIVE": True},
+}
+
+ACCEL_OPTIONS = ["cpu", "nvidia", "amd", "intel", "apple"]
+# Cut workers: 2 for speed with many scenes, balanced I/O usage.
+# Using stream copy (-c copy) where possible ensures lossless output.
+MAX_CUT_WORKERS = 2
+ENABLE_PREVIEW_DEFAULT = True
+PREVIEW_INTERVAL = 0.2
+INSTANCE_SOCKET = None
+INSTANCE_PORT = 54321
+PREVIEW_MAX_WIDTH = 420
+PREVIEW_MAX_HEIGHT = 280
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+PROCESS_COOLDOWN_SECONDS = 1.25
+ANALYSIS_MOSAIC_INTERVAL_MIN = 10.0
+ANALYSIS_MOSAIC_INTERVAL_MAX = 20.0
+ANALYSIS_MOSAIC_MAX_SOURCES = 1
+ANALYSIS_MOSAIC_COLUMNS = 3
+ANALYSIS_MOSAIC_ROWS = 2
+ANALYSIS_MOSAIC_TILE_W = 144
+ANALYSIS_MOSAIC_TILE_H = 112
+ANALYSIS_MOSAIC_GAP = 4
+
+# ============================================================
+# Config: compatibility / constants
+# ============================================================
+MODE_ACCEL_COMPAT = {
+    "scene": {"encoder": {"cpu", "nvidia", "amd", "intel", "apple"}, "inference": {"cpu"}},
+    "interval": {"encoder": {"cpu", "nvidia", "amd", "intel", "apple"}, "inference": {"cpu"}},
+    "faces": {"encoder": {"cpu"}, "inference": {"cpu", "nvidia"}},
+}
+
+ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
+
+MODE_ABBREV = {"faces": "FD", "scene": "SD", "interval": "ES"}
+
+# ============================================================
+# Debug configuration
+# ============================================================
+DEBUG = False  # Set to True to enable debug logging to console
+
+# ============================================================
+# Config: UI theme palette
+# ============================================================
+BG_MAIN = "#1a1a1a"
+BG_PANEL = "#313131"
+BG_CARD = "#404040"
+BG_INPUT = "#1a1a1a"
+BORDER_SOFT = "#787474"
+BORDER_SOFT2 = "#4C4848"
+TEXT_MAIN = "#e5e7eb"
+TEXT_MUTED = "#9ca3af"
+ACCENT = "#1f538d"
+SUCCESS = "#22c55e"
+DANGER = "#ef4444"
+
+
+# ============================================================
+# Utility: helpers used across the app
+# ============================================================
+def test_ffmpeg_encoder(encoder: str) -> bool:
+    try:
+        result = run_hidden(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i",
+             "color=c=black:s=160x120:d=0.1",
+             "-c:v", encoder, "-f", "null", "-"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, timeout=5
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def detect_available_accel():
+    return detect_available_encoder_accel() | detect_available_inference_accel()
+
+
+def detect_available_encoder_accel():
+    available = {"cpu"}
+    if test_ffmpeg_encoder("h264_nvenc"):
+        available.add("nvidia")
+    if test_ffmpeg_encoder("h264_amf"):
+        available.add("amd")
+    if test_ffmpeg_encoder("h264_qsv"):
+        available.add("intel")
+    if test_ffmpeg_encoder("h264_videotoolbox"):
+        available.add("apple")
+    return available
+
+
+def detect_available_inference_accel():
+    available = {"cpu"}
+    if importlib.util.find_spec("torch"):
+        available.add("nvidia")
+    return available
+
+
+def _missing_modules(*names):
+    return [name for name in names if importlib.util.find_spec(name) is None]
+
+
+def _missing_executables(*names):
+    return [name for name in names if resolve_executable(name) is None]
+
+
+def _platform_bin_dir():
+    if sys.platform == "win32":
+        return "windows"
+    if sys.platform == "darwin":
+        return "macos"
+    return "linux"
+
+
+def _executable_names(name):
+    if sys.platform == "win32" and not name.lower().endswith(".exe"):
+        return [f"{name}.exe", name]
+    return [name]
+
+
+def _bundled_executable_candidates(name):
+    for filename in _executable_names(name):
+        yield os.path.join(BIN_DIR, _platform_bin_dir(), filename)
+        yield os.path.join(BIN_DIR, filename)
+
+
+def resolve_executable(name):
+    """Return bundled executable path first, then system PATH."""
+    key = name.lower()
+    if key in EXECUTABLE_PATHS:
+        return EXECUTABLE_PATHS[key]
+
+    for candidate in _bundled_executable_candidates(name):
+        if os.path.isfile(candidate):
+            EXECUTABLE_PATHS[key] = candidate
+            return candidate
+
+    found = shutil.which(name)
+    if found:
+        EXECUTABLE_PATHS[key] = found
+        return found
+
+    return None
+
+
+def ffmpeg_path():
+    return resolve_executable("ffmpeg")
+
+
+def ffprobe_path():
+    return resolve_executable("ffprobe")
+
+
+def normalize_command(cmd):
+    if not cmd:
+        return cmd
+    normalized = list(cmd)
+    exe_name = os.path.basename(str(normalized[0])).lower()
+    exe_root, _ext = os.path.splitext(exe_name)
+    if exe_root in {"ffmpeg", "ffprobe"}:
+        resolved = resolve_executable(exe_root)
+        if resolved:
+            normalized[0] = resolved
+    return normalized
+
+
+def validate_runtime_dependencies():
+    missing = _missing_executables("ffmpeg", "ffprobe")
+    if not missing:
+        return True, ""
+
+    bundled_dir = os.path.join(BIN_DIR, _platform_bin_dir())
+    message = (
+        "Scenespy requires FFmpeg and FFprobe to process videos.\n\n"
+        f"Missing: {', '.join(missing)}\n\n"
+        "Install FFmpeg and make sure ffmpeg/ffprobe are available in PATH, "
+        "or place the bundled binaries here:\n"
+        f"{bundled_dir}"
+    )
+    return False, message
+
+
+def build_output_dir(base_output, mode, profile, accel):
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    mode_tag = MODE_ABBREV.get(mode, mode.upper())
+    path = os.path.join(base_output, f"{mode_tag}_{ts}_{profile}_{accel}")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def is_valid_video_file(path: str) -> bool:
+    try:
+        out = check_output_hidden(
+            ["ffprobe", "-v", "error", "-show_streams",
+             "-select_streams", "v", "-of", "json", path],
+            stderr=subprocess.DEVNULL
+        )
+        data = json.loads(out)
+        for s in data.get("streams", []):
+            if s.get("codec_type") == "video" and s.get("codec_name", "").lower() != "gif":
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def remove_temp_file(path):
+    if not path:
+        return
+    for _ in range(20):
+        try:
+            if not os.path.exists(path):
+                return
+            os.remove(path)
+            return
+        except Exception:
+            gc.collect()
+            time.sleep(0.15)
+
+
+def remux_if_needed(path, temp_files=None):
+    ext = os.path.splitext(path)[1].lower()
+    if ext != ".mkv":
+        return path
+
+    fixed = path[:-4] + "_fixed.mkv"
+    remove_temp_file(fixed)
+
+    run_hidden(
+        ["ffmpeg", "-y", "-fflags", "+genpts+igndts", "-err_detect", "ignore_err",
+         "-i", path, "-map", "0:v:0", "-map", "0:a?", "-c", "copy",
+         "-max_interleave_delta", "0", "-avoid_negative_ts", "make_zero", fixed],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    if os.path.exists(fixed) and is_valid_video_file(fixed):
+        if temp_files is not None:
+            temp_files.append(fixed)
+        return fixed
+    remove_temp_file(fixed)
+    return path
+
+
+def prepare_video_for_processing(path, temp_files=None):
+    prepared = remux_if_needed(path, temp_files=temp_files)
+    return prepared
+
+
+def resize_for_preview(img, max_w=PREVIEW_MAX_WIDTH, max_h=PREVIEW_MAX_HEIGHT):
+    w, h = img.size
+    if w <= 0 or h <= 0:
+        return None
+    scale = min(max_w / w, max_h / h)
+    return img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.BILINEAR)
+
+
+class AnalysisMosaicPreview:
+    def __init__(self, videos, previewer, stop_cb=None):
+        self.videos = [v for v in videos if v and os.path.isfile(v)]
+        self.previewer = previewer
+        self.stop_cb = stop_cb or (lambda: False)
+        self._stop = False
+        self._thread = None
+        self._caps = []
+        self._durations = {}
+        self._tiles = []
+        self._lock = threading.Lock()
+
+    def start(self):
+        if not self.previewer or not self.videos:
+            return
+        self._stop = False
+        self._thread = threading.Thread(target=self._run, daemon=False)
+        self._thread.start()
+
+    def stop(self):
+        self._stop = True
+        if self._thread and self._thread.is_alive():
+            try:
+                self._thread.join(timeout=1.0)
+            except Exception:
+                pass
+        self._thread = None
+        self._release_caps()
+
+    def _release_caps(self):
+        with self._lock:
+            for cap, _path in self._caps:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            self._caps = []
+
+    def _open_sources(self):
+        sources = list(self.videos)
+        random.shuffle(sources)
+        for path in sources[:ANALYSIS_MOSAIC_MAX_SOURCES]:
+            if self._stop or self.stop_cb():
+                break
+            try:
+                cap = cv2.VideoCapture(path)
+                if not cap.isOpened():
+                    cap.release()
+                    continue
+                duration = self._probe_duration(path, cap)
+                if duration <= 0:
+                    cap.release()
+                    continue
+                self._caps.append((cap, path))
+                self._durations[path] = duration
+            except Exception:
+                pass
+
+    def _probe_duration(self, path, cap):
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0
+        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+        if fps > 0 and frames > 0:
+            return frames / fps
+        try:
+            return float(check_output_hidden(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", path]
+            ).decode().strip())
+        except Exception:
+            return 0.0
+
+    def _read_random_tile(self):
+        with self._lock:
+            if not self._caps:
+                return None
+            cap, path = random.choice(self._caps)
+            duration = self._durations.get(path, 0.0)
+            if duration <= 0:
+                return None
+            t = random.uniform(0.05, max(0.06, duration * 0.95))
+            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+            ret, frame = cap.read()
+        if not ret or frame is None:
+            return None
+        image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        return ImageOps.fit(
+            image,
+            (ANALYSIS_MOSAIC_TILE_W, ANALYSIS_MOSAIC_TILE_H),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5))
+
+    def _compose(self):
+        tile_count = ANALYSIS_MOSAIC_COLUMNS * ANALYSIS_MOSAIC_ROWS
+        if len(self._tiles) < tile_count:
+            return None
+        width = (ANALYSIS_MOSAIC_COLUMNS * ANALYSIS_MOSAIC_TILE_W +
+                 (ANALYSIS_MOSAIC_COLUMNS + 1) * ANALYSIS_MOSAIC_GAP)
+        height = (ANALYSIS_MOSAIC_ROWS * ANALYSIS_MOSAIC_TILE_H +
+                  (ANALYSIS_MOSAIC_ROWS + 1) * ANALYSIS_MOSAIC_GAP)
+        canvas = Image.new("RGB", (width, height), BG_MAIN)
+        for idx, img in enumerate(self._tiles[:tile_count]):
+            x = ANALYSIS_MOSAIC_GAP + (idx % ANALYSIS_MOSAIC_COLUMNS) * (
+                ANALYSIS_MOSAIC_TILE_W + ANALYSIS_MOSAIC_GAP)
+            y = ANALYSIS_MOSAIC_GAP + (idx // ANALYSIS_MOSAIC_COLUMNS) * (
+                ANALYSIS_MOSAIC_TILE_H + ANALYSIS_MOSAIC_GAP)
+            canvas.paste(img, (x, y))
+        return canvas
+
+    def _wait_for_next_update(self):
+        deadline = time.time() + random.uniform(
+            ANALYSIS_MOSAIC_INTERVAL_MIN, ANALYSIS_MOSAIC_INTERVAL_MAX)
+        while not self._stop and not self.stop_cb() and time.time() < deadline:
+            time.sleep(min(0.25, max(0.0, deadline - time.time())))
+
+    def _run(self):
+        self._open_sources()
+        if not self._caps:
+            return
+        self._tiles = []
+        tile_count = ANALYSIS_MOSAIC_COLUMNS * ANALYSIS_MOSAIC_ROWS
+        for _ in range(tile_count):
+            tile = self._read_random_tile()
+            if tile is not None:
+                self._tiles.append(tile)
+        if len(self._tiles) < tile_count:
+            self._release_caps()
+            return
+
+        while not self._stop and not self.stop_cb():
+            image = self._compose()
+            if image and self.previewer:
+                self.previewer.after(0, lambda img=image: self.previewer.update_image(img))
+            self._wait_for_next_update()
+            if self._stop or self.stop_cb():
+                break
+            for idx in random.sample(range(len(self._tiles)), k=min(2, len(self._tiles))):
+                tile = self._read_random_tile()
+                if tile is not None:
+                    self._tiles[idx] = tile
+        self._release_caps()
+
+
+def _safe_frame_index(v):
+    if isinstance(v, (int, float)):
+        return int(v)
+    if hasattr(v, "get_frames"):
+        return v.get_frames()
+    try:
+        import numpy as np
+        if isinstance(v, np.ndarray):
+            return int(v.flat[0])
+    except Exception:
+        pass
+    return 0
+
+
+def _ensure_torch():
+    """Lazy-load torch / YOLO on first call."""
+    global torch, TORCH_AVAILABLE
+    if torch is not None:
+        return TORCH_AVAILABLE
+    try:
+        import torch as _t
+        torch = _t
+        TORCH_AVAILABLE = True
+    except Exception:
+        torch = None
+        TORCH_AVAILABLE = False
+    return TORCH_AVAILABLE
+
+
+def _ensure_yolo():
+    """Lazy-load ultralytics.YOLO on first call."""
+    try:
+        from ultralytics import YOLO
+        return YOLO
+    except Exception:
+        return None
+
+
+def _ensure_mediapipe():
+    """Lazy-load mediapipe on first call."""
+    try:
+        import mediapipe as mp
+        return mp
+    except Exception:
+        return None
+
+
+def _ensure_scenedetect():
+    """Lazy-load scenedetect modules on first call."""
+    try:
+        from scenedetect import open_video, SceneManager
+        from scenedetect.detectors import ContentDetector
+        from scenedetect.stats_manager import StatsManager
+        return open_video, SceneManager, ContentDetector, StatsManager, ContentDetector.Components
+    except Exception:
+        return None
+
+
+def single_instance():
+    global INSTANCE_SOCKET
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", INSTANCE_PORT))
+        s.listen(1)
+        INSTANCE_SOCKET = s
+    except OSError:
+        return False
+    return True
+
+
+def run_hidden(cmd, **kwargs):
+    cmd = normalize_command(cmd)
+    if sys.platform == "win32":
+        kwargs.setdefault("creationflags", CREATE_NO_WINDOW)
+    return subprocess.run(cmd, **kwargs)
+
+
+def check_output_hidden(cmd, **kwargs):
+    cmd = normalize_command(cmd)
+    if sys.platform == "win32":
+        kwargs.setdefault("creationflags", CREATE_NO_WINDOW)
+    return subprocess.check_output(cmd, **kwargs)
+
+
+__all__ = [name for name in globals() if not name.startswith("__")]
+
+
+# ============================================================
