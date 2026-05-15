@@ -185,6 +185,9 @@ cython_debug/
 .abstra/
 settings.json
 
+# Local release assets
+release-assets/
+
 # Visual Studio Code
 #  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
 #  that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore

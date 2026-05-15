@@ -1154,7 +1154,7 @@ class SceneEngine:
         local_audio_end = max(local_audio_start + (1.0 / fps), end_time - aligned_start)
 
         if encoder == "cpu":
-            codec = ["-c:v", "libx264", "-crf", "18", "-preset", "medium", "-tune", "film"]
+            codec = ["-c:v", "libx264", "-crf", "16", "-preset", "medium", "-tune", "film"]
         elif encoder == "nvidia":
             codec = ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "19",
                      "-rc", "vbr", "-b:v", "0", "-spatial_aq", "1",
@@ -1166,7 +1166,7 @@ class SceneEngine:
         elif encoder == "apple":
             codec = ["-c:v", "h264_videotoolbox", "-q:v", "65"]
         else:
-            codec = ["-c:v", "libx264", "-crf", "18"]
+            codec = ["-c:v", "libx264", "-crf", "16"]
 
         rate_opts = []
         if bitrate and encoder == "cpu":
@@ -1193,7 +1193,7 @@ class SceneEngine:
         result = self._run_ffmpeg_tracked(cmd, timeout=300)
 
         if result.returncode != 0 and encoder != "cpu":
-            codec_fallback = ["-c:v", "libx264", "-crf", "18", "-preset", "medium"]
+            codec_fallback = ["-c:v", "libx264", "-crf", "16", "-preset", "medium"]
             cmd = ["ffmpeg", "-y", "-ss", f"{aligned_start:.6f}", "-i", input_file,
                    *maps, *codec_fallback,
                    "-pix_fmt", "yuv420p", *audio_opts,

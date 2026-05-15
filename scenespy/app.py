@@ -1,3 +1,5 @@
+import tkinter as tk
+
 from .shared import *
 from .widgets import *
 from .scene_engine import SceneEngine
@@ -7,7 +9,8 @@ class ScenespyApp(ctk.CTk):
     """Main window that coordinates input selection, processing, and progress updates."""
     def __init__(self):
         super().__init__()
-        self.title("Scenespy")
+        self.title("scenespy")
+        self._set_app_icon()
         self.geometry("1000x650")
         self.engine = None
         self.running = False
@@ -23,6 +26,22 @@ class ScenespyApp(ctk.CTk):
         self.saved_settings = load_settings()
 
         self._build_ui()
+
+    def _set_app_icon(self):
+        icon_ico = os.path.join(IMAGE_DIR, "x.ico")
+        icon_png = os.path.join(IMAGE_DIR, "x.png")
+        if sys.platform == "win32" and os.path.isfile(icon_ico):
+            try:
+                self.iconbitmap(icon_ico)
+                return
+            except Exception as e:
+                log_crash(f"App icon .ico load failed: {e}")
+        if os.path.isfile(icon_png):
+            try:
+                self._app_icon = tk.PhotoImage(file=icon_png)
+                self.iconphoto(True, self._app_icon)
+            except Exception as e:
+                log_crash(f"App icon .png load failed: {e}")
 
     def _check_mode_requirements(self):
         model_path = os.path.join(APP_DIR, "models", "yolov8n-face.pt")

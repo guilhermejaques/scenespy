@@ -115,13 +115,28 @@ python Scenespy.pyw
 
 Scenespy precisa do FFmpeg e do FFprobe para ler, validar e cortar vídeos.
 
-O app procura primeiro em:
+No Windows, a versão pronta do app pode incluir esses arquivos automaticamente:
 
 ```text
-bin/
+bin/windows/ffmpeg.exe
+bin/windows/ffprobe.exe
 ```
 
-Depois procura no `PATH` do sistema.
+No repositório, esses binários não precisam ficar versionados. Para montar uma release, mantenha uma cópia local em `release-assets/windows/ffmpeg/`, copie para `bin/windows/` dentro da pasta final do app e gere o `.zip`.
+
+Os binários Windows recomendados vêm do FFmpeg essentials build da Gyan.dev. Os arquivos de licença do FFmpeg devem acompanhar qualquer distribuição do app.
+
+No Linux e no macOS, por enquanto a recomendação é instalar pelo sistema:
+
+```bash
+sudo apt install ffmpeg
+```
+
+```bash
+brew install ffmpeg
+```
+
+Ao iniciar, o Scenespy procura primeiro em `bin/<sistema>/`. Se não encontrar, procura no `PATH` do sistema.
 
 ## Prós
 
