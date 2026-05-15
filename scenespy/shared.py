@@ -1,8 +1,7 @@
-﻿# ============================================================
-# Imports: stdlib
-# ============================================================
 import sys
 import os
+import ctypes
+import ctypes.util
 import socket
 import subprocess
 import threading
@@ -21,34 +20,122 @@ import tkinter.filedialog as fd
 import tkinter.messagebox as mb
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ============================================================
-# Imports: third-party (lightweight / always needed)
-# ============================================================
 import customtkinter as ctk
 from PIL import Image, ImageOps
 import numpy as np
 
-# ============================================================
-# Imports: third-party (heavy / always used by engines)
-# ============================================================
 import cv2
 
-# ============================================================
-# Lazy import: torch (deferred until face engine starts)
-# ============================================================
 torch = None
 TORCH_AVAILABLE = False
 
-# ============================================================
-# Config: user settings persistence
-# ============================================================
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
 CRASH_LOG_FILE = os.path.join(APP_DIR, "scenespy_crash.log")
-LOADING_GIF_FILE = os.path.join(APP_DIR, "loading.gif")
 BIN_DIR = os.path.join(APP_DIR, "bin")
+ASSETS_DIR = os.path.join(APP_DIR, "scenespy", "assets")
+FONT_DIR = os.path.join(ASSETS_DIR, "fonts")
+IMAGE_DIR = os.path.join(ASSETS_DIR, "images")
+LOADING_GIF_FILE = os.path.join(IMAGE_DIR, "loading.gif")
+UI_FONT_FAMILY = "JetBrains Mono"
+UI_FONT_SCALE = 0.92
 EXECUTABLE_PATHS = {}
 _CRASH_LOG_HANDLE = None
+_REGISTERED_FONT_PATHS = []
+_ACTIVE_UI_FONT_FAMILY = UI_FONT_FAMILY
+
+
+def _fallback_ui_font_family():
+    if sys.platform == "win32":
+        return "Consolas"
+    if sys.platform == "darwin":
+        return "Menlo"
+    return "DejaVu Sans Mono"
+
+
+def ui_font(size, weight=None):
+    family = _ACTIVE_UI_FONT_FAMILY
+    scaled_size = max(1, round(size * UI_FONT_SCALE))
+    if weight:
+        return (family, scaled_size, weight)
+    return (family, scaled_size)
+
+
+def _bundled_font_paths():
+    return [
+        os.path.join(FONT_DIR, "JetBrainsMono-Regular.ttf"),
+        os.path.join(FONT_DIR, "JetBrainsMono-Bold.ttf"),
+    ]
+
+
+def _register_font_windows(path):
+    FR_PRIVATE = 0x10
+    return bool(ctypes.windll.gdi32.AddFontResourceExW(path, FR_PRIVATE, 0))
+
+
+def _register_font_macos(path):
+    cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    ct = ctypes.CDLL("/System/Library/Frameworks/CoreText.framework/CoreText")
+    cf.CFURLCreateFromFileSystemRepresentation.restype = ctypes.c_void_p
+    cf.CFURLCreateFromFileSystemRepresentation.argtypes = [
+        ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_bool
+    ]
+    cf.CFRelease.argtypes = [ctypes.c_void_p]
+    ct.CTFontManagerRegisterFontsForURL.restype = ctypes.c_bool
+    ct.CTFontManagerRegisterFontsForURL.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)
+    ]
+    encoded = os.fsencode(path)
+    url = cf.CFURLCreateFromFileSystemRepresentation(None, encoded, len(encoded), False)
+    if not url:
+        return False
+    try:
+        error = ctypes.c_void_p()
+        return bool(ctypes.c_bool(ct.CTFontManagerRegisterFontsForURL(url, 1, ctypes.byref(error))).value)
+    finally:
+        cf.CFRelease(url)
+
+
+def _register_font_linux(path):
+    lib_name = ctypes.util.find_library("fontconfig")
+    if not lib_name:
+        return False
+    fc = ctypes.CDLL(lib_name)
+    fc.FcInit()
+    fc.FcConfigGetCurrent.restype = ctypes.c_void_p
+    fc.FcConfigAppFontAddFile.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    fc.FcConfigAppFontAddFile.restype = ctypes.c_bool
+    fc.FcConfigBuildFonts.argtypes = [ctypes.c_void_p]
+    fc.FcConfigBuildFonts.restype = ctypes.c_bool
+    config = fc.FcConfigGetCurrent()
+    if not config:
+        return False
+    added = fc.FcConfigAppFontAddFile(config, os.fsencode(path))
+    if added:
+        fc.FcConfigBuildFonts(config)
+    return bool(added)
+
+
+def register_bundled_fonts():
+    global _ACTIVE_UI_FONT_FAMILY
+    registered_any = False
+    for path in _bundled_font_paths():
+        if not os.path.isfile(path) or path in _REGISTERED_FONT_PATHS:
+            continue
+        try:
+            if sys.platform == "win32":
+                registered = _register_font_windows(path)
+            elif sys.platform == "darwin":
+                registered = _register_font_macos(path)
+            else:
+                registered = _register_font_linux(path)
+            if registered:
+                _REGISTERED_FONT_PATHS.append(path)
+                registered_any = True
+        except Exception as e:
+            log_crash(f"Font registration failed for {path}: {e}")
+    if not registered_any and not _REGISTERED_FONT_PATHS:
+        _ACTIVE_UI_FONT_FAMILY = _fallback_ui_font_family()
 
 
 def log_crash(message):
@@ -80,7 +167,7 @@ def install_crash_logging():
 
 
 def load_settings():
-    """Load user settings from JSON file."""
+    """Load persisted UI paths."""
     try:
         if os.path.exists(SETTINGS_FILE):
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -91,7 +178,7 @@ def load_settings():
 
 
 def save_settings(video="", output=""):
-    """Save user settings to JSON file."""
+    """Persist the last selected input and output paths."""
     try:
         settings = {"last_video": video, "last_output": output}
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -100,20 +187,6 @@ def save_settings(video="", output=""):
         pass
 
 
-# ============================================================
-# Config: profiles
-# ============================================================
-# Hybrid detection: FIXED threshold + ADAPTIVE min_dur.
-#
-# Thresholds are fixed per profile (PySceneDetect content_val scale),
-# validated against real-world trailer/film/documentary tests:
-#   Low    (42) -> conservative, ASL ~5-10s (documentaries/films)
-#   Normal (27) -> balanced, ASL ~2-6s (movies/series/TV/web)
-#   High   (18) -> sensitive, ASL ~0.7-3s (trailers/shorts/action)
-#
-# min_dur: profile sets the FLOOR (5s/2s/0.7s), adaptive scan can only
-# raise it within a bounded range.
-# ============================================================
 PROFILES = {
     "Low": {"label": "Low", "base_threshold": 42, "min_dur": 5.0, "dur_max_boost": 5.0},
     "Normal": {"label": "Normal", "base_threshold": 27, "min_dur": 2.0, "dur_max_boost": 4.0},
@@ -121,9 +194,8 @@ PROFILES = {
     "Auto": {"label": "Auto", "ADAPTIVE": True},
 }
 
+# User-tunable defaults and runtime limits.
 ACCEL_OPTIONS = ["cpu", "nvidia", "amd", "intel", "apple"]
-# Cut workers: 2 for speed with many scenes, balanced I/O usage.
-# Using stream copy (-c copy) where possible ensures lossless output.
 MAX_CUT_WORKERS = 2
 ENABLE_PREVIEW_DEFAULT = True
 PREVIEW_INTERVAL = 0.2
@@ -142,9 +214,6 @@ ANALYSIS_MOSAIC_TILE_W = 144
 ANALYSIS_MOSAIC_TILE_H = 112
 ANALYSIS_MOSAIC_GAP = 4
 
-# ============================================================
-# Config: compatibility / constants
-# ============================================================
 MODE_ACCEL_COMPAT = {
     "scene": {"encoder": {"cpu", "nvidia", "amd", "intel", "apple"}, "inference": {"cpu"}},
     "interval": {"encoder": {"cpu", "nvidia", "amd", "intel", "apple"}, "inference": {"cpu"}},
@@ -155,14 +224,8 @@ ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 
 MODE_ABBREV = {"faces": "FD", "scene": "SD", "interval": "ES"}
 
-# ============================================================
-# Debug configuration
-# ============================================================
-DEBUG = False  # Set to True to enable debug logging to console
+DEBUG = False
 
-# ============================================================
-# Config: UI theme palette
-# ============================================================
 BG_MAIN = "#1a1a1a"
 BG_PANEL = "#313131"
 BG_CARD = "#404040"
@@ -176,9 +239,6 @@ SUCCESS = "#22c55e"
 DANGER = "#ef4444"
 
 
-# ============================================================
-# Utility: helpers used across the app
-# ============================================================
 def test_ffmpeg_encoder(encoder: str) -> bool:
     try:
         result = run_hidden(
@@ -375,6 +435,7 @@ def resize_for_preview(img, max_w=PREVIEW_MAX_WIDTH, max_h=PREVIEW_MAX_HEIGHT):
 
 
 class AnalysisMosaicPreview:
+    """Shows random video thumbnails while scene analysis is running."""
     def __init__(self, videos, previewer, stop_cb=None):
         self.videos = [v for v in videos if v and os.path.isfile(v)]
         self.previewer = previewer
@@ -601,6 +662,3 @@ def check_output_hidden(cmd, **kwargs):
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
-
-
-# ============================================================

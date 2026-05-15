@@ -1,11 +1,10 @@
-﻿from .shared import *
+from .shared import *
 from .widgets import *
 from .scene_engine import SceneEngine
 from .face_engine import FaceDetectionEngine
 
-# ScenespyApp (main UI)
-# ============================================================
 class ScenespyApp(ctk.CTk):
+    """Main window that coordinates input selection, processing, and progress updates."""
     def __init__(self):
         super().__init__()
         self.title("Scenespy")
@@ -21,7 +20,6 @@ class ScenespyApp(ctk.CTk):
         self.available_accel = self.available_encoder_accel | self.available_inference_accel
         self.mode_requirements = self._check_mode_requirements()
 
-        # Load saved settings
         self.saved_settings = load_settings()
 
         self._build_ui()
@@ -60,7 +58,6 @@ class ScenespyApp(ctk.CTk):
         return message
 
     def _build_ui(self):
-        # Left panel
         self.left = ctk.CTkFrame(
             self, width=420, fg_color=BG_PANEL, border_width=1,
             border_color=BORDER_SOFT2, corner_radius=0)
@@ -73,7 +70,6 @@ class ScenespyApp(ctk.CTk):
         self.output_selector = DirectorySelector(files, "Output folder")
         self.output_selector.pack(fill="x", padx=12)
 
-        # Restore saved paths
         last_video = self.saved_settings.get("last_video", "")
         last_output = self.saved_settings.get("last_output", "")
         if last_video:
@@ -82,7 +78,6 @@ class ScenespyApp(ctk.CTk):
         if last_output:
             self.output_selector.entry.insert(0, last_output)
 
-        # Cut mode
         mode = Section(self.left, "Cut Mode")
         mode.pack(fill="x", padx=12)
 
@@ -101,12 +96,11 @@ class ScenespyApp(ctk.CTk):
         self.interval_entry = ctk.CTkEntry(
             mode, height=25, width=90, fg_color=BG_MAIN,
             border_color=BORDER_SOFT, border_width=1, corner_radius=15,
-            text_color="#ededed", font=("Consolas", 11),
+            text_color="#ededed", font=ui_font(11),
             placeholder_text_color=TEXT_MUTED, placeholder_text="Seconds",
             validate="key", validatecommand=vcmd)
         self.interval_entry.pack(anchor="w", padx=(186, 0), pady=(0, 8))
 
-        # Profile
         profile_sec = Section(self.left, "Detection Sensitivity")
         profile_sec.pack(fill="x", padx=12, pady=5)
 
@@ -116,7 +110,6 @@ class ScenespyApp(ctk.CTk):
         group2.pack(fill="x", padx=12)
         self.profile_radios = group2.radios
 
-        # Acceleration
         accel_sec = Section(self.left, "Hardware Acceleration")
         accel_sec.pack(fill="x", padx=12)
         self.accel = ctk.StringVar(value="cpu")
@@ -127,7 +120,6 @@ class ScenespyApp(ctk.CTk):
         self.accel_radios = group3.radios
         self.update_accel_radios()
 
-        # Start button
         self.start_btn = ctk.CTkButton(
             self.left, text="Start", height=13, corner_radius=420,
             fg_color=ACCENT, hover_color="#4f46e5", text_color="white",
@@ -137,7 +129,6 @@ class ScenespyApp(ctk.CTk):
         self.log = LogBox(self.left, height=220)
         self.log.pack(fill="x", padx=10, pady=10)
 
-        # Right panel
         self.right = ctk.CTkFrame(
             self, width=250, fg_color=BG_PANEL, border_width=1,
             border_color=BORDER_SOFT2, corner_radius=15)
@@ -163,7 +154,6 @@ class ScenespyApp(ctk.CTk):
         self.right.pack_propagate(False)
         self._on_cut_mode_change()
 
-    # --- App callbacks ---
     def toggle_preview(self):
         self.preview_enabled = self.preview_switch.get()
         if hasattr(self, "preview_frame"):
@@ -187,7 +177,6 @@ class ScenespyApp(ctk.CTk):
         output = self.output_selector.get().strip()
         first_video = videos[0] if videos else ""
 
-        # Save paths for next session
         save_settings(video=first_video, output=output)
 
         if not videos and not output:
@@ -488,10 +477,8 @@ class ScenespyApp(ctk.CTk):
         if self.preview_frame and reason in ("stop", "finish"):
             self.preview_frame.clear_all()
         if self.progress and reason in ("stop", "reset"):
-            # Reset progress bar
             self.after(0, self.progress.reset)
         elif self.progress and reason == "finish":
-            # Ensure progress bar shows 100% before cleanup
             self.after(0, self.progress.mark_finished)
         if self.log:
             if reason == "stop":
@@ -524,6 +511,3 @@ class ScenespyApp(ctk.CTk):
 
     def _finalize_start_ui(self):
         self.start_btn.configure(text="Stop ", fg_color=DANGER, hover_color="#dc2626")
-
-
-# ============================================================

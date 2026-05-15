@@ -1,19 +1,19 @@
-﻿from .shared import *
+from .shared import *
 
-# Widgets
-# ============================================================
 class Section(ctk.CTkFrame):
+    """Container with a title used to group related controls."""
     def __init__(self, master, title, **kwargs):
         super().__init__(master, fg_color=BG_CARD, border_width=1,
                          border_color=BORDER_SOFT2, corner_radius=0, **kwargs)
-        ctk.CTkLabel(self, text=title, font=("Consolas", 14, "bold")
+        ctk.CTkLabel(self, text=title, font=ui_font(14, "bold")
                      ).pack(anchor="w", padx=12, pady=(8, 4))
 
 
 class LabeledEntry(ctk.CTkFrame):
+    """Text entry paired with a label."""
     def __init__(self, master, label, placeholder="", width=160):
         super().__init__(master, fg_color="transparent")
-        ctk.CTkLabel(self, text=label, font=("Consolas", 12)).pack(anchor="w")
+        ctk.CTkLabel(self, text=label, font=ui_font(12)).pack(anchor="w")
         self.entry = ctk.CTkEntry(
             width=width, corner_radius=15, fg_color=BG_MAIN,
             border_width=1, border_color=BORDER_SOFT,
@@ -27,10 +27,11 @@ class LabeledEntry(ctk.CTkFrame):
 
 
 class LogBox(ctk.CTkTextbox):
+    """Status console for processing progress and user-facing messages."""
     def __init__(self, master, height=140):
         super().__init__(master, height=height, fg_color=BG_MAIN,
                          corner_radius=15, border_color=BORDER_SOFT2, border_width=1)
-        self.configure(state="disabled", font=("Consolas", 12), wrap="char")
+        self.configure(state="disabled", font=ui_font(12), wrap="char")
         self.pack_propagate(False)
         self.status_lines = []
         self.initialized = False
@@ -146,6 +147,7 @@ class LogBox(ctk.CTkTextbox):
 
 
 class ProgressBar(ctk.CTkFrame):
+    """Progress bar with smoothed visual updates."""
     def __init__(self, master):
         super().__init__(master, fg_color="transparent")
         self.bar = ctk.CTkProgressBar(self)
@@ -153,13 +155,13 @@ class ProgressBar(ctk.CTkFrame):
         self.bar.set(0)
         self._after_id = None
         self._enabled = True
-        self.label = ctk.CTkLabel(self, text="0%", font=("Consolas", 11))
+        self.label = ctk.CTkLabel(self, text="0%", font=ui_font(11))
         self.label.pack(anchor="e")
         self._normal_color = self.bar.cget("progress_color")
         self._logical_value = 0.0
         self._visual_value = 0.0
         self._animating = False
-        self._speed = 0.03  # Faster animation to keep up with progress
+        self._speed = 0.03
 
     def update(self, value):
         if not self._enabled:
@@ -219,10 +221,11 @@ class ProgressBar(ctk.CTkFrame):
 
 
 class PreviewFrame(ctk.CTkFrame):
+    """Video preview area with optional loading animation."""
     def __init__(self, master):
         super().__init__(master, fg_color=BG_MAIN, border_width=1,
                          border_color=BORDER_SOFT2, corner_radius=15)
-        self.info_label = ctk.CTkLabel(self, text="", font=("Consolas", 10))
+        self.info_label = ctk.CTkLabel(self, text="", font=ui_font(10))
         self.info_label.pack(anchor="n", pady=4)
         self.label = ctk.CTkLabel(self, text="")
         self.label.pack(expand=True, anchor="center")
@@ -270,7 +273,7 @@ class PreviewFrame(ctk.CTkFrame):
                     self._loading_frames.append(ctk.CTkImage(light_image=img.copy(), size=img.size))
                     self._loading_durations.append(duration)
         except Exception as e:
-            print(f"[DEBUG] Failed to load loading.gif: {e}")
+            print(f"[DEBUG] Failed to load loading animation: {e}")
             self._loading_frames = []
             self._loading_durations = []
         return bool(self._loading_frames)
@@ -319,21 +322,22 @@ class PreviewFrame(ctk.CTkFrame):
 
 
 class FileSelector(ctk.CTkFrame):
+    """File picker that supports one or more selected videos."""
     def __init__(self, master, label="File", width=400):
         super().__init__(master, fg_color="transparent")
         self.paths = []
-        ctk.CTkLabel(self, text=label, font=("Consolas", 12)).pack(anchor="w")
+        ctk.CTkLabel(self, text=label, font=ui_font(12)).pack(anchor="w")
         row = ctk.CTkFrame(self, fg_color="transparent")
         row.pack(fill="x", pady=(4, 8))
         self.entry = ctk.CTkEntry(
             row, width=width, corner_radius=15, fg_color=BG_MAIN,
             border_width=1, border_color=BORDER_SOFT,
-            text_color="#ededed", font=("Consolas", 11),
+            text_color="#ededed", font=ui_font(11),
             placeholder_text_color=TEXT_MUTED
         )
         self.entry.pack(side="left")
         self.button = ctk.CTkButton(
-            row, text="â€¦", width=10, height=10, corner_radius=15,
+            row, text="...", width=10, height=10, corner_radius=15,
             fg_color=BG_CARD, hover_color="#615f5f", border_width=1,
             border_color=BORDER_SOFT, text_color=TEXT_MUTED,
             command=self.select
@@ -369,6 +373,7 @@ class FileSelector(ctk.CTkFrame):
 
 
 class DirectorySelector(FileSelector):
+    """Folder picker for the output directory."""
     def select(self):
         path = fd.askdirectory()
         if path:
@@ -377,6 +382,7 @@ class DirectorySelector(FileSelector):
 
 
 class RadioGroup(ctk.CTkFrame):
+    """Horizontal group of radio buttons bound to one variable."""
     def __init__(self, master, variable, options, columns=4, radio_width=120, height=32):
         super().__init__(master, fg_color="transparent", height=height)
         self.grid_propagate(False)
@@ -387,10 +393,7 @@ class RadioGroup(ctk.CTkFrame):
                 width=radio_width, radiobutton_width=10, radiobutton_height=10,
                 fg_color=ACCENT, border_color="#4b5563", hover_color="#6366f1",
                 text_color=TEXT_MAIN, text_color_disabled=TEXT_MUTED,
-                bg_color="transparent", font=("Consolas", 12)
+                bg_color="transparent", font=ui_font(12)
             )
             rb.grid(row=0, column=i, padx=(0, 12), pady=0, sticky="w")
             self.radios.append(rb)
-
-
-# ============================================================

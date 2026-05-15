@@ -1,9 +1,8 @@
-﻿from .shared import *
+from .shared import *
 from . import shared as shared
 
-# FaceDetectionEngine (heavy deps loaded lazily)
-# ============================================================
 class FaceDetectionEngine:
+    """Detects and saves representative face crops from a video."""
     def __init__(self, video, output, logbox=None, progressbar=None,
                  previewer=None, profile="Normal", accel="cpu", preview_enabled=True):
         self.video = video
@@ -13,7 +12,7 @@ class FaceDetectionEngine:
         self.previewer = previewer
         self.preview_enabled = preview_enabled
         self._ui_alive = True
-        self._last_eta_update = 0  # FIX: Initialize for ETA throttling
+        self._last_eta_update = 0
 
         self.profile = profile
         self.accel = accel
@@ -24,7 +23,6 @@ class FaceDetectionEngine:
         self.done = 0
         self._face_ratio = 0.0
 
-        # Lazy-loaded (initialized in run() on worker thread)
         self.device = None
         self.model = None
         self.mp_face = None
@@ -45,7 +43,7 @@ class FaceDetectionEngine:
         }[profile]
 
         self.last_preview = 0
-        self._cap = None  # cv2.VideoCapture for cleanup
+        self._cap = None
 
     def _load_deps(self):
         """Load heavy dependencies on worker thread to avoid blocking UI."""
@@ -79,14 +77,12 @@ class FaceDetectionEngine:
     def stop(self):
         self._stop = True
         self._ui_alive = False
-        # Release cv2.VideoCapture if open
         try:
             if self._cap:
                 self._cap.release()
         except Exception:
             pass
         self._cap = None
-        # Delete heavy objects to free VRAM/RAM
         self.model = None
         if self.mp_face:
             try:
@@ -94,7 +90,6 @@ class FaceDetectionEngine:
             except Exception:
                 pass
         self.mp_face = None
-        # Clear GPU memory if torch was loaded
         if self.torch is not None:
             try:
                 if self.torch.cuda.is_available():
@@ -145,13 +140,12 @@ class FaceDetectionEngine:
         return True
 
     def run(self):
-        # Load heavy dependencies on worker thread (non-blocking for UI)
         self._load_deps()
 
         self._start_time = time.time()
         cap = cv2.VideoCapture(self.video)
-        self._cap = cap  # Store for cleanup
-        try:  # FIX: ensure cap is always released
+        self._cap = cap
+        try:
             fps_raw = cap.get(cv2.CAP_PROP_FPS)
             fps = float(fps_raw) if fps_raw and fps_raw > 0 else 30.0
             total_frames_raw = cap.get(cv2.CAP_PROP_FRAME_COUNT)
@@ -238,7 +232,7 @@ class FaceDetectionEngine:
 
                     h_frame, w_frame, _ = frame.shape
                     expand_x = int(w * 0.15)
-                    expand_y = int(h * 0.15)  # FIX: simplify duplicate variables
+                    expand_y = int(h * 0.15)
                     cx1 = max(0, x1 - expand_x)
                     cy1 = max(0, y1 - expand_y)
                     cx2 = min(w_frame, x2 + expand_x)
@@ -290,7 +284,7 @@ class FaceDetectionEngine:
                             "ttl": ttl_frames,
                             "frames": 1,
                             "valid": 0,
-                            "score": sharp,  # FIX: reuse calculated sharp value
+                            "score": sharp,
                             "face": face_crop.copy()
                         })
 
@@ -326,8 +320,7 @@ class FaceDetectionEngine:
                                     if self._ui_alive else None))
                         self.last_preview = now
 
-                # FIX: Use after() for thread-safe UI updates
-                # Only update ETA every ~0.5 seconds to avoid wasteful calculations
+
                 if self.log:
                     now = time.time()
                     if now - getattr(self, "_last_eta_update", 0) >= 0.5:
@@ -338,7 +331,7 @@ class FaceDetectionEngine:
                         self.log.after(0, lambda d=detected_val, c=done_val, e=eta_val:
                         self.log.write_status(detected=d, cut=c, eta=e))
 
-                # FIX: Use after() for thread-safe UI updates
+
                 if self.progress:
                     ratio = max(self._face_ratio, frame_idx / total_frames)
                     self._face_ratio = ratio
@@ -346,7 +339,6 @@ class FaceDetectionEngine:
                     if self._ui_alive:
                         self.progress.after(0, lambda v=progress_ratio: self.progress.update(v))
 
-            # Process remaining tracks
             cfg = self.profile_cfg
             for t in tracks:
                 min_required = max(min_required_frames, int(cfg["sample_fps"] * cfg["min_frames"]))
@@ -359,14 +351,13 @@ class FaceDetectionEngine:
                         self.done += 1
                         self.detected += 1
         finally:
-            # FIX: always release cap
+
             if cap:
                 try:
                     cap.release()
                 except Exception:
                     pass
             self._cap = None
-            # Clear GPU memory after face detection
             if self.torch is not None:
                 try:
                     if self.torch.cuda.is_available():
@@ -388,18 +379,13 @@ class FaceDetectionEngine:
         if elapsed < 1:
             return "--:--"
 
-        # Frames per second
         rate = frame_idx / elapsed
         remaining = total_frames - frame_idx
         eta_seconds = int(remaining / rate) if rate > 0 else 0
 
-        # Sanity check
         if eta_seconds < 0 or eta_seconds > 86400:
             return "--:--"
 
         m, s = divmod(eta_seconds, 60)
         h, m = divmod(m, 60)
         return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
-
-
-# ============================================================

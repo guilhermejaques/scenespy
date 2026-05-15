@@ -3,6 +3,7 @@ from .shared import (
     mb,
     sys,
     install_crash_logging,
+    register_bundled_fonts,
     single_instance,
     validate_runtime_dependencies,
 )
@@ -31,5 +32,6 @@ def main():
 
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("dark-blue")
+    register_bundled_fonts()
     app = ScenespyApp()
     app.mainloop()

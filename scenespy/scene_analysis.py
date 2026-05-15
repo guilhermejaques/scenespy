@@ -1,9 +1,7 @@
-﻿from .shared import *
+from .shared import *
 
-# Scene analysis helpers (heavy, only used via Auto profile)
-# ============================================================
 def _otsu_1d(sorted_vals):
-    """Otsu thresholding 1D. Retorna threshold ou None."""
+    """Return a one-dimensional Otsu threshold, or None when the sample is too small."""
     n = len(sorted_vals)
     if n < 4:
         return None
@@ -63,7 +61,7 @@ def _compute_ecr(gray1, gray2):
 
 
 def _adaptive_threshold(video_path):
-    """Pipeline avancado: multi-metrica + Otsu + pesos dinamicos."""
+    """Estimate scene sensitivity from sampled motion, structure, and color changes."""
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return 32.0, 4.0
@@ -114,7 +112,6 @@ def _adaptive_threshold(video_path):
             if not ret:
                 break
 
-            # Resize FIRST, then convert â€” avoids 3Ã— redundant resizes
             small = cv2.resize(frame, dim)
             gray = cv2.cvtColor(small, BGR2GRAY)
             ycrcb = cv2.cvtColor(small, BGR2YCrCb)
@@ -235,10 +232,7 @@ def _adaptive_threshold(video_path):
     threshold = max(15.0, min(55.0, threshold))
     threshold = round(threshold, 1)
 
-    # min_dur: INVERSE relationship with threshold.
-    # High threshold (lots of motion)  -> LOW min_dur (accept short scenes)
-    # Low threshold (calm video)        -> HIGH min_dur (only long scenes)
-    t_norm = 1.0 - (threshold - 15.0) / 40.0  # Inverted: 1.0=calm, 0.0=agitated
+    t_norm = 1.0 - (threshold - 15.0) / 40.0
     min_dur = 1.5 + 8.5 * (t_norm ** 1.5)
     min_dur = max(1.0, min(10.0, min_dur))
     min_dur = round(min_dur, 1)
@@ -775,6 +769,3 @@ def _add_candidate_context_scores(video_path, candidates, fps, total_frames, sto
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
-
-
-# ============================================================

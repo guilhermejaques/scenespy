@@ -1,9 +1,8 @@
-﻿from .shared import *
+from .shared import *
 from .scene_analysis import *
 
-# SceneEngine
-# ============================================================
 class SceneEngine:
+    """Detects scene boundaries and exports video segments."""
     def __init__(self, video, output, cfg, logbox=None, progressbar=None,
                  previewer=None, preview_enabled=True, preview_pool=None):
         self.video = video
@@ -39,7 +38,7 @@ class SceneEngine:
         self._preview_stop = False
         self._analysis_mosaic = None
         self._analysis_status_step = 0
-        self._video_obj = None  # scenedetect video object for cleanup
+        self._video_obj = None
         self._scene_candidates = []
         self._rejected_scene_candidates = []
         self._cut_failures = []
@@ -92,7 +91,6 @@ class SceneEngine:
         except Exception:
             pass
         self._preview_cap = None
-        # Clear cache and heavy vars
         self._keyframes_cache = None
         self._duration = None
         self._total_frames = None
@@ -254,7 +252,7 @@ class SceneEngine:
             self.previewer.after(0, lambda t=info_text: self.previewer.update_info(t))
             self._video_info_shown = True
 
-        try:  # FIX: ensure preview_cap is released on exception
+        try:
             if self.preview_enabled and self.previewer:
                 self._analysis_mosaic = AnalysisMosaicPreview(
                     self.preview_pool, self.previewer, stop_cb=lambda: self._stop)
@@ -266,11 +264,9 @@ class SceneEngine:
             if not scenes or self._stop:
                 return False
 
-            # Update UI with final detected scene count before cutting
             if self.log:
                 self.log.after(0, lambda: self.log.write_status(detected=self.detected, cut=0, eta="--:--"))
 
-            # Keep preview active during cuts - release only after all cuts are done
             self._cut_scenes(scenes)
         finally:
             if self._analysis_mosaic:
@@ -284,7 +280,7 @@ class SceneEngine:
                 except Exception:
                     pass
             self._preview_thread = None
-            # FIX: always release preview cap
+
             try:
                 with self._preview_lock:
                     if self._preview_cap:
@@ -315,7 +311,6 @@ class SceneEngine:
         self._reset_detection_timing()
         fps = self._get_video_fps()
 
-        # Show initial status before adaptive scan
         if self.log:
             self.log.after(0, lambda: self.log.write_status(
                 detected=self._analysis_eta_text(), cut=0, eta="analyzing"))
@@ -341,7 +336,7 @@ class SceneEngine:
                     video = open_video(self.video, backend=be, suppress_output=True)
                 else:
                     video = open_video(self.video, backend=be)
-                self._video_obj = video  # Store for cleanup
+                self._video_obj = video
                 break
             except Exception as e:
                 last_error = e
@@ -355,7 +350,7 @@ class SceneEngine:
                 _ = video.frame_rate
             except Exception:
                 video.close()
-                self._video_obj = None  # Clear ref after close
+                self._video_obj = None
                 raise RuntimeError("Failed to read video stream")
 
         stats_manager = StatsManager()
@@ -416,7 +411,6 @@ class SceneEngine:
             if self.progress:
                 self.progress.after(0, lambda v=ratio * 0.4: self.progress.update(v))
 
-            # Update log - ETA will show "--:--" during detection, real time during cuts
             if self.log:
                 eta = self._analysis_eta_text(ratio)
                 self.log.after(0, lambda d=self.detected, c=self.done, e=eta:
@@ -435,7 +429,7 @@ class SceneEngine:
         except Exception as e:
             err_str = str(e).lower()
             needs_retry = (
-                    "avcodec_send_packet" in err_str or  # 1094995529 / AVERROR_INVALIDDATA
+                    "avcodec_send_packet" in err_str or
                     "avcodec" in err_str or
                     "decode" in err_str or
                     "invalid data" in err_str or
@@ -453,8 +447,6 @@ class SceneEngine:
                         self._video_obj = None
                 except Exception:
                     pass
-                # Skip OpenCV â€” uses same h264 decoder, will fail the same way.
-                # Go straight to ffmpeg re-encode fallback.
                 fixed = self.video.rsplit(".", 1)[0] + "_fixed.mp4"
                 remove_temp_file(fixed)
                 self.add_temp_file(fixed)
@@ -467,7 +459,7 @@ class SceneEngine:
                      "-i", self.video, "-c:v", "libx264", "-crf", "22",
                      "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                      "-c:a", "copy", fixed],
-                    timeout=300  # FIX: add timeout to prevent hanging
+                    timeout=300
                 )
                 if self.log:
                     self.log.after(0, lambda: self.log.write_status(
@@ -475,7 +467,6 @@ class SceneEngine:
 
                 if os.path.exists(fixed):
                     print(f"Using fixed video: {fixed}")
-                    # Verify the fixed file is valid
                     if not is_valid_video_file(fixed):
                         print(f"Fixed file is corrupted, re-encoding again...")
                         remove_temp_file(fixed)
@@ -484,7 +475,7 @@ class SceneEngine:
                              "-i", self.video, "-c:v", "libx264", "-crf", "22",
                              "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                              "-c:a", "copy", fixed],
-                            timeout=300  # FIX: add timeout to prevent hanging
+                            timeout=300
                         )
                     if not os.path.exists(fixed) or not is_valid_video_file(fixed):
                         print("ffmpeg re-encode failed, no valid fixed file")
@@ -493,7 +484,7 @@ class SceneEngine:
                                 detected="Failed to fix corrupted video", cut=0, eta="--:--"))
                         return []
                     self.video = fixed
-                    # FIX: invalidate caches when video changes
+
                     self._fps = None
                     self._duration = None
                     self._keyframes_cache = None
@@ -504,14 +495,13 @@ class SceneEngine:
                         self._total_frames = int(video_duration * fps)
                     except Exception:
                         video_duration = None
-                    # Always use OpenCV for fixed files â€” most reliable
                     try:
                         video = open_video(self.video, backend="opencv")
-                        self._video_obj = video  # Store for cleanup
+                        self._video_obj = video
                     except Exception:
                         try:
                             video = open_video(self.video, backend="pyav", suppress_output=True)
-                            self._video_obj = video  # Store for cleanup
+                            self._video_obj = video
                         except Exception:
                             print("Both backends failed on fixed video!")
                             if self.log:
@@ -539,7 +529,7 @@ class SceneEngine:
                             detected=f"{d} scenes detected", cut=0, eta="--:--"))
                     try:
                         video.close()
-                        self._video_obj = None  # Clear ref after close
+                        self._video_obj = None
                     except Exception:
                         pass
                     scenes = self._compose_scene_list(scene_list, fps, min_dur)
@@ -556,7 +546,7 @@ class SceneEngine:
             try:
                 if video:
                     video.close()
-                    self._video_obj = None  # Clear ref after close
+                    self._video_obj = None
             except Exception:
                 pass
 
@@ -864,7 +854,6 @@ class SceneEngine:
         self.completed_attempts = 0
         self._cut_lock = threading.Lock()
 
-        # Pre-compute all tasks (decoding is sequential: keyframes/fps first)
         keyframes = self._get_keyframes() or [0.0]
         tasks = []
         for i, (start_frame, end_frame) in enumerate(scenes):
@@ -912,7 +901,6 @@ class SceneEngine:
             if self.progress:
                 self.progress.after(0, lambda v=1.0: self.progress.update(v))
         else:
-            # Use ThreadPoolExecutor for concurrent cuts
             with ThreadPoolExecutor(max_workers=min(MAX_CUT_WORKERS, self.total)) as pool:
                 futures = {pool.submit(_cut_one, task): task for task in tasks}
                 for future in as_completed(futures):
@@ -920,7 +908,7 @@ class SceneEngine:
                         pool.shutdown(wait=False)
                         return
                     try:
-                        future.result()  # Catch any exceptions from workers
+                        future.result()
                         with self._cut_lock:
                             self.done += 1
                     except Exception as cut_error:
@@ -933,7 +921,6 @@ class SceneEngine:
                             err_type = failure["error_type"]
                             self.log.after(0, lambda n=scene_name, e=err_msg, t=err_type: self.log.append_message(
                                 f"Warning: {n} could not be exported [{t}] ({e})", kind="warning"))
-                        # Continue with other cuts
 
                     with self._cut_lock:
                         self.completed_attempts += 1
@@ -985,10 +972,9 @@ class SceneEngine:
         if elapsed < 1:
             return "--:--"
 
-        # Only show ETA during cut phase (when we have actual cut progress)
         completed = getattr(self, "completed_attempts", self.done)
         if self.total > 0 and completed > 0:
-            rate = completed / elapsed  # scene attempts per second
+            rate = completed / elapsed
             remaining = self.total - completed
             eta_seconds = int(remaining / rate) if rate > 0 else 0
             if 0 < eta_seconds < 86400:
@@ -996,7 +982,6 @@ class SceneEngine:
                 h, m = divmod(m, 60)
                 return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
-        # Detection phase: don't show ETA (it will be reset anyway)
         return "--:--"
 
     def _get_video_fps(self):
@@ -1016,7 +1001,7 @@ class SceneEngine:
 
         Pipeline:
           1. _adaptive_threshold() scans the video -> returns (raw_t, raw_d)
-             - raw_t: pacing score (15-55, higher = more motion) â€” USED ONLY for Auto
+             - raw_t: pacing score (15-55, higher = more motion) - used only for Auto
              - raw_d: adaptive minimum scene duration (1-10s)
 
           2. Profile selects a FIXED threshold (PySceneDetect content_val scale):
@@ -1036,21 +1021,11 @@ class SceneEngine:
         raw_t, raw_d = _adaptive_threshold(self.video)
 
         if self.cfg.get("ADAPTIVE"):
-            # Auto: map adaptive threshold to PySceneDetect scale.
-            # raw_t is on 15-55 scale, PySceneDetect uses content_val (~5-60 typical).
-            # Map linearly: 15->10, 35->27, 55->45
             threshold = 10.0 + (raw_t - 15.0) * (35.0 / 40.0)
             threshold = max(10.0, min(50.0, threshold))
             threshold = round(threshold, 1)
             return threshold, raw_d
 
-        # FIXED thresholds per profile â€” calibrated against PySceneDetect defaults
-        # and validated with real-world trailer/film/documentary tests:
-        #   Low    (42) -> conservative, only clear scene/location changes
-        #   Normal (27) -> balanced, standard scene breaks
-        #   High   (18) -> sensitive, catches fast cuts
-        #
-        # min_dur: profile sets the FLOOR, adaptive scan can only raise it.
         profiles = {
             "Low": {"base_threshold": 42, "min_dur": 5.0, "dur_max_boost": 5.0, "label": "Low"},
             "Normal": {"base_threshold": 27, "min_dur": 2.0, "dur_max_boost": 4.0, "label": "Normal"},
@@ -1066,21 +1041,15 @@ class SceneEngine:
         cfg = profiles[profile]
         threshold = float(cfg["base_threshold"])
 
-        # Adaptive min_dur: profile sets the FLOOR, scan raises it.
-        # raw_d range: 1.0 (most agitated) to 10.0 (most calm).
-        # boost_ratio = 0.0 for agitated â†’ 1.0 for calm.
-        # min_dur = floor + boost_ratio * max_boost
         base_dur = cfg["min_dur"]
         max_boost = cfg["dur_max_boost"]
 
-        boost_ratio = (raw_d - 1.0) / 9.0  # Normalize to [0.0, 1.0]
+        boost_ratio = (raw_d - 1.0) / 9.0
         min_dur = base_dur + boost_ratio * max_boost
 
-        # Clamp to safe bounds
         min_dur = max(0.5, min(15.0, min_dur))
         min_dur = round(min_dur, 1)
 
-        # DEBUG
         if cfg.get("DEBUG", False):
             try:
                 fps_est = self._get_video_fps()
@@ -1306,6 +1275,3 @@ class SceneEngine:
                 Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
         except Exception:
             return None
-
-
-# ============================================================
