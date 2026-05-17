@@ -371,7 +371,7 @@ class SceneEngine:
             pass
 
         if video_duration and video_duration > 0:
-            self._total_frames = int(video_duration * fps)
+            self._total_frames = self._get_video_total_frames(fps, video_duration)
 
         if not video_duration or video_duration <= 0:
             try:
@@ -492,7 +492,7 @@ class SceneEngine:
                     fps = self._get_video_fps()
                     try:
                         video_duration = self._get_video_duration()
-                        self._total_frames = int(video_duration * fps)
+                        self._total_frames = self._get_video_total_frames(fps, video_duration)
                     except Exception:
                         video_duration = None
                     try:
@@ -558,7 +558,8 @@ class SceneEngine:
         total_frames = self._total_frames
         if not total_frames:
             try:
-                total_frames = int(self._get_video_duration() * fps)
+                duration = self._get_video_duration()
+                total_frames = self._get_video_total_frames(fps, duration)
             except Exception:
                 total_frames = int(fps)
 
@@ -612,7 +613,7 @@ class SceneEngine:
         if not boundaries:
             self.detected = 1
             return [(0, total_frames)]
-        scenes = self._scenes_from_boundaries(boundaries, total_frames)
+        scenes = self._scenes_from_boundaries(boundaries, total_frames, fps=fps)
         self.detected = len(scenes)
         return scenes
 
@@ -767,12 +768,19 @@ class SceneEngine:
 
         return sorted(merged, key=lambda c: int(c["frame"]))
 
-    def _scenes_from_boundaries(self, boundaries, total_frames):
+    def _scenes_from_boundaries(self, boundaries, total_frames, fps=None):
         points = [0] + [b for b in boundaries if 0 < b < total_frames] + [total_frames]
         scenes = []
         for i in range(len(points) - 1):
             if points[i + 1] > points[i]:
                 scenes.append((points[i], points[i + 1]))
+        if fps and len(scenes) > 1:
+            min_tail_frames = max(2, int(round(float(fps) * 0.10)))
+            tail_start, tail_end = scenes[-1]
+            if tail_end - tail_start <= min_tail_frames:
+                prev_start, _prev_end = scenes[-2]
+                scenes[-2] = (prev_start, tail_end)
+                scenes.pop()
         return scenes or [(0, total_frames)]
 
     def _fixed_interval(self):
@@ -826,16 +834,30 @@ class SceneEngine:
             raise RuntimeError("Output file was not created")
         if not is_valid_video_file(output):
             raise RuntimeError("Output file has no valid video stream")
-        cmd = ["ffprobe", "-v", "error",
-               "-show_entries", "format=duration",
-               "-of", "default=noprint_wrappers=1:nokey=1", output]
+        cmd = ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", output]
         try:
-            actual_duration = float(check_output_hidden(cmd).decode().strip())
+            data = json.loads(check_output_hidden(cmd).decode(errors="ignore") or "{}")
+            actual_duration = float((data.get("format") or {}).get("duration", 0.0))
         except Exception as e:
             raise RuntimeError(f"Could not validate output duration: {e}") from e
+        bad_streams = [
+            s.get("codec_type", "unknown")
+            for s in data.get("streams", [])
+            if s.get("codec_type") not in {"video", "audio"}
+        ]
+        if bad_streams:
+            remove_temp_file(output)
+            raise RuntimeError(f"Output contains unsupported stream(s): {', '.join(sorted(set(bad_streams)))}")
         if expected_duration > 0.2 and actual_duration < expected_duration * 0.5:
+            remove_temp_file(output)
             raise RuntimeError(
                 f"Output duration is too short ({actual_duration:.2f}s of {expected_duration:.2f}s)")
+        if expected_duration > 0.2:
+            max_duration = max(expected_duration + 3.0, expected_duration * 2.5)
+            if actual_duration > max_duration:
+                remove_temp_file(output)
+                raise RuntimeError(
+                    f"Output duration is too long ({actual_duration:.2f}s of {expected_duration:.2f}s)")
         return actual_duration
 
     def _cut_scenes(self, scenes):
@@ -994,6 +1016,57 @@ class SceneEngine:
         self._fps = float(num) / float(den)
         return self._fps
 
+    def _get_video_total_frames(self, fps=None, duration=None):
+        fps = float(fps or self._get_video_fps() or 0.0)
+        explicit_counts = []
+        duration_counts = []
+        cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
+               "-show_entries", "stream=nb_frames:stream_tags=NUMBER_OF_FRAMES,DURATION",
+               "-of", "json", self.video]
+        try:
+            data = json.loads(check_output_hidden(cmd).decode(errors="ignore") or "{}")
+            stream = (data.get("streams") or [{}])[0]
+            for value in (stream.get("nb_frames"), stream.get("tags", {}).get("NUMBER_OF_FRAMES")):
+                try:
+                    count = int(str(value).strip())
+                    if count > 0:
+                        explicit_counts.append(count)
+                except Exception:
+                    pass
+            tag_duration = stream.get("tags", {}).get("DURATION")
+            if tag_duration and fps > 0:
+                seconds = self._parse_duration_seconds(tag_duration)
+                if seconds and seconds > 0:
+                    duration_counts.append(int(round(seconds * fps)))
+        except Exception:
+            pass
+
+        if duration and fps > 0:
+            duration_counts.append(int(round(float(duration) * fps)))
+
+        valid = [c for c in explicit_counts if c > 0]
+        if valid:
+            return min(valid)
+        valid = [c for c in duration_counts if c > 0]
+        return min(valid) if valid else max(1, int(fps or 1))
+
+    def _parse_duration_seconds(self, value):
+        try:
+            text = str(value).strip()
+            if not text:
+                return None
+            if ":" not in text:
+                return float(text)
+            parts = text.split(":")
+            if len(parts) != 3:
+                return None
+            hours = float(parts[0])
+            minutes = float(parts[1])
+            seconds = float(parts[2])
+            return hours * 3600.0 + minutes * 60.0 + seconds
+        except Exception:
+            return None
+
     def _map_threshold(self):
         """Returns (threshold, min_scene_len) for the ContentDetector.
 
@@ -1124,6 +1197,8 @@ class SceneEngine:
         duration = end - start
         cmd = ["ffmpeg", "-y", "-ss", f"{start:.6f}",
                "-i", self.video, "-t", f"{duration:.6f}",
+               "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn",
+               "-map_metadata", "-1", "-map_chapters", "-1",
                "-c", "copy", "-avoid_negative_ts", "make_zero",
                "-muxpreload", "0", "-muxdelay", "0", output]
         result = self._run_ffmpeg_tracked(cmd, timeout=300)
@@ -1187,6 +1262,7 @@ class SceneEngine:
 
         cmd = ["ffmpeg", "-y", "-ss", f"{aligned_start:.6f}", "-i", input_file,
                *maps, *codec, *rate_opts,
+               "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1",
                "-pix_fmt", "yuv420p", *audio_opts,
                "-movflags", "+faststart", output]
 
@@ -1196,6 +1272,7 @@ class SceneEngine:
             codec_fallback = ["-c:v", "libx264", "-crf", "16", "-preset", "medium"]
             cmd = ["ffmpeg", "-y", "-ss", f"{aligned_start:.6f}", "-i", input_file,
                    *maps, *codec_fallback,
+                   "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1",
                    "-pix_fmt", "yuv420p", *audio_opts,
                    "-movflags", "+faststart", output]
             result2 = self._run_ffmpeg_tracked(cmd, timeout=300)
