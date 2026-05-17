@@ -97,6 +97,7 @@ class LogBox(ctk.CTkTextbox):
         self.status_lines = []
         self.initialized = False
         self.status_labels = ("Scenes detected", "Scenes cut")
+        self._eta_label = "Estimated time"
 
     def _terminal_wrap_width(self):
         width_px = self.winfo_width()
@@ -119,12 +120,7 @@ class LogBox(ctk.CTkTextbox):
         if self.initialized:
             return
         self.delete("1.0", "end")
-        detected_label, cut_label = self.status_labels
-        self.status_lines = [
-            f"{detected_label}: -",
-            f"{cut_label}:      -",
-            "Estimated time:  --:--"
-        ]
+        self.status_lines = self._status_lines()
         for line in self.status_lines:
             self.insert("end", line + "\n")
         self.initialized = True
@@ -137,12 +133,8 @@ class LogBox(ctk.CTkTextbox):
         }.get(mode, ("Items detected", "Items done"))
 
     def write_status(self, detected=None, cut=None, eta=None):
-        detected_label, cut_label = self.status_labels
-        lines = [
-            f"{detected_label}: {detected if detected is not None else '-'}",
-            f"{cut_label}:      {cut if cut is not None else '-'}",
-            f"Estimated time:  {eta if eta is not None else '--:--'}"
-        ]
+        lines = self._status_lines(detected=detected, cut=cut, eta=eta)
+        self.status_lines = lines
         self.configure(state="normal")
         if not self.initialized:
             self.delete("1.0", "end")
@@ -155,6 +147,20 @@ class LogBox(ctk.CTkTextbox):
                 self.delete(f"{i + 1}.0", f"{i + 1}.end")
                 self.insert(f"{i + 1}.0", line)
         self.configure(state="disabled")
+
+    def _status_label_width(self):
+        return max(len(self._eta_label), *(len(label) for label in self.status_labels))
+
+    def _format_status_line(self, label, value):
+        return f"{label:<{self._status_label_width()}} : {value}"
+
+    def _status_lines(self, detected=None, cut=None, eta=None):
+        detected_label, cut_label = self.status_labels
+        return [
+            self._format_status_line(detected_label, detected if detected is not None else "-"),
+            self._format_status_line(cut_label, cut if cut is not None else "-"),
+            self._format_status_line(self._eta_label, eta if eta is not None else "--:--"),
+        ]
 
     def clear_status(self):
         self.status_lines = ["Processing..."]
@@ -189,7 +195,7 @@ class LogBox(ctk.CTkTextbox):
 
         current = self.get("3.0", "3.end").strip()
         if not current:
-            current = "Estimated time: --:--"
+            current = self._format_status_line(self._eta_label, "--:--")
         self.delete("3.0", "3.end")
         self.insert("3.0", current + " ")
         start = self.index("3.end")

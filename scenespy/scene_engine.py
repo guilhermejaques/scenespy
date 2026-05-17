@@ -68,13 +68,7 @@ class SceneEngine:
             except Exception:
                 pass
             for proc in procs:
-                try:
-                    proc.terminate()
-                    time.sleep(0.3)
-                    if proc.poll() is None:
-                        proc.kill()
-                except Exception:
-                    pass
+                terminate_process(proc, grace_seconds=0.3)
         except Exception:
             pass
         try:
@@ -1234,6 +1228,8 @@ class SceneEngine:
         return keyframes
 
     def _run_ffmpeg_tracked(self, cmd, timeout=300):
+        if self._stop:
+            return subprocess.CompletedProcess(cmd, -9, b"", b"Stopped")
         cmd = normalize_command(cmd)
         kwargs = {}
         if sys.platform == "win32":
@@ -1251,10 +1247,7 @@ class SceneEngine:
             stdout, stderr = proc.communicate(timeout=timeout)
             return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
         except subprocess.TimeoutExpired:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            terminate_process(proc)
             stdout, stderr = proc.communicate()
             return subprocess.CompletedProcess(cmd, -9, stdout, stderr)
         finally:

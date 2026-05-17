@@ -1,4 +1,5 @@
 import tkinter as tk
+import webbrowser
 
 from .shared import *
 from .widgets import *
@@ -14,8 +15,11 @@ class ScenespyApp(ctk.CTk):
         self.geometry("1000x650")
         self.engine = None
         self.running = False
+        self.starting = False
         self.stop_pending = False
         self.batch_stop = False
+        self._start_after_id = None
+        self._start_args = None
         self.resizable(False, False)
         self.preview_enabled = ENABLE_PREVIEW_DEFAULT
         self.available_encoder_accel = detect_available_encoder_accel()
@@ -84,6 +88,19 @@ class ScenespyApp(ctk.CTk):
 
         files = Section(self.left, "Files")
         files.pack(fill="x", padx=12, pady=12)
+        files.title_label.pack_forget()
+        files_header = ctk.CTkFrame(files, fg_color="transparent")
+        files_header.pack(fill="x", padx=12, pady=(8, 4))
+        self.files_title_label = ctk.CTkLabel(
+            files_header, text="Files", font=ui_font(14, "bold"))
+        self.files_title_label.pack(side="left", anchor="w", pady=(1, 0))
+        self.github_btn = ctk.CTkButton(
+            files_header, text="GitHub", width=60, height=16, corner_radius=10,
+            fg_color=BG_CARD, hover_color="#615f5f", border_width=1,
+            border_color=BORDER_SOFT, text_color=TEXT_MUTED,
+            font=ui_font(9), command=self.open_github)
+        self.github_btn.pack(side="right", anchor="e")
+        ToolTip(self.github_btn, "Open the Scenespy repository.")
         self.video_selector = FileSelector(files, "Source video(s)")
         self.video_selector.pack(fill="x", padx=12)
         self.output_selector = DirectorySelector(files, "Output folder")
@@ -209,6 +226,13 @@ class ScenespyApp(ctk.CTk):
             if message:
                 ToolTip(widget, message)
 
+    def open_github(self):
+        try:
+            webbrowser.open("https://github.com/guilhermejaques/scenespy", new=2)
+        except Exception as e:
+            if hasattr(self, "log"):
+                self.log.append_message(f"Could not open GitHub: {e}", kind="error")
+
     def toggle_preview(self):
         self.preview_enabled = self.preview_switch.get()
         if hasattr(self, "preview_frame"):
@@ -311,26 +335,64 @@ class ScenespyApp(ctk.CTk):
             cfg["FIXED_INTERVAL"] = int(value)
 
         self.running = True
+        self.starting = True
         self.batch_stop = False
+        self.stop_pending = False
         self.log.set_mode(mode)
         self.set_ui_state(True)
         self.after(0, self._finalize_start_ui)
+        if self.log:
+            self.log.append_message("Starting...", kind="info")
 
         if self.preview_frame:
             self.after(0, self.preview_frame.show_loading)
 
+        self._start_args = (valid_videos, output, cfg, mode, scene_mode, inference)
+        self._start_after_id = self.after(
+            int(PROCESS_START_DELAY_SECONDS * 1000),
+            self._begin_delayed_batch)
+
+    def _begin_delayed_batch(self):
+        self._start_after_id = None
+        args = self._start_args
+        self._start_args = None
+        if self.batch_stop or self.stop_pending or not self.running or not args:
+            self.starting = False
+            return
+        self.starting = False
         threading.Thread(
             target=self.run_batch,
-            args=(valid_videos, output, cfg, mode, scene_mode, inference),
+            args=args,
             daemon=True
         ).start()
 
     def stop_process(self):
         self.batch_stop = True
         self.stop_pending = True
-        if not self.engine:
+        if self._start_after_id is not None:
+            try:
+                self.after_cancel(self._start_after_id)
+            except Exception:
+                pass
+            self._start_after_id = None
+        self._start_args = None
+
+        if self.starting and not self.engine:
+            self.starting = False
+            self.reset_ui(stopped=True)
             return
-        self.engine.stop()
+
+        engine = self.engine
+        if not engine:
+            return
+        self.start_btn.configure(text="Stopping...", state="disabled")
+        threading.Thread(target=self._stop_engine, args=(engine,), daemon=True).start()
+
+    def _stop_engine(self, engine):
+        try:
+            engine.stop()
+        except Exception as e:
+            log_crash(f"Engine stop failed: {e}")
 
     def _cooldown_between_videos(self):
         gc.collect()
@@ -364,7 +426,12 @@ class ScenespyApp(ctk.CTk):
                 temp_files = []
                 engine = None
                 try:
-                    current_video = prepare_video_for_processing(video, temp_files=temp_files)
+                    current_video = prepare_video_for_processing(
+                        video, temp_files=temp_files,
+                        stop_cb=lambda: self.batch_stop or self.stop_pending)
+                    if self.batch_stop or self.stop_pending:
+                        stopped = True
+                        break
                     if mode == "faces":
                         engine = FaceDetectionEngine(
                             current_video, output, logbox=self.log, progressbar=self.progress,
@@ -399,6 +466,9 @@ class ScenespyApp(ctk.CTk):
                         stopped = True
                         break
                 except Exception as e:
+                    if self.batch_stop or self.stop_pending:
+                        stopped = True
+                        break
                     failed += 1
                     error_msg = str(e) or "Unknown error"
                     error_type = type(e).__name__
@@ -441,12 +511,23 @@ class ScenespyApp(ctk.CTk):
                 self.after(0, lambda: self.log.append_message(summary, kind="error"))
         finally:
             self.engine = None
+            self.starting = False
+            self._start_after_id = None
+            self._start_args = None
             self.batch_stop = False
             self.stop_pending = False
 
     def reset_ui(self, finished=False, total_time=None, stopped=False, warning_message=None):
         self.stop_pending = False
         self.running = False
+        self.starting = False
+        if self._start_after_id is not None:
+            try:
+                self.after_cancel(self._start_after_id)
+            except Exception:
+                pass
+            self._start_after_id = None
+        self._start_args = None
         if self.preview_frame:
             self.preview_frame.hide_loading()
         self.start_btn.configure(text="Start", fg_color=ACCENT,

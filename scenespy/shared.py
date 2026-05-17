@@ -205,6 +205,7 @@ PREVIEW_MAX_WIDTH = 420
 PREVIEW_MAX_HEIGHT = 280
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 PROCESS_COOLDOWN_SECONDS = 1.25
+PROCESS_START_DELAY_SECONDS = 5.0
 ANALYSIS_MOSAIC_INTERVAL_MIN = 10.0
 ANALYSIS_MOSAIC_INTERVAL_MAX = 20.0
 ANALYSIS_MOSAIC_MAX_SOURCES = 1
@@ -399,7 +400,7 @@ def remove_temp_file(path):
             time.sleep(0.15)
 
 
-def remux_if_needed(path, temp_files=None):
+def remux_if_needed(path, temp_files=None, stop_cb=None):
     ext = os.path.splitext(path)[1].lower()
     if ext != ".mkv":
         return path
@@ -407,12 +408,15 @@ def remux_if_needed(path, temp_files=None):
     fixed = path[:-4] + "_fixed.mkv"
     remove_temp_file(fixed)
 
-    run_hidden(
+    result = run_hidden_cancelable(
         ["ffmpeg", "-y", "-fflags", "+genpts+igndts", "-err_detect", "ignore_err",
          "-i", path, "-map", "0:v:0", "-map", "0:a?", "-c", "copy",
          "-max_interleave_delta", "0", "-avoid_negative_ts", "make_zero", fixed],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        stop_cb=stop_cb, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
+    if result.returncode == -9 or (stop_cb and stop_cb()):
+        remove_temp_file(fixed)
+        return path
     if os.path.exists(fixed) and is_valid_video_file(fixed):
         if temp_files is not None:
             temp_files.append(fixed)
@@ -421,8 +425,8 @@ def remux_if_needed(path, temp_files=None):
     return path
 
 
-def prepare_video_for_processing(path, temp_files=None):
-    prepared = remux_if_needed(path, temp_files=temp_files)
+def prepare_video_for_processing(path, temp_files=None, stop_cb=None):
+    prepared = remux_if_needed(path, temp_files=temp_files, stop_cb=stop_cb)
     return prepared
 
 
@@ -652,6 +656,41 @@ def run_hidden(cmd, **kwargs):
     if sys.platform == "win32":
         kwargs.setdefault("creationflags", CREATE_NO_WINDOW)
     return subprocess.run(cmd, **kwargs)
+
+
+def terminate_process(proc, grace_seconds=0.5):
+    if not proc or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=grace_seconds)
+        return
+    except Exception:
+        pass
+    try:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=grace_seconds)
+    except Exception:
+        pass
+
+
+def run_hidden_cancelable(cmd, stop_cb=None, poll_interval=0.05, **kwargs):
+    cmd = normalize_command(cmd)
+    if sys.platform == "win32":
+        kwargs.setdefault("creationflags", CREATE_NO_WINDOW)
+    proc = subprocess.Popen(cmd, **kwargs)
+    try:
+        while proc.poll() is None:
+            if stop_cb and stop_cb():
+                terminate_process(proc)
+                return subprocess.CompletedProcess(cmd, -9, None, None)
+            time.sleep(poll_interval)
+        stdout, stderr = proc.communicate()
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    except Exception:
+        terminate_process(proc)
+        raise
 
 
 def check_output_hidden(cmd, **kwargs):
