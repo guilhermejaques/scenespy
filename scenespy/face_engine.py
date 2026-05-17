@@ -32,14 +32,11 @@ class FaceDetectionEngine:
 
         self.profile_cfg = {
             "Low": {"conf": 0.45, "min_size": 64, "ttl": 0.6,
-                    "min_frames": 0.8, "min_valid_ratio": 0.75, "min_sharpness": 60,
-                    "sample_fps": 3.0, "landmark_interval": 3, "skin_min": 0.12},
+                    "min_frames": 0.8, "min_valid_ratio": 0.75, "min_sharpness": 60},
             "Normal": {"conf": 0.35, "min_size": 40, "ttl": 1.2,
-                       "min_frames": 0.5, "min_valid_ratio": 0.6, "min_sharpness": 40,
-                       "sample_fps": 5.0, "landmark_interval": 3, "skin_min": 0.10},
+                       "min_frames": 0.5, "min_valid_ratio": 0.6, "min_sharpness": 40},
             "High": {"conf": 0.22, "min_size": 24, "ttl": 2.5,
-                     "min_frames": 0.25, "min_valid_ratio": 0.35, "min_sharpness": 20,
-                     "sample_fps": 8.0, "landmark_interval": 4, "skin_min": 0.0},
+                     "min_frames": 0.25, "min_valid_ratio": 0.35, "min_sharpness": 20},
         }[profile]
 
         self.last_preview = 0
@@ -146,13 +143,7 @@ class FaceDetectionEngine:
         cap = cv2.VideoCapture(self.video)
         self._cap = cap
         try:
-            fps_raw = cap.get(cv2.CAP_PROP_FPS)
-            fps = float(fps_raw) if fps_raw and fps_raw > 0 else 30.0
-            total_frames_raw = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-            try:
-                total_frames = int(float(total_frames_raw))
-            except Exception:
-                total_frames = 1
+            fps, total_frames = self._get_video_timing(cap)
 
             tracks = []
             outdir = build_output_dir(self.output, mode="faces",
@@ -161,13 +152,9 @@ class FaceDetectionEngine:
             track_id = 0
             min_lm_frames = 1 if self.profile == "High" else 2
             iou_thresh = 0.45
-            sample_every = max(1, int(round(fps / max(1.0, self.profile_cfg["sample_fps"]))))
-            ttl_frames = max(2, int(round(self.profile_cfg["sample_fps"] * self.profile_cfg["ttl"])))
-            min_required_frames = {
-                "Low": 3,
-                "Normal": 2,
-                "High": 1,
-            }.get(self.profile, 2)
+            sample_every = 1
+            ttl_frames = max(2, int(round(fps * self.profile_cfg["ttl"])))
+            min_required_frames = 3
 
             while cap.isOpened():
                 if self._stop:
@@ -206,7 +193,7 @@ class FaceDetectionEngine:
                             self.log.write_status(detected=d, cut=c, eta=e))
 
                     if self.progress:
-                        ratio = max(self._face_ratio, frame_idx / total_frames)
+                        ratio = min(1.0, max(self._face_ratio, frame_idx / total_frames))
                         self._face_ratio = ratio
                         if self._ui_alive:
                             self.progress.after(0, lambda v=ratio: self.progress.update(v))
@@ -238,11 +225,9 @@ class FaceDetectionEngine:
                     cx2 = min(w_frame, x2 + expand_x)
                     cy2 = min(h_frame, y2 + expand_y)
 
-                    skin_min = float(self.profile_cfg.get("skin_min", 0.10))
+                    skin_min = 0.12 if self.profile != "High" else 0.10
                     face_crop = frame[cy1:cy2, cx1:cx2]
-                    if face_raw.size == 0:
-                        continue
-                    if skin_min > 0 and self._skin_ratio(face_raw) < skin_min:
+                    if face_raw.size == 0 or self._skin_ratio(face_raw) < skin_min:
                         continue
 
                     matched = False
@@ -261,11 +246,7 @@ class FaceDetectionEngine:
                             if sharp > t["score"]:
                                 t["score"] = sharp
                                 t["face"] = face_crop.copy()
-                            should_validate = (
-                                    t["frames"] >= min_lm_frames and
-                                    (t["valid"] == 0 or t["frames"] % self.profile_cfg["landmark_interval"] == 0)
-                            )
-                            if should_validate and self._valid_landmarks(face_raw):
+                            if t["frames"] >= min_lm_frames and self._valid_landmarks(face_raw):
                                 t["valid"] = min(t["valid"] + 1, t["frames"])
                             matched = True
                             break
@@ -292,7 +273,7 @@ class FaceDetectionEngine:
                     t["ttl"] -= 1
                     if t["ttl"] <= 0:
                         cfg = self.profile_cfg
-                        min_required = max(min_required_frames, int(cfg["sample_fps"] * cfg["min_frames"]))
+                        min_required = max(min_required_frames, int(fps * cfg["min_frames"]))
                         if (t["frames"] >= min_required and
                                 (t["valid"] / max(t["frames"], 1)) >= cfg["min_valid_ratio"] and
                                 t["score"] >= cfg["min_sharpness"]):
@@ -333,7 +314,7 @@ class FaceDetectionEngine:
 
 
                 if self.progress:
-                    ratio = max(self._face_ratio, frame_idx / total_frames)
+                    ratio = min(1.0, max(self._face_ratio, frame_idx / total_frames))
                     self._face_ratio = ratio
                     progress_ratio = ratio
                     if self._ui_alive:
@@ -341,7 +322,7 @@ class FaceDetectionEngine:
 
             cfg = self.profile_cfg
             for t in tracks:
-                min_required = max(min_required_frames, int(cfg["sample_fps"] * cfg["min_frames"]))
+                min_required = max(min_required_frames, int(fps * cfg["min_frames"]))
                 if (t["frames"] >= min_required and
                         (t["valid"] / max(t["frames"], 1)) >= cfg["min_valid_ratio"] and
                         t["score"] >= cfg["min_sharpness"]):
@@ -367,6 +348,112 @@ class FaceDetectionEngine:
 
         self._end_time = time.time()
         return not self._stop
+
+    def _get_video_timing(self, cap):
+        fps = self._probe_fps()
+        if not fps:
+            try:
+                fps_raw = cap.get(cv2.CAP_PROP_FPS)
+                fps = float(fps_raw) if fps_raw and fps_raw > 0 else None
+            except Exception:
+                fps = None
+        fps = fps or 30.0
+
+        total_frames = self._probe_total_frames(fps)
+        if not total_frames:
+            try:
+                total_frames_raw = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                total_frames = int(float(total_frames_raw))
+            except Exception:
+                total_frames = 0
+        return fps, max(1, int(total_frames or 1))
+
+    def _probe_fps(self):
+        cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
+               "-show_entries", "stream=avg_frame_rate,r_frame_rate",
+               "-of", "json", self.video]
+        try:
+            data = json.loads(check_output_hidden(cmd).decode(errors="ignore") or "{}")
+            stream = (data.get("streams") or [{}])[0]
+            return (
+                self._parse_frame_rate(stream.get("avg_frame_rate")) or
+                self._parse_frame_rate(stream.get("r_frame_rate"))
+            )
+        except Exception:
+            return None
+
+    def _probe_total_frames(self, fps):
+        cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
+               "-show_entries", "stream=nb_frames:stream_tags=NUMBER_OF_FRAMES,DURATION",
+               "-show_entries", "format=duration",
+               "-of", "json", self.video]
+        try:
+            data = json.loads(check_output_hidden(cmd).decode(errors="ignore") or "{}")
+            stream = (data.get("streams") or [{}])[0]
+            for value in (stream.get("nb_frames"), (stream.get("tags") or {}).get("NUMBER_OF_FRAMES")):
+                count = self._parse_int(value)
+                if count:
+                    return count
+            tag_duration = (stream.get("tags") or {}).get("DURATION")
+            seconds = self._parse_duration_seconds(tag_duration)
+            if not seconds:
+                seconds = self._parse_float((data.get("format") or {}).get("duration"))
+            if seconds and fps > 0:
+                return int(round(seconds * fps))
+        except Exception:
+            pass
+        return None
+
+    def _parse_frame_rate(self, value):
+        try:
+            text = str(value or "").strip()
+            if not text or text in {"0/0", "N/A"}:
+                return None
+            if "/" in text:
+                num, den = text.split("/", 1)
+                den = float(den)
+                if den == 0:
+                    return None
+                fps = float(num) / den
+            else:
+                fps = float(text)
+            return fps if fps > 0 else None
+        except Exception:
+            return None
+
+    def _parse_int(self, value):
+        try:
+            text = str(value or "").strip()
+            if not text or text == "N/A":
+                return None
+            parsed = int(float(text))
+            return parsed if parsed > 0 else None
+        except Exception:
+            return None
+
+    def _parse_float(self, value):
+        try:
+            text = str(value or "").strip()
+            if not text or text == "N/A":
+                return None
+            parsed = float(text)
+            return parsed if parsed > 0 else None
+        except Exception:
+            return None
+
+    def _parse_duration_seconds(self, value):
+        try:
+            text = str(value or "").strip()
+            if not text:
+                return None
+            if ":" not in text:
+                return self._parse_float(text)
+            parts = text.split(":")
+            if len(parts) != 3:
+                return None
+            return float(parts[0]) * 3600.0 + float(parts[1]) * 60.0 + float(parts[2])
+        except Exception:
+            return None
 
     def _calculate_eta(self, frame_idx, total_frames):
         """Calculate ETA for face detection - optimized and realistic.

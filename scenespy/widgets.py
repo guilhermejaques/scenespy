@@ -1,3 +1,5 @@
+import tkinter as tk
+
 from .shared import *
 
 class Section(ctk.CTkFrame):
@@ -5,8 +7,67 @@ class Section(ctk.CTkFrame):
     def __init__(self, master, title, **kwargs):
         super().__init__(master, fg_color=BG_CARD, border_width=1,
                          border_color=BORDER_SOFT2, corner_radius=0, **kwargs)
-        ctk.CTkLabel(self, text=title, font=ui_font(14, "bold")
-                     ).pack(anchor="w", padx=12, pady=(8, 4))
+        self.title_label = ctk.CTkLabel(self, text=title, font=ui_font(14, "bold"))
+        self.title_label.pack(anchor="w", padx=12, pady=(8, 4))
+
+
+class ToolTip:
+    """Small delayed hover popup for explaining compact controls."""
+    def __init__(self, widget, text, delay=450):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self._after_id = None
+        self._window = None
+
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+        widget.bind("<Destroy>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after_id = self.widget.after(self.delay, self._show)
+
+    def _cancel(self):
+        if self._after_id:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _show(self):
+        self._after_id = None
+        if self._window or not self.text:
+            return
+        try:
+            if not self.widget.winfo_exists():
+                return
+            x = self.widget.winfo_rootx() + 16
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+            self._window = tk.Toplevel(self.widget)
+            self._window.wm_overrideredirect(True)
+            self._window.wm_attributes("-topmost", True)
+            self._window.configure(bg=BORDER_SOFT2)
+            label = tk.Label(
+                self._window, text=self.text, justify="left",
+                bg=BG_MAIN, fg=TEXT_MAIN, bd=0, padx=9, pady=6,
+                font=ui_font(10), wraplength=260
+            )
+            label.pack(padx=1, pady=1)
+            self._window.wm_geometry(f"+{x}+{y}")
+        except Exception:
+            self._window = None
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._window:
+            try:
+                self._window.destroy()
+            except Exception:
+                pass
+            self._window = None
 
 
 class LabeledEntry(ctk.CTkFrame):

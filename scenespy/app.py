@@ -99,6 +99,10 @@ class ScenespyApp(ctk.CTk):
 
         mode = Section(self.left, "Cut Mode")
         mode.pack(fill="x", padx=12)
+        ToolTip(
+            mode.title_label,
+            "Choose how videos are split: by detected scene changes, fixed time intervals, or saved face crops."
+        )
 
         self.cut_mode = ctk.StringVar(value="scene")
         self.cut_mode.trace_add("write", self._on_cut_mode_change)
@@ -110,6 +114,11 @@ class ScenespyApp(ctk.CTk):
         ], radio_width=150)
         group.pack(fill="x", padx=12, pady=(0, 6))
         self.mode_radios = group.radios
+        self._attach_tooltips(self.mode_radios, {
+            "scene": "Finds visual scene changes and exports each detected scene as a clip.",
+            "interval": "Splits the video into equal-length clips using the seconds value below.",
+            "faces": "Scans frames for faces and saves the best face images instead of video clips.",
+        })
 
         vcmd = (self.register(self._validate_interval), "%P")
         self.interval_entry = ctk.CTkEntry(
@@ -122,21 +131,42 @@ class ScenespyApp(ctk.CTk):
 
         profile_sec = Section(self.left, "Detection Sensitivity")
         profile_sec.pack(fill="x", padx=12, pady=5)
+        ToolTip(
+            profile_sec.title_label,
+            "Controls how easily scene changes are accepted. Higher sensitivity can create more, shorter clips."
+        )
 
         self.profile = ctk.StringVar(value="Normal")
         options = [(cfg["label"], key) for key, cfg in PROFILES.items()]
         group2 = RadioGroup(profile_sec, self.profile, options, radio_width=110)
         group2.pack(fill="x", padx=12)
         self.profile_radios = group2.radios
+        self._attach_tooltips(self.profile_radios, {
+            "Low": "Fewer cuts. Best when you want longer clips and fewer false positives.",
+            "Normal": "Balanced scene detection for most videos.",
+            "High": "More cuts. Useful for fast edits, but may split scenes more aggressively.",
+            "Auto": "Adapts detection settings from the video length and motion profile.",
+        })
 
         accel_sec = Section(self.left, "Hardware Acceleration")
         accel_sec.pack(fill="x", padx=12)
+        ToolTip(
+            accel_sec.title_label,
+            "Selects the hardware used for encoding or face detection when that mode supports it."
+        )
         self.accel = ctk.StringVar(value="cpu")
         group3 = RadioGroup(accel_sec, self.accel,
                             [(val.upper(), val) for val in ACCEL_OPTIONS],
                             radio_width=110)
         group3.pack(fill="x", padx=12)
         self.accel_radios = group3.radios
+        self._attach_tooltips(self.accel_radios, {
+            "cpu": "Most compatible option. Uses the processor and works on all systems.",
+            "nvidia": "Uses NVIDIA acceleration when available for faster encoding or face detection.",
+            "amd": "Uses AMD video encoding acceleration when available.",
+            "intel": "Uses Intel Quick Sync video encoding when available.",
+            "apple": "Uses Apple VideoToolbox encoding on macOS when available.",
+        })
         self.update_accel_radios()
 
         self.start_btn = ctk.CTkButton(
@@ -172,6 +202,12 @@ class ScenespyApp(ctk.CTk):
         self.left.pack_propagate(False)
         self.right.pack_propagate(False)
         self._on_cut_mode_change()
+
+    def _attach_tooltips(self, widgets, messages):
+        for widget in widgets:
+            message = messages.get(widget.cget("value"))
+            if message:
+                ToolTip(widget, message)
 
     def toggle_preview(self):
         self.preview_enabled = self.preview_switch.get()

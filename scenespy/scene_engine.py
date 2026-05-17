@@ -296,16 +296,85 @@ class SceneEngine:
 
     def _get_video_info_text(self):
         cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
-               "-show_entries", "stream=width,height,r_frame_rate:format=bit_rate",
-               "-of", "default=noprint_wrappers=1:nokey=1", self.video]
+               "-show_entries",
+               "stream=width,height,avg_frame_rate,r_frame_rate,bit_rate:stream_tags=rotate:stream_side_data=rotation:format=bit_rate,duration",
+               "-of", "json", self.video]
         try:
-            out = check_output_hidden(cmd).decode().splitlines()
-            width, height, fps, bitrate = out
-            num, den = fps.split("/")
-            fps_float = round(int(num) / int(den), 2)
-            return f"{width}x{height} | FPS: {fps_float} | Bitrate: {int(bitrate) / 1000:.0f} kbps"
+            data = json.loads(check_output_hidden(cmd).decode(errors="ignore") or "{}")
+            stream = (data.get("streams") or [{}])[0]
+            fmt = data.get("format") or {}
+
+            width = int(stream.get("width") or 0)
+            height = int(stream.get("height") or 0)
+            rotation = self._get_video_rotation(stream)
+            if width > 0 and height > 0 and abs(rotation) % 180 == 90:
+                width, height = height, width
+
+            fps = (
+                self._parse_frame_rate(stream.get("avg_frame_rate")) or
+                self._parse_frame_rate(stream.get("r_frame_rate"))
+            )
+            bitrate = (
+                self._parse_int(stream.get("bit_rate")) or
+                self._parse_int(fmt.get("bit_rate")) or
+                self._estimate_bitrate_from_size(fmt.get("duration"))
+            )
+
+            resolution_text = f"{width}x{height}" if width > 0 and height > 0 else "Resolution: unknown"
+            fps_text = f"FPS: {fps:.2f}" if fps else "FPS: unknown"
+            bitrate_text = f"Bitrate: {bitrate / 1000:.0f} kbps" if bitrate else "Bitrate: unknown"
+            return f"{resolution_text} | {fps_text} | {bitrate_text}"
         except Exception:
             return "Video info unavailable"
+
+    def _parse_frame_rate(self, value):
+        try:
+            text = str(value or "").strip()
+            if not text or text in {"0/0", "N/A"}:
+                return None
+            if "/" in text:
+                num, den = text.split("/", 1)
+                den = float(den)
+                if den == 0:
+                    return None
+                fps = float(num) / den
+            else:
+                fps = float(text)
+            return fps if fps > 0 else None
+        except Exception:
+            return None
+
+    def _parse_int(self, value):
+        try:
+            text = str(value or "").strip()
+            if not text or text == "N/A":
+                return None
+            parsed = int(float(text))
+            return parsed if parsed > 0 else None
+        except Exception:
+            return None
+
+    def _get_video_rotation(self, stream):
+        try:
+            rotate = self._parse_int((stream.get("tags") or {}).get("rotate"))
+            if rotate is not None:
+                return rotate
+            for item in stream.get("side_data_list") or []:
+                rotation = self._parse_int(item.get("rotation"))
+                if rotation is not None:
+                    return rotation
+        except Exception:
+            pass
+        return 0
+
+    def _estimate_bitrate_from_size(self, duration):
+        try:
+            seconds = float(duration)
+            if seconds <= 0:
+                return None
+            return int((os.path.getsize(self.video) * 8) / seconds)
+        except Exception:
+            return None
 
     def _detect_scenes_progressive(self):
         self._reset_detection_timing()
@@ -787,12 +856,13 @@ class SceneEngine:
         interval = self.cfg.get("FIXED_INTERVAL", 10)
         duration = self._get_video_duration()
         fps = self._get_video_fps()
-        self._total_frames = int(round(duration * fps))
+        self._total_frames = self._get_video_total_frames(fps, duration)
+        duration = max(self._total_frames / fps, 1.0)
 
         scenes, t = [], 0.0
         while t < duration:
             start_frame = int(round(t * fps))
-            end_frame = int(round(min(t + interval, duration) * fps))
+            end_frame = min(self._total_frames, int(round(min(t + interval, duration) * fps)))
             if end_frame > start_frame:
                 scenes.append((start_frame, end_frame))
             t += interval
