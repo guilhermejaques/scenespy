@@ -35,3 +35,4 @@ def main():
     register_bundled_fonts()
     app = ScenespyApp()
     app.mainloop()
+

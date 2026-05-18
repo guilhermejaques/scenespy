@@ -1,10 +1,10 @@
 import tkinter as tk
 import webbrowser
-
 from .shared import *
 from .widgets import *
 from .scene_engine import SceneEngine
 from .face_engine import FaceDetectionEngine
+
 
 class ScenespyApp(ctk.CTk):
     """Main window that coordinates input selection, processing, and progress updates."""
@@ -690,3 +690,4 @@ class ScenespyApp(ctk.CTk):
     def _finalize_start_ui(self):
         self.start_btn.configure(text="Stop ", fg_color=DANGER, hover_color="#dc2626",
                                  text_color="white", text_color_disabled="white")
+

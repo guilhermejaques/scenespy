@@ -20,11 +20,9 @@ import shutil
 import tkinter.filedialog as fd
 import tkinter.messagebox as mb
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 import customtkinter as ctk
 from PIL import Image, ImageOps
 import numpy as np
-
 import cv2
 
 torch = None
@@ -763,3 +761,4 @@ atexit.register(terminate_all_child_processes)
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
+

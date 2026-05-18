@@ -2,7 +2,7 @@ from .shared import *
 from .scene_analysis import *
 
 class SceneEngine:
-    """Detects scene boundaries and exports video segments."""
+    """Detects scene boundaries and exports video segments. Scene detection Pipeline!"""
     def __init__(self, video, output, cfg, logbox=None, progressbar=None,
                  previewer=None, preview_enabled=True, preview_pool=None):
         self.video = video
@@ -1139,7 +1139,7 @@ class SceneEngine:
             return None
 
     def _map_threshold(self):
-        """Returns (threshold, min_scene_len) for the ContentDetector.
+        """Doc: Returns (threshold, min_scene_len) for the ContentDetector.
 
         Hybrid approach: FIXED threshold per profile + ADAPTIVE min_dur.
 
@@ -1442,3 +1442,4 @@ class SceneEngine:
                 Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
         except Exception:
             return None
+

@@ -1,8 +1,9 @@
 from .shared import *
 from . import shared as shared
 
+
 class FaceDetectionEngine:
-    """Detects and saves representative face crops from a video."""
+    """Detects and saves representative face crops from a video. Pipeline Face Detection!"""
     def __init__(self, video, output, logbox=None, progressbar=None,
                  previewer=None, profile="Normal", accel="cpu", preview_enabled=True):
         self.video = video
@@ -756,9 +757,8 @@ class FaceDetectionEngine:
             return None
 
     def _calculate_eta(self, frame_idx, total_frames):
-        """Calculate ETA for face detection - optimized and realistic.
-
-        Based on frame processing rate with sanity checks.
+        """Calculate ETA for face detection.
+            Based on frame processing rate.
         """
         if frame_idx == 0 or total_frames == 0:
             return "--:--"

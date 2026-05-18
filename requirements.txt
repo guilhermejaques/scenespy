@@ -6,6 +6,8 @@ numpy==2.4.2
 opencv-contrib-python==4.13.0.90
 av==16.1.0
 scenedetect==0.6.7.1
+torch==2.5.1
+torchvision==0.20.1
 ultralytics==8.4.9
 mediapipe==0.10.9
 
@@ -13,5 +15,6 @@ mediapipe==0.10.9
 # - ffmpeg
 # - ffprobe
 #
-# Optional for CUDA face detection:
-# Install torch/torchvision separately for the target machine and CUDA version.
+# CUDA face detection:
+# Install the torch/torchvision builds that match the target CUDA version before
+# installing this file, or reinstall them from the official PyTorch index after.

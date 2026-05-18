@@ -1,7 +1,8 @@
 from .shared import *
 
+
 def _otsu_1d(sorted_vals):
-    """Return a one-dimensional Otsu threshold, or None when the sample is too small."""
+    """Return a one dimensional Otsu threshold, or None when the sample is too small. (essencial)"""
     n = len(sorted_vals)
     if n < 4:
         return None
