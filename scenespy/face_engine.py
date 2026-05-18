@@ -321,7 +321,6 @@ class FaceDetectionEngine:
             path = os.path.join(outdir, fname)
             if cv2.imwrite(path, track["face"]):
                 self.done += 1
-                self.detected += 1
                 self._saved_faces.append(self._face_metadata(track, fname))
 
     def run(self):
@@ -494,6 +493,7 @@ class FaceDetectionEngine:
                 active_tracks.extend(tracks[track_idx] for track_idx, _det_idx in matches)
                 for det_idx in unmatched_detections:
                     track_id += 1
+                    self.detected += 1
                     active_tracks.append(
                         self._create_face_track(
                             track_id, detections[det_idx], ttl_frames, frame_idx, fps))
@@ -539,6 +539,9 @@ class FaceDetectionEngine:
             min_required = max(min_required_frames, int(effective_fps * cfg["min_frames"]))
             for t in tracks:
                 self._save_face_track_if_valid(t, outdir, min_required, cfg)
+            if self.log and self._ui_alive and not self._stop:
+                self.log.after(0, lambda d=self.detected, c=self.done:
+                self.log.write_status(detected=d, cut=c, eta="00:00"))
         finally:
 
             if cap:
@@ -645,6 +648,7 @@ class FaceDetectionEngine:
                 },
                 "results": {
                     "status": "stopped" if self._stop else "completed",
+                    "faces_detected": int(self.detected),
                     "faces_saved": int(self.done),
                     "tracks_saved": len(self._saved_faces),
                     "identity_note": (

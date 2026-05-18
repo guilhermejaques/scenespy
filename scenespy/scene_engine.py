@@ -20,6 +20,7 @@ class SceneEngine:
         self.failed = 0
         self.completed_attempts = 0
         self._start_time = None
+        self._cut_start_time = None
         self._end_time = None
         self._video_info_shown = False
         self._fps = None
@@ -38,6 +39,7 @@ class SceneEngine:
         self._preview_stop = False
         self._analysis_mosaic = None
         self._analysis_status_step = 0
+        self._last_analysis_stage_label = None
         self._video_obj = None
         self._scene_candidates = []
         self._rejected_scene_candidates = []
@@ -189,19 +191,19 @@ class SceneEngine:
 
     def _analysis_eta_text(self, ratio=None):
         step = getattr(self, "_analysis_status_step", 0)
-        dots = "." * ((step % 3) + 1)
         self._analysis_status_step = step + 1
-        if ratio is not None:
-            pct = max(0, min(99, int(ratio * 100)))
-            return f"analyzing {pct}%{dots}"
-        return f"analyzing{dots}"
+        return "..."
 
     def _write_analysis_status(self, label, progress=None):
-        if self.progress and progress is not None:
-            self.progress.after(0, lambda v=progress: self.progress.update(v))
+        if self.progress:
+            if label and label != self._last_analysis_stage_label:
+                self._last_analysis_stage_label = label
+                self.progress.after(0, lambda text=label: self.progress.set_status(text))
+            if progress is not None:
+                self.progress.after(0, lambda v=progress: self.progress.update(v))
         if self.log:
-            self.log.after(0, lambda text=label: self.log.write_status(
-                detected=text, cut=0, eta=self._analysis_eta_text()))
+            self.log.after(0, lambda: self.log.write_status(
+                detected=self.detected, cut=0, eta=self._analysis_eta_text()))
 
     def run(self, scene_mode=True):
         self.scene_mode = scene_mode
@@ -210,6 +212,7 @@ class SceneEngine:
         self._ui_alive = True
         self._analysis_ratio = 0.0
         self._start_time = time.time()
+        self._cut_start_time = None
         self._end_time = None
         self.done = 0
         self.failed = 0
@@ -222,6 +225,7 @@ class SceneEngine:
         self._cut_output_dir = None
         self._analysis_mosaic = None
         self._analysis_status_step = 0
+        self._last_analysis_stage_label = None
 
         if self.previewer and self.preview_enabled:
             try:
@@ -376,9 +380,11 @@ class SceneEngine:
         self._reset_detection_timing()
         fps = self._get_video_fps()
 
+        if self.progress:
+            self.progress.after(0, lambda: self.progress.set_status("Analyzing video..."))
         if self.log:
             self.log.after(0, lambda: self.log.write_status(
-                detected=self._analysis_eta_text(), cut=0, eta="analyzing"))
+                detected=self.detected, cut=0, eta=self._analysis_eta_text()))
 
         threshold, min_dur = self._map_threshold()
         self._log_detection_stage("adaptive_threshold")
@@ -484,6 +490,7 @@ class SceneEngine:
 
         scene_list = []
         try:
+            self._write_analysis_status("running scene detector", 0.05)
             scene_manager.detect_scenes(video=video, callback=_progress_cb)
             if self._stop:
                 return []
@@ -516,9 +523,11 @@ class SceneEngine:
                 remove_temp_file(fixed)
                 self.add_temp_file(fixed)
                 print(f"Video has corrupted frames - re-encoding with ffmpeg...")
+                if self.progress:
+                    self.progress.after(0, lambda: self.progress.set_status("Fixing corrupted video..."))
                 if self.log:
                     self.log.after(0, lambda: self.log.write_status(
-                        detected="Fixing corrupted video...", cut=0, eta="--:--"))
+                        detected=self.detected, cut=0, eta="--:--"))
                 self._run_ffmpeg_tracked(
                     ["ffmpeg", "-y", "-err_detect", "ignore_err",
                      "-i", self.video, "-c:v", "libx264", "-crf", "22",
@@ -526,9 +535,11 @@ class SceneEngine:
                      "-c:a", "copy", fixed],
                     timeout=300
                 )
+                if self.progress:
+                    self.progress.after(0, lambda: self.progress.set_status("Re-encoding complete"))
                 if self.log:
                     self.log.after(0, lambda: self.log.write_status(
-                        detected="Re-encoding complete", cut=0, eta="--:--"))
+                        detected=self.detected, cut=0, eta="--:--"))
 
                 if os.path.exists(fixed):
                     print(f"Using fixed video: {fixed}")
@@ -545,8 +556,10 @@ class SceneEngine:
                     if not os.path.exists(fixed) or not is_valid_video_file(fixed):
                         print("ffmpeg re-encode failed, no valid fixed file")
                         if self.log:
+                            self.log.after(0, lambda: self.log.append_message(
+                                "Failed to fix corrupted video", kind="error"))
                             self.log.after(0, lambda: self.log.write_status(
-                                detected="Failed to fix corrupted video", cut=0, eta="--:--"))
+                                detected=self.detected, cut=0, eta="--:--"))
                         return []
                     self.video = fixed
 
@@ -570,8 +583,10 @@ class SceneEngine:
                         except Exception:
                             print("Both backends failed on fixed video!")
                             if self.log:
+                                self.log.after(0, lambda: self.log.append_message(
+                                    "Failed to open fixed video", kind="error"))
                                 self.log.after(0, lambda: self.log.write_status(
-                                    detected="Failed to open fixed video", cut=0, eta="--:--"))
+                                    detected=self.detected, cut=0, eta="--:--"))
                             return []
                     print(f"Video opened successfully, starting detection...")
                     scene_manager = SceneManager(StatsManager())
@@ -584,6 +599,7 @@ class SceneEngine:
                                         weights=CompWeights(
                                             delta_hue=0.85, delta_sat=0.85, delta_lum=1.0, delta_edges=1.15))
                     )
+                    self._write_analysis_status("running scene detector", 0.05)
                     scene_manager.detect_scenes(video=video, callback=_progress_cb)
                     scene_list = scene_manager.get_scene_list()
                     self.detected = len(scene_list)
@@ -591,7 +607,7 @@ class SceneEngine:
                     print(f"Detection complete: {self.detected} scenes found")
                     if self.log:
                         self.log.after(0, lambda d=self.detected: self.log.write_status(
-                            detected=f"{d} scenes detected", cut=0, eta="--:--"))
+                            detected=d, cut=0, eta="--:--"))
                     try:
                         video.close()
                         self._video_obj = None
@@ -602,8 +618,10 @@ class SceneEngine:
                 else:
                     print("ffmpeg re-encode failed, no fixed file created")
                     if self.log:
+                        self.log.after(0, lambda: self.log.append_message(
+                            "Failed to create fixed video", kind="error"))
                         self.log.after(0, lambda: self.log.write_status(
-                            detected="Failed to create fixed video", cut=0, eta="--:--"))
+                            detected=self.detected, cut=0, eta="--:--"))
                     return []
             else:
                 return []
@@ -940,7 +958,11 @@ class SceneEngine:
         self.total = len(scenes)
         self.done = 0
         self.completed_attempts = 0
+        self._cut_start_time = time.time()
         self._cut_lock = threading.Lock()
+        if self.progress:
+            label = "Cutting scenes..." if self.scene_mode else "Cutting segments..."
+            self.progress.after(0, lambda text=label: self.progress.set_status(text))
 
         keyframes = self._get_keyframes() or [0.0]
         tasks = []
@@ -1061,7 +1083,7 @@ class SceneEngine:
         Returns "--:--" during detection phase to avoid showing stale/misleading estimates.
         Shows real ETA based on actual cut rate during cutting phase.
         """
-        elapsed = time.time() - self._start_time
+        elapsed = time.time() - (self._cut_start_time or self._start_time)
         if elapsed < 1:
             return "--:--"
 

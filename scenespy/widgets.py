@@ -180,13 +180,22 @@ class LogBox(ctk.CTkTextbox):
         self._ensure_initialized()
         tag = f"msg_{kind}"
         message = self._format_terminal_message(text)
+        tag_colors = {
+            "msg_stage": TEXT_MUTED,
+        }
+        color = tag_colors.get(tag, TEXT_MAIN)
+        self.tag_config(tag, foreground=color)
+        try:
+            self._textbox.tag_config(tag, foreground=color)
+        except Exception:
+            pass
         if self.index("end-1c") != "1.0":
             self.insert("end", "\n")
         start = self.index("end")
-        self.insert("end", message)
+        self.insert("end", message, (tag,))
         end = self.index("end")
         self.tag_add(tag, start, end)
-        self.tag_config(tag, foreground=TEXT_MAIN)
+        self.tag_raise(tag)
         self.configure(state="disabled")
 
     def write_finished(self, text):
@@ -222,13 +231,27 @@ class ProgressBar(ctk.CTkFrame):
         self.bar.set(0)
         self._after_id = None
         self._enabled = True
-        self.label = ctk.CTkLabel(self, text="0%", font=ui_font(11))
-        self.label.pack(anchor="e")
+        label_row = ctk.CTkFrame(self, fg_color="transparent")
+        label_row.pack(fill="x")
+        label_row.grid_columnconfigure(0, weight=1)
+        label_row.grid_columnconfigure(1, weight=0)
+        self.status_label = ctk.CTkLabel(
+            label_row, text="", font=ui_font(11), text_color=TEXT_MUTED,
+            anchor="w", height=18
+        )
+        self.label = ctk.CTkLabel(label_row, text="0%", font=ui_font(11), anchor="e", height=18)
+        self.status_label.grid(row=0, column=0, sticky="ew", pady=0)
+        self.label.grid(row=0, column=1, sticky="e", pady=0)
         self._normal_color = self.bar.cget("progress_color")
         self._logical_value = 0.0
         self._visual_value = 0.0
         self._animating = False
         self._speed = 0.03
+
+    def set_status(self, text="", color=None):
+        if not self.winfo_exists():
+            return
+        self.status_label.configure(text=str(text or ""), text_color=color or TEXT_MUTED)
 
     def update(self, value):
         if not self._enabled:
@@ -256,7 +279,7 @@ class ProgressBar(ctk.CTkFrame):
         self.label.configure(text=f"{int(self._visual_value * 100)}%")
         self._after_id = self.after(16, self._animate_step)
 
-    def mark_finished(self):
+    def mark_finished(self, text=""):
         if self._after_id:
             try:
                 self.after_cancel(self._after_id)
@@ -269,6 +292,7 @@ class ProgressBar(ctk.CTkFrame):
         self.bar.configure(progress_color="#22c55e")
         self.bar.set(1.0)
         self.label.configure(text="100%")
+        self.set_status(text, color="#22c55e")
 
     def reset(self):
         self._enabled = False
@@ -284,6 +308,7 @@ class ProgressBar(ctk.CTkFrame):
         self.bar.configure(progress_color=self._normal_color)
         self.bar.set(0)
         self.label.configure(text="0%")
+        self.set_status("")
         self._enabled = True
 
 

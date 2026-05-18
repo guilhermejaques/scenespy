@@ -346,8 +346,8 @@ class ScenespyApp(ctk.CTk):
         self.log.set_mode(mode)
         self.set_ui_state(True)
         self.after(0, self._finalize_start_ui)
-        if self.log:
-            self.log.append_message("Starting...", kind="info")
+        if self.progress:
+            self.after(0, lambda: self.progress.set_status("Starting..."))
 
         if self.preview_frame:
             self.after(0, self.preview_frame.show_loading)
@@ -657,15 +657,14 @@ class ScenespyApp(ctk.CTk):
         if self.progress and reason in ("stop", "reset"):
             self.after(0, self.progress.reset)
         elif self.progress and reason == "finish":
-            self.after(0, self.progress.mark_finished)
+            msg = "Process finished"
+            if total_time:
+                msg += f" {total_time}"
+            self.after(0, lambda text=msg: self.progress.mark_finished(text))
         if self.log:
             if reason == "stop":
                 self.log.show_message("Process stopped")
             elif reason == "finish":
-                msg = "Process finished"
-                if total_time:
-                    msg += f" {total_time}"
-                self.log.write_finished(msg)
                 if warning_message:
                     self.log.append_message(warning_message, kind="warning")
         self.after(1000, gc.collect)
