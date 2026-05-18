@@ -123,6 +123,13 @@ class FaceDetectionEngine:
         skin = cv2.inRange(ycrcb, (0, 133, 77), (255, 173, 127))
         return skin.mean() / 255
 
+    def _is_low_saturation_face(self, face):
+        if face is None or face.size == 0:
+            return False
+        hsv = cv2.cvtColor(face, cv2.COLOR_BGR2HSV)
+        saturation = hsv[:, :, 1]
+        return float(saturation.mean()) < 18.0
+
     def _valid_landmarks(self, face):
         if self._stop or self.mp_face is None:
             return False
@@ -439,6 +446,8 @@ class FaceDetectionEngine:
                         continue
                     skin_ratio = self._skin_ratio(face_raw)
                     skin_min = {"Low": 0.12, "Normal": 0.04, "High": 0.0}.get(self.profile, 0.04)
+                    if skin_min > 0.0 and self._is_low_saturation_face(face_raw):
+                        skin_min = 0.0
                     if skin_ratio < skin_min:
                         continue
 
