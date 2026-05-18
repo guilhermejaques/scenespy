@@ -18,6 +18,7 @@ class ScenespyApp(ctk.CTk):
         self.starting = False
         self.stop_pending = False
         self.batch_stop = False
+        self._closing = False
         self._start_after_id = None
         self._start_args = None
         self.resizable(False, False)
@@ -30,6 +31,7 @@ class ScenespyApp(ctk.CTk):
         self.saved_settings = load_settings()
 
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self.close_app)
 
     def _set_app_icon(self):
         icon_ico = os.path.join(IMAGE_DIR, "x.ico")
@@ -100,7 +102,7 @@ class ScenespyApp(ctk.CTk):
             border_color=BORDER_SOFT, text_color=TEXT_MUTED,
             font=ui_font(9), command=self.open_github)
         self.github_btn.pack(side="right", anchor="e")
-        ToolTip(self.github_btn, "Open the Scenespy repository.")
+        ToolTip(self.github_btn, "Visit the Scenespy repository for more information!")
         self.video_selector = FileSelector(files, "Source video(s)")
         self.video_selector.pack(fill="x", padx=12)
         self.output_selector = DirectorySelector(files, "Output folder")
@@ -134,7 +136,7 @@ class ScenespyApp(ctk.CTk):
         self._attach_tooltips(self.mode_radios, {
             "scene": "Finds visual scene changes and exports each detected scene as a clip.",
             "interval": "Splits the video into equal-length clips using the seconds value below.",
-            "faces": "Scans frames for faces and saves the best face images instead of video clips.",
+            "faces": "Scans video frames for human faces and saves the best facial images.",
         })
 
         vcmd = (self.register(self._validate_interval), "%P")
@@ -159,9 +161,12 @@ class ScenespyApp(ctk.CTk):
         group2.pack(fill="x", padx=12)
         self.profile_radios = group2.radios
         self._attach_tooltips(self.profile_radios, {
-            "Low": "Fewer cuts. Best when you want longer clips and fewer false positives.",
-            "Normal": "Balanced scene detection for most videos.",
-            "High": "More cuts. Useful for fast edits, but may split scenes more aggressively.",
+            "Low": "Lower sensitivity in the detection and cutting of scenes and faces. "
+                   "It can work well in videos with long sequences and in the search for more visible faces.",
+            "Normal": "Balanced sensitivity in the detection and cutting of scenes and faces. "
+                      "Middle ground between Low and High.",
+            "High": "Greater sensitivity in the detection and cutting of scenes and faces. "
+                    "It can work well in videos with short sequences and in the search for faces that are more difficult to identify.",
             "Auto": "Adapts detection settings from the video length and motion profile.",
         })
 
@@ -385,7 +390,9 @@ class ScenespyApp(ctk.CTk):
         engine = self.engine
         if not engine:
             return
-        self.start_btn.configure(text="Stopping...", state="disabled")
+        self.start_btn.configure(
+            text="Stopping...", state="disabled",
+            text_color="white", text_color_disabled="white")
         threading.Thread(target=self._stop_engine, args=(engine,), daemon=True).start()
 
     def _stop_engine(self, engine):
@@ -393,6 +400,36 @@ class ScenespyApp(ctk.CTk):
             engine.stop()
         except Exception as e:
             log_crash(f"Engine stop failed: {e}")
+
+    def close_app(self):
+        if self._closing:
+            return
+        self._closing = True
+        self.batch_stop = True
+        self.stop_pending = True
+        self.running = False
+        self.starting = False
+        if self._start_after_id is not None:
+            try:
+                self.after_cancel(self._start_after_id)
+            except Exception:
+                pass
+            self._start_after_id = None
+        self._start_args = None
+        try:
+            if self.engine:
+                self.engine.stop()
+        except Exception as e:
+            log_crash(f"Engine shutdown failed: {e}")
+        self.engine = None
+        try:
+            terminate_all_child_processes(grace_seconds=0.3)
+        except Exception as e:
+            log_crash(f"Child process shutdown failed: {e}")
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
     def _cooldown_between_videos(self):
         gc.collect()
@@ -448,6 +485,10 @@ class ScenespyApp(ctk.CTk):
                             engine.add_temp_file(temp_file)
                         self.engine = engine
                         result = engine.run(scene_mode=scene_mode)
+
+                    if self.batch_stop or self.stop_pending or getattr(engine, "_stop", False):
+                        stopped = True
+                        break
 
                     failed_cuts = int(getattr(engine, "failed", 0))
                     if result and failed_cuts:
@@ -531,7 +572,8 @@ class ScenespyApp(ctk.CTk):
         if self.preview_frame:
             self.preview_frame.hide_loading()
         self.start_btn.configure(text="Start", fg_color=ACCENT,
-                                 hover_color="#4f46e5", state="normal")
+                                 hover_color="#4f46e5", text_color="white",
+                                 text_color_disabled="white", state="normal")
         self.set_ui_state(False)
         if stopped:
             self.cleanup_process(reason="stop")
@@ -646,4 +688,5 @@ class ScenespyApp(ctk.CTk):
         return 1 <= int(value) <= 18000
 
     def _finalize_start_ui(self):
-        self.start_btn.configure(text="Stop ", fg_color=DANGER, hover_color="#dc2626")
+        self.start_btn.configure(text="Stop ", fg_color=DANGER, hover_color="#dc2626",
+                                 text_color="white", text_color_disabled="white")

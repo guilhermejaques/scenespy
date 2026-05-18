@@ -262,6 +262,8 @@ class SceneEngine:
                 self.log.after(0, lambda: self.log.write_status(detected=self.detected, cut=0, eta="--:--"))
 
             self._cut_scenes(scenes)
+            if self._stop:
+                return False
         finally:
             if self._analysis_mosaic:
                 self._analysis_mosaic.stop()
@@ -975,6 +977,8 @@ class SceneEngine:
                 _cut_one(tasks[0])
                 self.done = 1
             except Exception as cut_error:
+                if self._stop or str(cut_error) == "Stopped":
+                    return
                 failure = self._record_cut_failure(tasks[0], cut_error)
                 if self.log:
                     err_msg = str(cut_error)[:80] or "Unknown error"
@@ -998,6 +1002,9 @@ class SceneEngine:
                         with self._cut_lock:
                             self.done += 1
                     except Exception as cut_error:
+                        if self._stop or str(cut_error) == "Stopped":
+                            pool.shutdown(wait=False)
+                            return
                         task = futures[future]
                         failure = self._record_cut_failure(task, cut_error)
                         print(f"[CUT ERROR] {cut_error}")
@@ -1240,6 +1247,7 @@ class SceneEngine:
             stderr=subprocess.PIPE,
             **kwargs
         )
+        register_child_process(proc)
         self._ffmpeg_proc = proc
         with self._ffmpeg_proc_lock:
             self._ffmpeg_procs.add(proc)
@@ -1251,10 +1259,22 @@ class SceneEngine:
             stdout, stderr = proc.communicate()
             return subprocess.CompletedProcess(cmd, -9, stdout, stderr)
         finally:
+            unregister_child_process(proc)
             with self._ffmpeg_proc_lock:
                 self._ffmpeg_procs.discard(proc)
             if self._ffmpeg_proc is proc:
                 self._ffmpeg_proc = None
+
+    def _ffmpeg_was_stopped(self, result):
+        if self._stop:
+            return True
+        if not result:
+            return False
+        try:
+            stderr = result.stderr.decode(errors="ignore") if isinstance(result.stderr, bytes) else str(result.stderr or "")
+        except Exception:
+            stderr = ""
+        return result.returncode == -9 and "Stopped" in stderr
 
     def _run_ffmpeg_copy(self, start, end, output):
         duration = end - start
@@ -1266,6 +1286,8 @@ class SceneEngine:
                "-muxpreload", "0", "-muxdelay", "0", output]
         result = self._run_ffmpeg_tracked(cmd, timeout=300)
         if result.returncode != 0:
+            if self._ffmpeg_was_stopped(result):
+                raise RuntimeError("Stopped")
             raise RuntimeError(result.stderr.decode(errors="ignore")[:300] or "FFmpeg copy failed")
 
     def _has_audio_stream(self):
@@ -1331,6 +1353,9 @@ class SceneEngine:
 
         result = self._run_ffmpeg_tracked(cmd, timeout=300)
 
+        if self._ffmpeg_was_stopped(result):
+            raise RuntimeError("Stopped")
+
         if result.returncode != 0 and encoder != "cpu":
             codec_fallback = ["-c:v", "libx264", "-crf", "16", "-preset", "medium"]
             cmd = ["ffmpeg", "-y", "-ss", f"{aligned_start:.6f}", "-i", input_file,
@@ -1339,6 +1364,8 @@ class SceneEngine:
                    "-pix_fmt", "yuv420p", *audio_opts,
                    "-movflags", "+faststart", output]
             result2 = self._run_ffmpeg_tracked(cmd, timeout=300)
+            if self._ffmpeg_was_stopped(result2):
+                raise RuntimeError("Stopped")
             if result2.returncode == 0:
                 return
             print("FFMPEG ERROR:\n", result.stderr.decode(errors="ignore"))

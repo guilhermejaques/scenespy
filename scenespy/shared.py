@@ -9,6 +9,7 @@ import time
 import datetime
 import json
 import gc
+import atexit
 import bisect
 import textwrap
 import traceback
@@ -43,6 +44,8 @@ EXECUTABLE_PATHS = {}
 _CRASH_LOG_HANDLE = None
 _REGISTERED_FONT_PATHS = []
 _ACTIVE_UI_FONT_FAMILY = UI_FONT_FAMILY
+_CHILD_PROCS = set()
+_CHILD_PROCS_LOCK = threading.Lock()
 
 
 def _fallback_ui_font_family():
@@ -655,7 +658,48 @@ def run_hidden(cmd, **kwargs):
     cmd = normalize_command(cmd)
     if sys.platform == "win32":
         kwargs.setdefault("creationflags", CREATE_NO_WINDOW)
-    return subprocess.run(cmd, **kwargs)
+    capture_output = kwargs.pop("capture_output", False)
+    timeout = kwargs.pop("timeout", None)
+    check = kwargs.pop("check", False)
+    input_data = kwargs.pop("input", None)
+    if capture_output:
+        if kwargs.get("stdout") is not None or kwargs.get("stderr") is not None:
+            raise ValueError("stdout and stderr arguments may not be used with capture_output.")
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
+    if input_data is not None:
+        kwargs.setdefault("stdin", subprocess.PIPE)
+    proc = subprocess.Popen(cmd, **kwargs)
+    register_child_process(proc)
+    try:
+        stdout, stderr = proc.communicate(input=input_data, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        terminate_process(proc)
+        stdout, stderr = proc.communicate()
+        e.output = stdout
+        e.stderr = stderr
+        raise
+    finally:
+        unregister_child_process(proc)
+    result = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    if check and result.returncode:
+        raise subprocess.CalledProcessError(
+            result.returncode, cmd, output=stdout, stderr=stderr)
+    return result
+
+
+def register_child_process(proc):
+    if not proc:
+        return
+    with _CHILD_PROCS_LOCK:
+        _CHILD_PROCS.add(proc)
+
+
+def unregister_child_process(proc):
+    if not proc:
+        return
+    with _CHILD_PROCS_LOCK:
+        _CHILD_PROCS.discard(proc)
 
 
 def terminate_process(proc, grace_seconds=0.5):
@@ -675,11 +719,21 @@ def terminate_process(proc, grace_seconds=0.5):
         pass
 
 
+def terminate_all_child_processes(grace_seconds=0.5):
+    with _CHILD_PROCS_LOCK:
+        procs = list(_CHILD_PROCS)
+    for proc in procs:
+        terminate_process(proc, grace_seconds=grace_seconds)
+    with _CHILD_PROCS_LOCK:
+        _CHILD_PROCS.difference_update(procs)
+
+
 def run_hidden_cancelable(cmd, stop_cb=None, poll_interval=0.05, **kwargs):
     cmd = normalize_command(cmd)
     if sys.platform == "win32":
         kwargs.setdefault("creationflags", CREATE_NO_WINDOW)
     proc = subprocess.Popen(cmd, **kwargs)
+    register_child_process(proc)
     try:
         while proc.poll() is None:
             if stop_cb and stop_cb():
@@ -691,13 +745,21 @@ def run_hidden_cancelable(cmd, stop_cb=None, poll_interval=0.05, **kwargs):
     except Exception:
         terminate_process(proc)
         raise
+    finally:
+        unregister_child_process(proc)
 
 
 def check_output_hidden(cmd, **kwargs):
     cmd = normalize_command(cmd)
     if sys.platform == "win32":
         kwargs.setdefault("creationflags", CREATE_NO_WINDOW)
-    return subprocess.check_output(cmd, **kwargs)
+    kwargs.setdefault("stdout", subprocess.PIPE)
+    kwargs.setdefault("check", True)
+    result = run_hidden(cmd, **kwargs)
+    return result.stdout
+
+
+atexit.register(terminate_all_child_processes)
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
