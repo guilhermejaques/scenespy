@@ -455,6 +455,7 @@ class ScenespyApp(ctk.CTk):
                         f"Processing {i}/{n}: {b}", kind="info"))
                 if self.progress:
                     self.after(0, self.progress.reset)
+                    self.after(0, lambda: self.progress.set_status("Preparing video..."))
 
                 result = False
                 error_msg = None

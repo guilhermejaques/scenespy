@@ -962,6 +962,7 @@ class SceneEngine:
         self._cut_lock = threading.Lock()
         if self.progress:
             label = "Cutting scenes..." if self.scene_mode else "Cutting segments..."
+            self.progress.after(0, self.progress.reset)
             self.progress.after(0, lambda text=label: self.progress.set_status(text))
 
         keyframes = self._get_keyframes() or [0.0]

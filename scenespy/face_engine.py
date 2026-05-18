@@ -343,6 +343,8 @@ class FaceDetectionEngine:
         cap = cv2.VideoCapture(self.video)
         self._cap = cap
         try:
+            if self.progress and self._ui_alive:
+                self.progress.after(0, lambda: self.progress.set_status("Detecting faces..."))
             fps, total_frames = self._get_video_timing(cap)
 
             tracks = []
