@@ -150,7 +150,7 @@ No Windows, também é possível abrir sem manter o console visível:
 python Scenespy.pyw
 ```
 
-## Instalação CPU Only
+## Instalação para CPU apenas 
 
 Use esta opção se você não precisa de CUDA ou quer a instalação mais simples.
 
@@ -171,7 +171,7 @@ Com CPU:
 - **Detect faces** funciona, mas pode ser mais lento.
 - Aceleração NVIDIA/AMD/Intel/Apple pode não aparecer ou pode não ser usada.
 
-## Instalação com NVIDIA CUDA
+## Instalação com NVIDIA CUDA 
 
 CUDA só afeta o modo **Detect faces** quando PyTorch foi instalado com suporte à sua versão de CUDA. Ela também pode ajudar nos cortes de vídeo se o FFmpeg tiver suporte a NVENC.
 
