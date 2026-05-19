@@ -12,19 +12,19 @@ Face detection and cropping from video:
 
 <img src="https://private-user-images.githubusercontent.com/159738624/594887551-8bdfd2b3-a0b2-4244-97c0-bc078a1ff509.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzkyMDk4NjAsIm5iZiI6MTc3OTIwOTU2MCwicGF0aCI6Ii8xNTk3Mzg2MjQvNTk0ODg3NTUxLThiZGZkMmIzLWEwYjItNDI0NC05N2MwLWJjMDc4YTFmZjUwOS5wbmc_WC1BbXotQWxnb3JpdGhtPUFXUzQtSE1BQy1TSEEyNTYmWC1BbXotQ3JlZGVudGlhbD1BS0lBVkNPRFlMU0E1M1BRSzRaQSUyRjIwMjYwNTE5JTJGdXMtZWFzdC0xJTJGczMlMkZhd3M0X3JlcXVlc3QmWC1BbXotRGF0ZT0yMDI2MDUxOVQxNjUyNDBaJlgtQW16LUV4cGlyZXM9MzAwJlgtQW16LVNpZ25hdHVyZT0yZjliZjI5MDkxZmEyMGExMGMwODdkNDIyOGM0ZjBlYzFhMjFhOWVjZjA1NTQyMzBhZWIzZDlkM2UxYTk4NjY3JlgtQW16LVNpZ25lZEhlYWRlcnM9aG9zdCZyZXNwb25zZS1jb250ZW50LXR5cGU9aW1hZ2UlMkZwbmcifQ.r6DXsyZS5kGwZ7gSMTnOynajA0NNlzv0BOC7nfOgZjo" width="40%">
 
-***
+---
 Detection and cutting of video scenes:
 
 <img src="https://private-user-images.githubusercontent.com/159738624/594885670-649c86c9-1149-4148-a3ef-d1ecda397edd.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzkyMDk4NjUsIm5iZiI6MTc3OTIwOTU2NSwicGF0aCI6Ii8xNTk3Mzg2MjQvNTk0ODg1NjcwLTY0OWM4NmM5LTExNDktNDE0OC1hM2VmLWQxZWNkYTM5N2VkZC5wbmc_WC1BbXotQWxnb3JpdGhtPUFXUzQtSE1BQy1TSEEyNTYmWC1BbXotQ3JlZGVudGlhbD1BS0lBVkNPRFlMU0E1M1BRSzRaQSUyRjIwMjYwNTE5JTJGdXMtZWFzdC0xJTJGczMlMkZhd3M0X3JlcXVlc3QmWC1BbXotRGF0ZT0yMDI2MDUxOVQxNjUyNDVaJlgtQW16LUV4cGlyZXM9MzAwJlgtQW16LVNpZ25hdHVyZT0yZTgwMzVjMzI0NTIzYjBiZGU3ZmY5ZDRhODU3N2Y2ZGJiNDA5MDE4MmZlMzBiOTFhYmUxMGY5YTBjNDAxOWM4JlgtQW16LVNpZ25lZEhlYWRlcnM9aG9zdCZyZXNwb25zZS1jb250ZW50LXR5cGU9aW1hZ2UlMkZwbmcifQ.jYCGTleLn67XW6OJpb4qMwg8j-WWIYCE6cYVOXIYUOY" width="65%">
 
 <img src="https://private-user-images.githubusercontent.com/159738624/594885671-ae2498f9-720c-4b2e-b678-757703e9219d.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzkyMDk4NjUsIm5iZiI6MTc3OTIwOTU2NSwicGF0aCI6Ii8xNTk3Mzg2MjQvNTk0ODg1NjcxLWFlMjQ5OGY5LTcyMGMtNGIyZS1iNjc4LTc1NzcwM2U5MjE5ZC5wbmc_WC1BbXotQWxnb3JpdGhtPUFXUzQtSE1BQy1TSEEyNTYmWC1BbXotQ3JlZGVudGlhbD1BS0lBVkNPRFlMU0E1M1BRSzRaQSUyRjIwMjYwNTE5JTJGdXMtZWFzdC0xJTJGczMlMkZhd3M0X3JlcXVlc3QmWC1BbXotRGF0ZT0yMDI2MDUxOVQxNjUyNDVaJlgtQW16LUV4cGlyZXM9MzAwJlgtQW16LVNpZ25hdHVyZT0yNDE4N2NkZjhhY2RmYTY5NzgzNTg1ZGJhYWJjNTgxMDA0ZmJmZDZjODU0YTg5NzI0YjM1ZDRmZGJkYTBlZTU1JlgtQW16LVNpZ25lZEhlYWRlcnM9aG9zdCZyZXNwb25zZS1jb250ZW50LXR5cGU9aW1hZ2UlMkZwbmcifQ.G4PacTa4uYfHEHqY0gXyT1b2mnXUGrrFwQtdPg4MB4E" width="40%" alt="Output">
+
 ## O que ele faz
 
 - Detecta cortes de cena em vídeos.
 - Divide vídeos em segmentos por intervalo de segundos.
 - Detecta rostos e salva imagens dos melhores recortes encontrados.
 - Processa um ou vários vídeos em fila.
-- Mostra progresso, tempo estimado e prévia visual.
 - Cria uma pasta de saída organizada para cada processamento.
 - Gera arquivos de metadata como `scenes.json` e, quando necessário, `cut_errors.json`.
 
@@ -60,8 +60,8 @@ Os resultados serão criados dentro da pasta escolhida, em uma subpasta com data
 
 ## Sensibilidade
 
-- **Low**: detecta menos cortes. Melhor para vídeos calmos ou quando você quer evitar cortes falsos.
-- **Normal**: equilíbrio entre precisão e quantidade de cortes.
+- **Low**: detecta menos cortes. Melhor para vídeos calmos ou quando você quer evitar cortes falsos e fora de contexto. Pode ser bom para filmes, documentários e vídeos onde as sequências são mais longas.
+- **Normal**: equilíbrio entre precisão e quantidade de cortes. Teste em seu vídeo e veja os resultados. 
 - **High**: detecta mais cortes. Melhor para vídeos rápidos, trailers, clipes e conteúdos com muita ação.
 - **Auto**: tenta escolher parâmetros automaticamente com base no vídeo. Não é usado no modo de rostos.
 
@@ -76,9 +76,9 @@ Opções disponíveis:
 
 - **CPU**: opção mais compatível. Funciona em todos os modos, mas pode ser mais lenta.
 - **NVIDIA**: pode acelerar a codificação via FFmpeg/NVENC e também pode acelerar o modo de rostos via CUDA, se PyTorch com CUDA estiver instalado.
-- **AMD**: pode acelerar codificação de vídeo via FFmpeg/AMF em sistemas compatíveis. Não acelera o modo de rostos neste app.
-- **Intel**: pode acelerar codificação de vídeo via FFmpeg/QSV em sistemas compatíveis. Não acelera o modo de rostos neste app.
-- **Apple**: pode acelerar codificação de vídeo via FFmpeg/VideoToolbox no macOS. Não acelera o modo de rostos neste app.
+- **AMD**: pode acelerar codificação de vídeo via FFmpeg/AMF em sistemas compatíveis. Não acelera o modo de rostos.
+- **Intel**: pode acelerar codificação de vídeo via FFmpeg/QSV em sistemas compatíveis. Não acelera o modo de rostos.
+- **Apple**: pode acelerar codificação de vídeo via FFmpeg/VideoToolbox no macOS. Não acelera o modo de rostos. 
 
 Nem toda aceleração funciona em todos os computadores. Quando uma opção não está disponível, o app volta para CPU quando possível.
 
@@ -93,7 +93,7 @@ O app aceita vídeos como:
 - `.webm`
 - `.m4v`
 
-Arquivos inválidos, temporários ou corrompidos podem ser ignorados ou reparados automaticamente quando possível.
+Arquivos inválidos, temporários ou corrompidos podem ser ignorados ou reparados automaticamente quando possível. 
 
 ## Requisitos
 
@@ -442,49 +442,6 @@ Use Python 3.11. Algumas versões de Python podem não ter wheels compatíveis p
 ### Existem `opencv-python` e `opencv-contrib-python` instalados
 
 O app declara `opencv-contrib-python` porque o MediaPipe depende dele. O Ultralytics também pode instalar `opencv-python`. Se `python -m pip check` não apontar conflito e o app abrir normalmente, não há ação obrigatória.
-
-## Prós
-
-- Interface simples para tarefas que normalmente exigem terminal.
-- Suporte a múltiplos vídeos em fila.
-- Modos diferentes para necessidades diferentes.
-- Pode usar aceleração de hardware quando disponível.
-- Mantém metadata dos resultados gerados.
-- Usa fonte e assets embutidos para uma aparência mais consistente.
-
-## Limitações
-
-- Vídeos muito grandes podem demorar bastante.
-- O modo de rostos é mais pesado e depende de bibliotecas de IA.
-- Alguns vídeos corrompidos podem falhar mesmo após tentativa de reparo.
-- Aceleração de hardware depende do sistema, drivers e suporte do FFmpeg.
-- A detecção automática de cenas não é perfeita e pode variar conforme o tipo de vídeo.
-- AMD, Intel e Apple aceleram codificação de vídeo, mas não aceleram a inferência facial nesta versão.
-
-## Estrutura do projeto
-
-```text
-scenespy/
-  assets/
-    fonts/
-    images/
-  app.py
-  face_engine.py
-  scene_analysis.py
-  scene_engine.py
-  shared.py
-  widgets.py
-
-models/
-  yolov8n-face.pt
-
-bin/
-  README.md
-
-Scenespy.py
-Scenespy.pyw
-requirements.txt
-```
 
 ## Distribuição
 
