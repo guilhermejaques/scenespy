@@ -150,7 +150,7 @@ No Windows, também é possível abrir sem manter o console visível:
 python Scenespy.pyw
 ```
 
-## Instalação com CPU
+## Instalação CPU Only
 
 Use esta opção se você não precisa de CUDA ou quer a instalação mais simples.
 
