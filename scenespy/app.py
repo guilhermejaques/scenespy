@@ -76,6 +76,11 @@ class ScenespyApp(ctk.CTk):
             return None
         return f"{self._mode_label(mode)}: install missing requirements: {', '.join(missing)}."
 
+    def _visible_accel_options(self):
+        if sys.platform == "darwin":
+            return ["cpu", "apple"]
+        return ACCEL_OPTIONS
+
     def _show_mode_requirement_message(self, mode):
         message = self._mode_requirement_message(mode)
         if message and hasattr(self, "log"):
@@ -178,7 +183,7 @@ class ScenespyApp(ctk.CTk):
         )
         self.accel = ctk.StringVar(value="cpu")
         group3 = RadioGroup(accel_sec, self.accel,
-                            [(val.upper(), val) for val in ACCEL_OPTIONS],
+                            [(val.upper(), val) for val in self._visible_accel_options()],
                             radio_width=110)
         group3.pack(fill="x", padx=12)
         self.accel_radios = group3.radios
