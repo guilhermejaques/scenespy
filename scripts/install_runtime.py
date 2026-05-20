@@ -117,7 +117,7 @@ def ensure_ai_pack(torch_mode):
         "--index-url",
         torch_index_url(torch_mode),
     ])
-    run([py, "-m", "pip", "install", "--force-reinstall", *AI_PACK_PACKAGES])
+    run([py, "-m", "pip", "install", *AI_PACK_PACKAGES])
 
     code = (
         "import torch, torchvision, ultralytics, mediapipe; "
