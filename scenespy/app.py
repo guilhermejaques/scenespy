@@ -75,8 +75,8 @@ class ScenespyApp(ctk.CTk):
             return None
         if mode == "faces":
             return (
-                "Detect faces requires the dependency installer. "
-                "Run install_dependencies next to the app, restart Scenespy, "
+                "Detect faces requires the complete Scenespy runtime. "
+                "Install a full release or rebuild Scenespy with AI dependencies, "
                 f"then try again. Missing: {', '.join(missing)}."
             )
         return f"{self._mode_label(mode)}: install missing requirements: {', '.join(missing)}."
@@ -296,9 +296,6 @@ class ScenespyApp(ctk.CTk):
             if not os.path.isfile(video):
                 skipped.append((video, "File does not exist"))
                 continue
-            if not is_valid_video_file(video):
-                skipped.append((video, "Invalid or unsupported video file"))
-                continue
             valid_videos.append(video)
 
         self.cleanup_process(reason="reset")
@@ -474,6 +471,8 @@ class ScenespyApp(ctk.CTk):
                 temp_files = []
                 engine = None
                 try:
+                    if not is_valid_video_file(video):
+                        raise RuntimeError("Invalid or unsupported video file")
                     current_video = prepare_video_for_processing(
                         video, temp_files=temp_files,
                         stop_cb=lambda: self.batch_stop or self.stop_pending)

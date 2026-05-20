@@ -1,4 +1,4 @@
-# Dependencies installed by the optional Scenespy AI Pack.
+# AI dependencies bundled into full Scenespy releases.
 torch==2.5.1
 torchvision==0.20.1
 ultralytics==8.4.9

@@ -275,7 +275,7 @@ PREVIEW_MAX_WIDTH = 420
 PREVIEW_MAX_HEIGHT = 280
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 PROCESS_COOLDOWN_SECONDS = 1.25
-PROCESS_START_DELAY_SECONDS = 5.0
+PROCESS_START_DELAY_SECONDS = 0.1
 ANALYSIS_MOSAIC_INTERVAL_MIN = 10.0
 ANALYSIS_MOSAIC_INTERVAL_MAX = 20.0
 ANALYSIS_MOSAIC_MAX_SOURCES = 1
@@ -343,12 +343,8 @@ def detect_available_encoder_accel():
 
 def detect_available_inference_accel():
     available = {"cpu"}
-    if importlib.util.find_spec("torch"):
-        try:
-            if _ensure_torch() and torch.cuda.is_available():
-                available.add("nvidia")
-        except Exception:
-            pass
+    if importlib.util.find_spec("torch") and shutil.which("nvidia-smi"):
+        available.add("nvidia")
     return available
 
 
@@ -433,7 +429,7 @@ def validate_runtime_dependencies():
     message = (
         "Scenespy requires FFmpeg and FFprobe to process videos.\n\n"
         f"Missing: {', '.join(missing)}\n\n"
-        "Run the dependency installer next to Scenespy, install FFmpeg in PATH, "
+        "Install a complete Scenespy release, install FFmpeg in PATH, "
         "or place the binaries here:\n"
         f"{runtime_dir}\n\n"
         f"Bundled fallback path:\n{bundled_dir}"

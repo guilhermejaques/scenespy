@@ -1,4 +1,5 @@
-# Development dependencies for running every Scenespy mode from source.
+# Dependencies for running every Scenespy mode from source or building a full
+# distribution.
 -r requirements-base.txt
 -r requirements-ai.txt
 
@@ -6,6 +7,6 @@
 # - ffmpeg
 # - ffprobe
 #
-# CUDA face detection:
-# Install the torch/torchvision builds that match the target CUDA version before
-# installing this file, or reinstall them from the official PyTorch index after.
+# CUDA face detection builds:
+# Use scripts/install_build_dependencies.py --torch-mode auto|cpu|cuda before
+# packaging so the release contains the intended PyTorch wheel.
