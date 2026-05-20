@@ -1,12 +1,7 @@
-# Dependencies for running every Scenespy mode from source or building a full
-# distribution.
+# Source/development install. This runs every Scenespy mode from source.
 -r requirements-base.txt
 -r requirements-ai.txt
 
-# External executables required at runtime:
+# External executables required at runtime and installed separately:
 # - ffmpeg
 # - ffprobe
-#
-# CUDA face detection builds:
-# Use scripts/install_build_dependencies.py --torch-mode auto|cpu|cuda before
-# packaging so the release contains the intended PyTorch wheel.

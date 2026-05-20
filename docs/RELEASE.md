@@ -3,38 +3,22 @@
 Build each platform on that same platform. Do not build Windows, Linux, and
 macOS releases from one OS.
 
-The release target is now a complete app bundle/folder. Users should not need
-to run a second dependency installer to use `Scene detection`, `Every seconds`,
-or `Detect faces`.
+The release app is intentionally lightweight:
 
-## PyTorch mode
+- Torch, TorchVision, Ultralytics, and MediaPipe are not bundled.
+- FFmpeg and FFprobe are not bundled.
+- A runtime installer is shipped next to the app and installs those pieces on
+  the user's machine.
 
-Build scripts install the full runtime dependencies before PyInstaller runs.
-PyTorch can be selected with:
+## Requirements files
 
 ```text
-auto  Detect NVIDIA on the build machine and use CUDA there, otherwise CPU.
-cpu   Force CPU PyTorch.
-cuda  Force CUDA PyTorch and fail if CUDA is not usable during verification.
+requirements-base.txt  Bundled into the lightweight app.
+requirements-ai.txt    Used for source/dev installs and mirrored by runtime installer logic.
+requirements.txt       Source/dev convenience install: base + AI.
 ```
 
-Windows:
-
-```powershell
-.\scripts\build_windows.ps1 -TorchMode auto
-.\scripts\build_windows.ps1 -TorchMode cpu
-.\scripts\build_windows.ps1 -TorchMode cuda
-```
-
-Linux/macOS:
-
-```bash
-TORCH_MODE=auto ./scripts/build_linux.sh
-TORCH_MODE=cpu ./scripts/build_macos.sh
-```
-
-macOS defaults to CPU PyTorch. Apple VideoToolbox can still be used for video
-encoding when FFmpeg supports it.
+Build scripts install only `requirements-base.txt` plus PyInstaller.
 
 ## Windows
 
@@ -42,7 +26,6 @@ Prerequisites:
 
 - Python 3.11.
 - The project virtual environment, or a Python that can install dependencies.
-- FFmpeg files in `release-assets/windows/ffmpeg/`.
 - `models/yolov8n-face.pt`.
 
 Build the distributable folder:
@@ -64,6 +47,22 @@ release/Scenespy-windows-x64/
 release/Scenespy-windows-x64.zip
 ```
 
+User installation:
+
+```text
+Scenespy-windows-x64/
+  Scenespy.exe
+  install_runtime_windows.bat
+  install_runtime_windows.ps1
+  _internal/dependencies/install_runtime.py
+```
+
+The user runs `install_runtime_windows.bat` once. It installs:
+
+- a private Python 3.11 under `%LOCALAPPDATA%/Scenespy/python311/`;
+- FFmpeg/FFprobe from the Gyan.dev essentials build into `%LOCALAPPDATA%/Scenespy/runtime/`;
+- Torch CPU or CUDA plus AI packages into `%LOCALAPPDATA%/Scenespy/ai-pack/`.
+
 ## Linux
 
 Run this on the target Linux family:
@@ -84,8 +83,20 @@ release/Scenespy-linux-x64/
 release/Scenespy-linux-x64.tar.gz
 ```
 
-For broad compatibility, build on an older Ubuntu LTS rather than a very new
-distribution.
+User installation:
+
+```bash
+tar -xzf Scenespy-linux-x64.tar.gz
+cd Scenespy-linux-x64
+./install_runtime.sh
+./Scenespy
+```
+
+The runtime installer installs:
+
+- a private Python 3.11 from `python-build-standalone` under `~/.config/scenespy/python311/`;
+- FFmpeg/FFprobe through `apt`, `dnf`, or `pacman`;
+- Torch CPU or CUDA plus AI packages into `~/.config/scenespy/ai-pack/`.
 
 ## macOS
 
@@ -103,80 +114,53 @@ The release is:
 release/Scenespy-macos/Scenespy.app
 ```
 
-Build Apple Silicon and Intel releases separately unless you intentionally set
-up a universal Python environment.
+User installation:
 
-## FFmpeg
-
-Scenespy first checks bundled paths under the frozen app:
-
-```text
-_internal/bin/windows/ffmpeg.exe
-_internal/bin/windows/ffprobe.exe
-_internal/bin/linux/ffmpeg
-_internal/bin/linux/ffprobe
-bin/macos/ffmpeg
-bin/macos/ffprobe
+```bash
+cd Scenespy-macos
+./install_runtime.sh
+open Scenespy.app
 ```
 
-If bundled binaries are absent, it falls back to the system `PATH`.
+The runtime installer installs:
 
-Windows builds require `release-assets/windows/ffmpeg/` and copy those files
-into the generated release. Linux and macOS builds copy matching
-`release-assets/<platform>/ffmpeg/` files when present.
+- a private Python 3.11 from `python-build-standalone` under
+  `~/Library/Application Support/Scenespy/python311/`;
+- FFmpeg/FFprobe through Homebrew when they are not already in PATH;
+- Torch CPU plus AI packages into `~/Library/Application Support/Scenespy/ai-pack/`.
 
-## What goes into the release
+## Torch selection
 
-The Windows ZIP contains:
-
-```text
-Scenespy-windows-x64/
-  Scenespy.exe
-  _internal/
-    bin/windows/ffmpeg.exe
-    bin/windows/ffprobe.exe
-    models/yolov8n-face.pt
-    scenespy/assets/
-    torch/
-    torchvision/
-    ultralytics/
-    mediapipe/
-    Base Python libraries and DLLs collected by PyInstaller
-```
-
-The release does not include:
+The runtime installer accepts:
 
 ```text
-.git/
-.venv/
-build/
-dist/
-release-assets/
-scripts/
-docs/
-source .py files as editable project files
-settings.json
-scenespy_crash.log
+auto  Detect NVIDIA with nvidia-smi and try CUDA, otherwise CPU.
+cpu   Force CPU PyTorch.
+cuda  Force CUDA PyTorch and fail if CUDA is not usable.
 ```
 
-User settings and crash logs are created on the user's machine, outside the
-installed app folder.
+Examples:
+
+```powershell
+.\install_runtime_windows.ps1 -TorchMode cpu
+.\install_runtime_windows.ps1 -TorchMode cuda
+```
+
+```bash
+TORCH_MODE=cpu ./install_runtime.sh
+TORCH_MODE=cuda ./install_runtime.sh
+```
+
+In `auto` mode, if CUDA install or verification fails, the installer falls back
+to CPU PyTorch.
 
 ## Smoke test
 
-Test the generated app outside the repository and without relying on the source
-virtual environment:
+Test the generated app outside the repository:
 
-1. Open the app.
-2. Confirm no missing FFmpeg warning appears.
-3. Process a small video with `Every seconds`.
-4. Process a small video with `Scene detection`.
-5. Run `Detect faces` once to confirm Torch, Ultralytics, MediaPipe, and the model load.
-6. Check `%APPDATA%/Scenespy/scenespy_crash.log` on Windows, or the equivalent
-   user config folder on Linux/macOS.
-
-## Size note
-
-The release is intentionally larger because it includes the face detection stack.
-CPU builds are more portable. CUDA builds are larger and should be built/tested
-on a machine with a compatible NVIDIA driver.
+1. Run the runtime installer.
+2. Open the app.
+3. Confirm no missing FFmpeg warning appears.
+4. Process a small video with `Every seconds`.
+5. Process a small video with `Scene detection`.
+6. Run `Detect faces` once to confirm Torch, Ultralytics, MediaPipe, and the model load.

@@ -1,30 +1,21 @@
 param(
-    [switch]$Zip,
-    [ValidateSet("auto", "cpu", "cuda")]
-    [string]$TorchMode = "auto"
+    [switch]$Zip
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $PSScriptRoot
-$ReleaseAssets = Join-Path $Root "release-assets\windows\ffmpeg"
 $DistApp = Join-Path $Root "dist\Scenespy"
 $ReleaseDir = Join-Path $Root "release"
 $ReleaseApp = Join-Path $ReleaseDir "Scenespy-windows-x64"
-$RuntimeBin = Join-Path $ReleaseApp "_internal\bin\windows"
+$DependenciesDir = Join-Path $ReleaseApp "_internal\dependencies"
 $ZipPath = Join-Path $ReleaseDir "Scenespy-windows-x64.zip"
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 $Python = if (Test-Path $VenvPython) { $VenvPython } else { "python" }
 
 Set-Location $Root
 
-if (-not (Test-Path (Join-Path $ReleaseAssets "ffmpeg.exe"))) {
-    throw "Missing ffmpeg.exe in $ReleaseAssets"
-}
-if (-not (Test-Path (Join-Path $ReleaseAssets "ffprobe.exe"))) {
-    throw "Missing ffprobe.exe in $ReleaseAssets"
-}
 if (-not (Test-Path (Join-Path $Root "models\yolov8n-face.pt"))) {
     throw "Missing models\yolov8n-face.pt"
 }
@@ -42,7 +33,7 @@ if (Test-Path (Join-Path $Root "dist")) {
     Remove-Item -LiteralPath (Join-Path $Root "dist") -Recurse -Force
 }
 
-& $Python scripts\install_build_dependencies.py --torch-mode $TorchMode
+& $Python scripts\install_build_dependencies.py
 & $Python -m PyInstaller --clean --noconfirm --distpath $ReleaseDir Scenespy.spec
 
 if (-not (Test-Path (Join-Path $ReleaseApp "Scenespy.exe"))) {
@@ -51,15 +42,11 @@ if (-not (Test-Path (Join-Path $ReleaseApp "Scenespy.exe"))) {
 if (-not (Test-Path (Join-Path $ReleaseApp "_internal\models\yolov8n-face.pt"))) {
     throw "Build finished, but yolov8n-face.pt was not found in $ReleaseApp\_internal\models"
 }
-if (-not (Test-Path (Join-Path $ReleaseApp "_internal\torch"))) {
-    throw "Build finished, but torch was not bundled in $ReleaseApp\_internal"
-}
-if (-not (Test-Path (Join-Path $ReleaseApp "_internal\ultralytics"))) {
-    throw "Build finished, but ultralytics was not bundled in $ReleaseApp\_internal"
-}
 
-New-Item -ItemType Directory -Force -Path $RuntimeBin | Out-Null
-Copy-Item -Path (Join-Path $ReleaseAssets "*") -Destination $RuntimeBin -Force
+New-Item -ItemType Directory -Force -Path $DependenciesDir | Out-Null
+Copy-Item -Path (Join-Path $Root "scripts\install_runtime.py") -Destination $DependenciesDir -Force
+Copy-Item -Path (Join-Path $Root "scripts\install_runtime_windows.ps1") -Destination $ReleaseApp -Force
+Copy-Item -Path (Join-Path $Root "scripts\install_runtime_windows.bat") -Destination $ReleaseApp -Force
 
 if ($Zip) {
     Compress-Archive -Path $ReleaseApp -DestinationPath $ZipPath -CompressionLevel Optimal

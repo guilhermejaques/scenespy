@@ -75,8 +75,8 @@ class ScenespyApp(ctk.CTk):
             return None
         if mode == "faces":
             return (
-                "Detect faces requires the complete Scenespy runtime. "
-                "Install a full release or rebuild Scenespy with AI dependencies, "
+                "Detect faces requires the Scenespy runtime installer. "
+                "Run install_runtime next to the app, restart Scenespy, "
                 f"then try again. Missing: {', '.join(missing)}."
             )
         return f"{self._mode_label(mode)}: install missing requirements: {', '.join(missing)}."

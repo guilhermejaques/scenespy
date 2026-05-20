@@ -24,10 +24,6 @@ hiddenimports = []
 for package in (
     "customtkinter",
     "scenedetect",
-    "torch",
-    "torchvision",
-    "ultralytics",
-    "mediapipe",
 ):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas
@@ -44,7 +40,13 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["torchaudio"],
+    excludes=[
+        "torch",
+        "torchvision",
+        "torchaudio",
+        "ultralytics",
+        "mediapipe",
+    ],
     noarchive=False,
     optimize=0,
 )

@@ -1,4 +1,4 @@
-# Runtime dependencies bundled into the base Scenespy app.
+# Runtime dependencies bundled into every lightweight Scenespy app build.
 customtkinter==5.2.2
 pillow==12.1.0
 numpy==2.4.2

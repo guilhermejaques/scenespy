@@ -429,7 +429,7 @@ def validate_runtime_dependencies():
     message = (
         "Scenespy requires FFmpeg and FFprobe to process videos.\n\n"
         f"Missing: {', '.join(missing)}\n\n"
-        "Install a complete Scenespy release, install FFmpeg in PATH, "
+        "Run install_runtime next to Scenespy, install FFmpeg in PATH, "
         "or place the binaries here:\n"
         f"{runtime_dir}\n\n"
         f"Bundled fallback path:\n{bundled_dir}"
