@@ -77,8 +77,7 @@ class FaceDetectionEngine:
         if not use_cuda:
             self.accel = "cpu"
 
-        model_path = os.path.join(APP_DIR, "models", "yolov8n-face.pt")
-        self.model = YOLO(model_path)
+        self.model = YOLO(MODEL_FILE)
         if self._stop:
             return
 

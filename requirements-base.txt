@@ -1,0 +1,7 @@
+# Runtime dependencies bundled into the base Scenespy app.
+customtkinter==5.2.2
+pillow==12.1.0
+numpy==2.4.2
+opencv-contrib-python==4.13.0.90
+av==16.1.0
+scenedetect==0.6.7.1

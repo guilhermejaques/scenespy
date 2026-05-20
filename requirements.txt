@@ -1,15 +1,6 @@
-# Runtime dependencies for Scenespy.
-# Keep these pinned so scene detection/cutting behavior stays reproducible.
-customtkinter==5.2.2
-pillow==12.1.0
-numpy==2.4.2
-opencv-contrib-python==4.13.0.90
-av==16.1.0
-scenedetect==0.6.7.1
-torch==2.5.1
-torchvision==0.20.1
-ultralytics==8.4.9
-mediapipe==0.10.9
+# Development dependencies for running every Scenespy mode from source.
+-r requirements-base.txt
+-r requirements-ai.txt
 
 # External executables required at runtime:
 # - ffmpeg

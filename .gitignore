@@ -9,6 +9,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+release/
 develop-eggs/
 dist/
 downloads/
@@ -31,6 +32,7 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+!Scenespy.spec
 
 # Installer logs
 pip-log.txt
@@ -187,6 +189,10 @@ settings.json
 
 # Local release assets
 release-assets/
+bin/windows/
+bin/linux/
+bin/macos/
+!bin/README.md
 
 # Visual Studio Code
 #  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 

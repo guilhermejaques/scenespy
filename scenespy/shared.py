@@ -17,6 +17,7 @@ import faulthandler
 import random
 import importlib.util
 import shutil
+import site
 import tkinter.filedialog as fd
 import tkinter.messagebox as mb
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -28,10 +29,53 @@ import cv2
 torch = None
 TORCH_AVAILABLE = False
 
-APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
-CRASH_LOG_FILE = os.path.join(APP_DIR, "scenespy_crash.log")
+
+def _resource_root():
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _user_data_dir():
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "Scenespy")
+    if sys.platform == "darwin":
+        return os.path.join(os.path.expanduser("~/Library/Application Support"), "Scenespy")
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "scenespy")
+
+
+def _ai_pack_dir():
+    if os.environ.get("SCENESPY_AI_PACK"):
+        return os.environ["SCENESPY_AI_PACK"]
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "Scenespy", "ai-pack")
+    return os.path.join(_user_data_dir(), "ai-pack")
+
+
+def _runtime_dir():
+    if os.environ.get("SCENESPY_RUNTIME"):
+        return os.environ["SCENESPY_RUNTIME"]
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "Scenespy", "runtime")
+    return os.path.join(_user_data_dir(), "runtime")
+
+
+APP_DIR = _resource_root()
+USER_DATA_DIR = _user_data_dir()
+try:
+    os.makedirs(USER_DATA_DIR, exist_ok=True)
+except Exception:
+    USER_DATA_DIR = APP_DIR
+SETTINGS_FILE = os.path.join(USER_DATA_DIR, "settings.json")
+CRASH_LOG_FILE = os.path.join(USER_DATA_DIR, "scenespy_crash.log")
 BIN_DIR = os.path.join(APP_DIR, "bin")
+RUNTIME_DIR = _runtime_dir()
+MODEL_FILE = os.path.join(APP_DIR, "models", "yolov8n-face.pt")
+AI_PACK_DIR = _ai_pack_dir()
 ASSETS_DIR = os.path.join(APP_DIR, "scenespy", "assets")
 FONT_DIR = os.path.join(ASSETS_DIR, "fonts")
 IMAGE_DIR = os.path.join(ASSETS_DIR, "images")
@@ -44,6 +88,31 @@ _REGISTERED_FONT_PATHS = []
 _ACTIVE_UI_FONT_FAMILY = UI_FONT_FAMILY
 _CHILD_PROCS = set()
 _CHILD_PROCS_LOCK = threading.Lock()
+_AI_PACK_PATHS_ADDED = False
+
+
+def _ai_pack_site_candidates():
+    if sys.platform == "win32":
+        yield os.path.join(AI_PACK_DIR, "Lib", "site-packages")
+    else:
+        lib_dir = os.path.join(AI_PACK_DIR, "lib")
+        if os.path.isdir(lib_dir):
+            for name in sorted(os.listdir(lib_dir)):
+                if name.startswith("python"):
+                    yield os.path.join(lib_dir, name, "site-packages")
+
+
+def add_ai_pack_to_path():
+    global _AI_PACK_PATHS_ADDED
+    if _AI_PACK_PATHS_ADDED:
+        return
+    for path in _ai_pack_site_candidates():
+        if os.path.isdir(path) and path not in sys.path:
+            site.addsitedir(path)
+    _AI_PACK_PATHS_ADDED = True
+
+
+add_ai_pack_to_path()
 
 
 def _fallback_ui_font_family():
@@ -275,11 +344,16 @@ def detect_available_encoder_accel():
 def detect_available_inference_accel():
     available = {"cpu"}
     if importlib.util.find_spec("torch"):
-        available.add("nvidia")
+        try:
+            if _ensure_torch() and torch.cuda.is_available():
+                available.add("nvidia")
+        except Exception:
+            pass
     return available
 
 
 def _missing_modules(*names):
+    add_ai_pack_to_path()
     return [name for name in names if importlib.util.find_spec(name) is None]
 
 
@@ -303,6 +377,8 @@ def _executable_names(name):
 
 def _bundled_executable_candidates(name):
     for filename in _executable_names(name):
+        yield os.path.join(RUNTIME_DIR, "bin", _platform_bin_dir(), filename)
+        yield os.path.join(RUNTIME_DIR, "bin", filename)
         yield os.path.join(BIN_DIR, _platform_bin_dir(), filename)
         yield os.path.join(BIN_DIR, filename)
 
@@ -352,13 +428,15 @@ def validate_runtime_dependencies():
     if not missing:
         return True, ""
 
+    runtime_dir = os.path.join(RUNTIME_DIR, "bin", _platform_bin_dir())
     bundled_dir = os.path.join(BIN_DIR, _platform_bin_dir())
     message = (
         "Scenespy requires FFmpeg and FFprobe to process videos.\n\n"
         f"Missing: {', '.join(missing)}\n\n"
-        "Install FFmpeg and make sure ffmpeg/ffprobe are available in PATH, "
-        "or place the bundled binaries here:\n"
-        f"{bundled_dir}"
+        "Run the dependency installer next to Scenespy, install FFmpeg in PATH, "
+        "or place the binaries here:\n"
+        f"{runtime_dir}\n\n"
+        f"Bundled fallback path:\n{bundled_dir}"
     )
     return False, message
 
@@ -599,6 +677,7 @@ def _safe_frame_index(v):
 def _ensure_torch():
     """Lazy-load torch / YOLO on first call."""
     global torch, TORCH_AVAILABLE
+    add_ai_pack_to_path()
     if torch is not None:
         return TORCH_AVAILABLE
     try:
@@ -613,6 +692,7 @@ def _ensure_torch():
 
 def _ensure_yolo():
     """Lazy-load ultralytics.YOLO on first call."""
+    add_ai_pack_to_path()
     try:
         from ultralytics import YOLO
         return YOLO
@@ -622,6 +702,7 @@ def _ensure_yolo():
 
 def _ensure_mediapipe():
     """Lazy-load mediapipe on first call."""
+    add_ai_pack_to_path()
     try:
         import mediapipe as mp
         return mp

@@ -50,13 +50,12 @@ class ScenespyApp(ctk.CTk):
                 log_crash(f"App icon .png load failed: {e}")
 
     def _check_mode_requirements(self):
-        model_path = os.path.join(APP_DIR, "models", "yolov8n-face.pt")
         requirements = {
             "scene": _missing_modules("scenedetect", "av") + _missing_executables("ffmpeg", "ffprobe"),
             "interval": _missing_executables("ffmpeg", "ffprobe"),
             "faces": _missing_modules("torch", "ultralytics", "mediapipe") + _missing_executables("ffmpeg", "ffprobe"),
         }
-        if not os.path.isfile(model_path):
+        if not os.path.isfile(MODEL_FILE):
             requirements["faces"].append("models/yolov8n-face.pt")
         return requirements
 
@@ -74,6 +73,12 @@ class ScenespyApp(ctk.CTk):
         missing = self._missing_for_mode(mode)
         if not missing:
             return None
+        if mode == "faces":
+            return (
+                "Detect faces requires the dependency installer. "
+                "Run install_dependencies next to the app, restart Scenespy, "
+                f"then try again. Missing: {', '.join(missing)}."
+            )
         return f"{self._mode_label(mode)}: install missing requirements: {', '.join(missing)}."
 
     def _visible_accel_options(self):

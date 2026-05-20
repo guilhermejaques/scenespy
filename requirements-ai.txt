@@ -1,0 +1,5 @@
+# Dependencies installed by the optional Scenespy AI Pack.
+torch==2.5.1
+torchvision==0.20.1
+ultralytics==8.4.9
+mediapipe==0.10.9
