@@ -64,6 +64,10 @@ def run(cmd):
     subprocess.check_call([str(part) for part in cmd])
 
 
+def command_output(cmd):
+    return subprocess.check_output([str(part) for part in cmd], text=True).strip()
+
+
 def command_exists(name):
     return shutil.which(name) is not None
 
@@ -96,6 +100,15 @@ def torch_index_url(mode):
     return CUDA_INDEX_URL if mode == "cuda" else CPU_INDEX_URL
 
 
+def write_installed_torch_constraints(py, target):
+    code = (
+        "from importlib.metadata import version; "
+        "print('torch==' + version('torch')); "
+        "print('torchvision==' + version('torchvision'))"
+    )
+    target.write_text(command_output([py, "-c", code]) + "\n", encoding="utf-8")
+
+
 def ensure_ai_pack(torch_mode):
     pack_dir = ai_pack_dir()
     py = venv_python(pack_dir)
@@ -111,13 +124,17 @@ def ensure_ai_pack(torch_mode):
         "-m",
         "pip",
         "install",
+        "--no-cache-dir",
         "--force-reinstall",
         f"torch=={TORCH_VERSION}",
         f"torchvision=={TORCHVISION_VERSION}",
         "--index-url",
         torch_index_url(torch_mode),
     ])
-    run([py, "-m", "pip", "install", *AI_PACK_PACKAGES])
+    with tempfile.TemporaryDirectory(prefix="scenespy-ai-constraints-") as tmp_name:
+        constraints = Path(tmp_name) / "constraints.txt"
+        write_installed_torch_constraints(py, constraints)
+        run([py, "-m", "pip", "install", "--no-cache-dir", "-c", constraints, *AI_PACK_PACKAGES])
 
     code = (
         "import torch, torchvision, ultralytics, mediapipe; "
