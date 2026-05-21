@@ -52,18 +52,31 @@ class FaceDetectionEngine:
         if self._stop:
             return
         if not _ensure_torch():
-            raise RuntimeError("Face detection requires PyTorch, but it is not installed.")
+            detail = shared.runtime_import_error_message("torch")
+            if detail:
+                raise RuntimeError("Face detection requires PyTorch.\n\n" + detail)
+            raise RuntimeError(
+                "Face detection requires PyTorch, but it was not found.\n\n"
+                f"AI pack folder: {shared.AI_PACK_DIR}\n"
+                "Run install_runtime next to the app, restart Scenespy, then try again."
+            )
         if self._stop:
             return
 
         YOLO = _ensure_yolo()
         if YOLO is None:
+            detail = shared.runtime_import_error_message("ultralytics")
+            if detail:
+                raise RuntimeError("Face detection requires ultralytics.\n\n" + detail)
             raise RuntimeError("ultralytics package not found.")
         if self._stop:
             return
 
         mp = _ensure_mediapipe()
         if mp is None:
+            detail = shared.runtime_import_error_message("mediapipe")
+            if detail:
+                raise RuntimeError("Face detection requires mediapipe.\n\n" + detail)
             raise RuntimeError("mediapipe package not found.")
         if self._stop:
             return
@@ -688,7 +701,8 @@ class FaceDetectionEngine:
                "-show_entries", "stream=avg_frame_rate,r_frame_rate",
                "-of", "json", self.video]
         try:
-            data = json.loads(check_output_hidden(cmd).decode(errors="ignore") or "{}")
+            data = json.loads(check_output_hidden_cancelable(
+                cmd, stop_cb=lambda: self._stop).decode(errors="ignore") or "{}")
             stream = (data.get("streams") or [{}])[0]
             return (
                 self._parse_frame_rate(stream.get("avg_frame_rate")) or
@@ -703,7 +717,8 @@ class FaceDetectionEngine:
                "-show_entries", "format=duration",
                "-of", "json", self.video]
         try:
-            data = json.loads(check_output_hidden(cmd).decode(errors="ignore") or "{}")
+            data = json.loads(check_output_hidden_cancelable(
+                cmd, stop_cb=lambda: self._stop).decode(errors="ignore") or "{}")
             stream = (data.get("streams") or [{}])[0]
             for value in (stream.get("nb_frames"), (stream.get("tags") or {}).get("NUMBER_OF_FRAMES")):
                 count = self._parse_int(value)

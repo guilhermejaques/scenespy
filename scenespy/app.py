@@ -18,9 +18,11 @@ class ScenespyApp(ctk.CTk):
         self.starting = False
         self.stop_pending = False
         self.batch_stop = False
+        self._batch_active = False
         self._closing = False
         self._start_after_id = None
         self._start_args = None
+        self._stop_watchdog_after_id = None
         self.resizable(False, False)
         self.preview_enabled = ENABLE_PREVIEW_DEFAULT
         self.available_encoder_accel = detect_available_encoder_accel()
@@ -372,6 +374,7 @@ class ScenespyApp(ctk.CTk):
             self.starting = False
             return
         self.starting = False
+        self._batch_active = True
         threading.Thread(
             target=self.run_batch,
             args=args,
@@ -381,6 +384,9 @@ class ScenespyApp(ctk.CTk):
     def stop_process(self):
         self.batch_stop = True
         self.stop_pending = True
+        self.start_btn.configure(
+            text="Stopping...", state="disabled",
+            text_color="white", text_color_disabled="white")
         if self._start_after_id is not None:
             try:
                 self.after_cancel(self._start_after_id)
@@ -395,14 +401,53 @@ class ScenespyApp(ctk.CTk):
             return
 
         engine = self.engine
-        if not engine:
+        self._schedule_stop_watchdog()
+        threading.Thread(target=self._stop_runtime, args=(engine,), daemon=True).start()
+
+    def _schedule_stop_watchdog(self):
+        if self._stop_watchdog_after_id is not None:
+            try:
+                self.after_cancel(self._stop_watchdog_after_id)
+            except Exception:
+                pass
+        self._stop_watchdog_after_id = self.after(5000, self._force_stop_ui_if_needed)
+
+    def _force_stop_ui_if_needed(self):
+        self._stop_watchdog_after_id = None
+        if not self.stop_pending:
             return
-        self.start_btn.configure(
-            text="Stopping...", state="disabled",
-            text_color="white", text_color_disabled="white")
-        threading.Thread(target=self._stop_engine, args=(engine,), daemon=True).start()
+        try:
+            terminate_all_child_processes(grace_seconds=0.2)
+        except Exception as e:
+            log_crash(f"Stop watchdog child cleanup failed: {e}")
+        if self.engine:
+            try:
+                self.engine.stop()
+            except Exception as e:
+                log_crash(f"Stop watchdog engine cleanup failed: {e}")
+        if self.running:
+            if self.log:
+                self.log.append_message("Stop took too long; forcing UI reset.", kind="warning")
+            self.reset_ui(stopped=True)
+
+    def _stop_runtime(self, engine):
+        if engine:
+            self._stop_engine(engine)
+        try:
+            terminate_all_child_processes(grace_seconds=0.3)
+        except Exception as e:
+            log_crash(f"Child process stop failed: {e}")
+
+        if not engine:
+            self.after(300, self._reset_if_stop_is_still_pending)
+
+    def _reset_if_stop_is_still_pending(self):
+        if self.stop_pending and self.running and not self.engine and not self.starting and not self._batch_active:
+            self.reset_ui(stopped=True)
 
     def _stop_engine(self, engine):
+        if not engine:
+            return
         try:
             engine.stop()
         except Exception as e:
@@ -422,6 +467,12 @@ class ScenespyApp(ctk.CTk):
             except Exception:
                 pass
             self._start_after_id = None
+        if self._stop_watchdog_after_id is not None:
+            try:
+                self.after_cancel(self._stop_watchdog_after_id)
+            except Exception:
+                pass
+            self._stop_watchdog_after_id = None
         self._start_args = None
         try:
             if self.engine:
@@ -471,8 +522,11 @@ class ScenespyApp(ctk.CTk):
                 temp_files = []
                 engine = None
                 try:
-                    if not is_valid_video_file(video):
+                    if not is_valid_video_file(video, stop_cb=lambda: self.batch_stop or self.stop_pending):
                         raise RuntimeError("Invalid or unsupported video file")
+                    if self.batch_stop or self.stop_pending:
+                        stopped = True
+                        break
                     current_video = prepare_video_for_processing(
                         video, temp_files=temp_files,
                         stop_cb=lambda: self.batch_stop or self.stop_pending)
@@ -563,7 +617,9 @@ class ScenespyApp(ctk.CTk):
         finally:
             self.engine = None
             self.starting = False
+            self._batch_active = False
             self._start_after_id = None
+            self._stop_watchdog_after_id = None
             self._start_args = None
             self.batch_stop = False
             self.stop_pending = False
@@ -578,6 +634,12 @@ class ScenespyApp(ctk.CTk):
             except Exception:
                 pass
             self._start_after_id = None
+        if self._stop_watchdog_after_id is not None:
+            try:
+                self.after_cancel(self._stop_watchdog_after_id)
+            except Exception:
+                pass
+            self._stop_watchdog_after_id = None
         self._start_args = None
         if self.preview_frame:
             self.preview_frame.hide_loading()
@@ -699,4 +761,3 @@ class ScenespyApp(ctk.CTk):
     def _finalize_start_ui(self):
         self.start_btn.configure(text="Stop ", fg_color=DANGER, hover_color="#dc2626",
                                  text_color="white", text_color_disabled="white")
-

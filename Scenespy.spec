@@ -3,7 +3,7 @@
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 
 root = Path.cwd()
@@ -19,7 +19,18 @@ datas = [
     (str(root / "models"), "models"),
 ]
 binaries = []
-hiddenimports = []
+hiddenimports = [
+    # External AI packs import torch at runtime. Because torch is excluded from
+    # the app bundle, PyInstaller does not see all stdlib modules torch imports.
+    "cProfile",
+    "modulefinder",
+    "pickletools",
+    "profile",
+    "pstats",
+    "timeit",
+]
+hiddenimports += collect_submodules("PIL")
+hiddenimports += collect_submodules("html")
 
 for package in (
     "customtkinter",

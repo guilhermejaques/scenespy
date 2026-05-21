@@ -206,8 +206,9 @@ class SceneEngine:
                 detected=self.detected, cut=0, eta=self._analysis_eta_text()))
 
     def run(self, scene_mode=True):
+        if self._stop:
+            return False
         self.scene_mode = scene_mode
-        self._stop = False
         self._preview_stop = False
         self._ui_alive = True
         self._analysis_ratio = 0.0
@@ -300,7 +301,8 @@ class SceneEngine:
                "stream=width,height,avg_frame_rate,r_frame_rate,bit_rate:stream_tags=rotate:stream_side_data=rotation:format=bit_rate,duration",
                "-of", "json", self.video]
         try:
-            data = json.loads(check_output_hidden(cmd).decode(errors="ignore") or "{}")
+            data = json.loads(check_output_hidden_cancelable(
+                cmd, stop_cb=lambda: self._stop).decode(errors="ignore") or "{}")
             stream = (data.get("streams") or [{}])[0]
             fmt = data.get("format") or {}
 
@@ -387,6 +389,8 @@ class SceneEngine:
                 detected=self.detected, cut=0, eta=self._analysis_eta_text()))
 
         threshold, min_dur = self._map_threshold()
+        if self._stop:
+            return []
         self._log_detection_stage("adaptive_threshold")
 
         result = _ensure_scenedetect()
@@ -449,7 +453,8 @@ class SceneEngine:
                 cmd = ["ffprobe", "-v", "error",
                        "-show_entries", "format=duration",
                        "-of", "default=noprint_wrappers=1:nokey=1", self.video]
-                video_duration = float(check_output_hidden(cmd).decode().strip())
+                video_duration = float(check_output_hidden_cancelable(
+                    cmd, stop_cb=lambda: self._stop).decode().strip())
                 self._total_frames = int(video_duration * fps)
             except Exception:
                 if self._total_frames is None:
@@ -458,7 +463,7 @@ class SceneEngine:
 
         def _progress_cb(frame_num, _):
             if self._stop:
-                return False
+                raise RuntimeError("Stopped")
 
             try:
                 frame_idx = _safe_frame_index(frame_num)
@@ -499,6 +504,8 @@ class SceneEngine:
             self.detected = len(scene_list)
             self._log_detection_stage("pyscenedetect")
         except Exception as e:
+            if self._stop or str(e) == "Stopped":
+                return []
             err_str = str(e).lower()
             needs_retry = (
                     "avcodec_send_packet" in err_str or
@@ -543,7 +550,7 @@ class SceneEngine:
 
                 if os.path.exists(fixed):
                     print(f"Using fixed video: {fixed}")
-                    if not is_valid_video_file(fixed):
+                    if not is_valid_video_file(fixed, stop_cb=lambda: self._stop):
                         print(f"Fixed file is corrupted, re-encoding again...")
                         remove_temp_file(fixed)
                         self._run_ffmpeg_tracked(
@@ -553,7 +560,7 @@ class SceneEngine:
                              "-c:a", "copy", fixed],
                             timeout=300
                         )
-                    if not os.path.exists(fixed) or not is_valid_video_file(fixed):
+                    if not os.path.exists(fixed) or not is_valid_video_file(fixed, stop_cb=lambda: self._stop):
                         print("ffmpeg re-encode failed, no valid fixed file")
                         if self.log:
                             self.log.after(0, lambda: self.log.append_message(
@@ -601,6 +608,8 @@ class SceneEngine:
                     )
                     self._write_analysis_status("running scene detector", 0.05)
                     scene_manager.detect_scenes(video=video, callback=_progress_cb)
+                    if self._stop:
+                        return []
                     scene_list = scene_manager.get_scene_list()
                     self.detected = len(scene_list)
                     self._log_detection_stage("pyscenedetect_fixed")
@@ -634,10 +643,14 @@ class SceneEngine:
                 pass
 
         scenes = self._compose_scene_list(scene_list, fps, min_dur)
+        if self._stop:
+            return []
         self.detected = len(scenes)
         return scenes
 
     def _compose_scene_list(self, scene_list, fps, min_dur):
+        if self._stop:
+            return []
         total_frames = self._total_frames
         if not total_frames:
             try:
@@ -663,14 +676,20 @@ class SceneEngine:
         profile = _profile_name(self.cfg)
         feature_cache = _build_transition_feature_cache(
             self.video, fps, total_frames, profile=profile, stop_cb=lambda: self._stop)
+        if self._stop:
+            return []
         self._log_detection_stage("transition_feature_cache")
         self._write_analysis_status("finding transitions", 0.58)
         gradual_candidates = _detect_gradual_transitions(
             self.video, fps, total_frames, profile=profile,
             stop_cb=lambda: self._stop, features=feature_cache)
+        if self._stop:
+            return []
         semantic_candidates = _detect_semantic_transitions(
             self.video, fps, total_frames, profile=profile,
             stop_cb=lambda: self._stop, features=feature_cache)
+        if self._stop:
+            return []
         self._log_detection_stage("transition_candidates")
 
         min_gap = self._boundary_min_gap_frames(fps, min_dur, profile)
@@ -680,11 +699,15 @@ class SceneEngine:
         candidates = _refine_scene_candidates(
             self.video, candidates, fps, total_frames, profile=profile,
             stop_cb=lambda: self._stop)
+        if self._stop:
+            return []
         self._log_detection_stage("candidate_refine")
         self._write_analysis_status("refining cuts", 0.70)
         candidates = self._merge_candidates(candidates, min_gap, total_frames)
         candidates = _add_candidate_context_scores(
             self.video, candidates, fps, total_frames, stop_cb=lambda: self._stop)
+        if self._stop:
+            return []
         self._log_detection_stage("candidate_context")
         self._write_analysis_status("checking context", 0.82)
         candidates, rejected = self._classify_candidates(candidates, fps, total_frames, profile, min_dur)
@@ -916,11 +939,12 @@ class SceneEngine:
     def _validate_cut_output(self, output, expected_duration):
         if not os.path.exists(output):
             raise RuntimeError("Output file was not created")
-        if not is_valid_video_file(output):
+        if not is_valid_video_file(output, stop_cb=lambda: self._stop):
             raise RuntimeError("Output file has no valid video stream")
         cmd = ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", output]
         try:
-            data = json.loads(check_output_hidden(cmd).decode(errors="ignore") or "{}")
+            data = json.loads(check_output_hidden_cancelable(
+                cmd, stop_cb=lambda: self._stop).decode(errors="ignore") or "{}")
             actual_duration = float((data.get("format") or {}).get("duration", 0.0))
         except Exception as e:
             raise RuntimeError(f"Could not validate output duration: {e}") from e
@@ -1106,7 +1130,7 @@ class SceneEngine:
         cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
                "-show_entries", "stream=avg_frame_rate",
                "-of", "default=noprint_wrappers=1:nokey=1", self.video]
-        num, den = check_output_hidden(cmd).decode().strip().split("/")
+        num, den = check_output_hidden_cancelable(cmd, stop_cb=lambda: self._stop).decode().strip().split("/")
         self._fps = float(num) / float(den)
         return self._fps
 
@@ -1118,7 +1142,8 @@ class SceneEngine:
                "-show_entries", "stream=nb_frames:stream_tags=NUMBER_OF_FRAMES,DURATION",
                "-of", "json", self.video]
         try:
-            data = json.loads(check_output_hidden(cmd).decode(errors="ignore") or "{}")
+            data = json.loads(check_output_hidden_cancelable(
+                cmd, stop_cb=lambda: self._stop).decode(errors="ignore") or "{}")
             stream = (data.get("streams") or [{}])[0]
             for value in (stream.get("nb_frames"), stream.get("tags", {}).get("NUMBER_OF_FRAMES")):
                 try:
@@ -1185,7 +1210,7 @@ class SceneEngine:
           - threshold: content_val scale (0-255), default=27.0
           - min_scene_len: in frames, default=15, minimum=1
         """
-        raw_t, raw_d = _adaptive_threshold(self.video)
+        raw_t, raw_d = _adaptive_threshold(self.video, stop_cb=lambda: self._stop)
 
         if self.cfg.get("ADAPTIVE"):
             threshold = 10.0 + (raw_t - 15.0) * (35.0 / 40.0)
@@ -1235,7 +1260,7 @@ class SceneEngine:
         cmd = ["ffprobe", "-v", "error",
                "-show_entries", "format=duration",
                "-of", "default=noprint_wrappers=1:nokey=1", self.video]
-        self._duration = float(check_output_hidden(cmd).decode().strip())
+        self._duration = float(check_output_hidden_cancelable(cmd, stop_cb=lambda: self._stop).decode().strip())
         return self._duration
 
     def _get_keyframes(self):
@@ -1244,7 +1269,9 @@ class SceneEngine:
         cmd = ["ffprobe", "-select_streams", "v", "-skip_frame", "nokey",
                "-show_entries", "frame=pkt_pts_time,best_effort_timestamp_time",
                "-loglevel", "error", "-of", "csv=p=0", self.video]
-        result = run_hidden(cmd, capture_output=True, text=True)
+        result = run_hidden_cancelable(cmd, stop_cb=lambda: self._stop, capture_output=True, text=True)
+        if result.returncode == -9:
+            return []
         keyframes = []
         for line in result.stdout.splitlines():
             for part in line.replace(",", " ").split():
@@ -1275,12 +1302,20 @@ class SceneEngine:
         with self._ffmpeg_proc_lock:
             self._ffmpeg_procs.add(proc)
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-            return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
-        except subprocess.TimeoutExpired:
-            terminate_process(proc)
-            stdout, stderr = proc.communicate()
-            return subprocess.CompletedProcess(cmd, -9, stdout, stderr)
+            deadline = time.time() + timeout if timeout is not None else None
+            while True:
+                try:
+                    stdout, stderr = proc.communicate(timeout=0.1)
+                    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+                except subprocess.TimeoutExpired:
+                    if self._stop:
+                        terminate_process(proc)
+                        stdout, stderr = proc.communicate()
+                        return subprocess.CompletedProcess(cmd, -9, stdout, stderr or b"Stopped")
+                    if deadline is not None and time.time() >= deadline:
+                        terminate_process(proc)
+                        stdout, stderr = proc.communicate()
+                        return subprocess.CompletedProcess(cmd, -9, stdout, stderr)
         finally:
             unregister_child_process(proc)
             with self._ffmpeg_proc_lock:
@@ -1320,7 +1355,8 @@ class SceneEngine:
                "-show_entries", "stream=index",
                "-of", "default=noprint_wrappers=1:nokey=1", self.video]
         try:
-            self._has_audio_cache = bool(check_output_hidden(cmd).decode().strip())
+            self._has_audio_cache = bool(check_output_hidden_cancelable(
+                cmd, stop_cb=lambda: self._stop).decode().strip())
         except Exception:
             self._has_audio_cache = False
         return self._has_audio_cache
@@ -1417,7 +1453,7 @@ class SceneEngine:
                "-show_entries", "stream=bit_rate",
                "-of", "default=noprint_wrappers=1:nokey=1", self.video]
         try:
-            return int(check_output_hidden(cmd).decode().strip())
+            return int(check_output_hidden_cancelable(cmd, stop_cb=lambda: self._stop).decode().strip())
         except Exception:
             return None
 
@@ -1465,4 +1501,3 @@ class SceneEngine:
                 Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
         except Exception:
             return None
-

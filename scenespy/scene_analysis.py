@@ -61,8 +61,10 @@ def _compute_ecr(gray1, gray2):
     return float(changed / total)
 
 
-def _adaptive_threshold(video_path):
+def _adaptive_threshold(video_path, stop_cb=None):
     """Estimate scene sensitivity from sampled motion, structure, and color changes."""
+    if stop_cb and stop_cb():
+        return 32.0, 4.0
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return 32.0, 4.0
@@ -102,49 +104,54 @@ def _adaptive_threshold(video_path):
     diff_y_list, diff_c_list, diff_hy_list, diff_hs_list = [], [], [], []
     diff_edge_list, diff_struct_list, clip_motion = [], [], []
 
-    for _i in range(num_clips):
-        pos = min(_i * frame_interval, max(0, int(total) - frames_per_clip))
-        cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
-        prev_y, prev_cbcr, prev_hist_y, prev_hist_hs = None, None, None, None
-        clip_y_diffs = []
+    try:
+        for _i in range(num_clips):
+            if stop_cb and stop_cb():
+                return 32.0, 4.0
+            pos = min(_i * frame_interval, max(0, int(total) - frames_per_clip))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
+            prev_y, prev_cbcr, prev_hist_y, prev_hist_hs = None, None, None, None
+            clip_y_diffs = []
 
-        for _j in range(frames_per_clip):
-            ret, frame = cap.read()
-            if not ret:
-                break
+            for _j in range(frames_per_clip):
+                if stop_cb and stop_cb():
+                    return 32.0, 4.0
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-            small = cv2.resize(frame, dim)
-            gray = cv2.cvtColor(small, BGR2GRAY)
-            ycrcb = cv2.cvtColor(small, BGR2YCrCb)
-            hsv = cv2.cvtColor(small, BGR2HSV)
-            cbcr = ycrcb[:, :, 1:]
+                small = cv2.resize(frame, dim)
+                gray = cv2.cvtColor(small, BGR2GRAY)
+                ycrcb = cv2.cvtColor(small, BGR2YCrCb)
+                hsv = cv2.cvtColor(small, BGR2HSV)
+                cbcr = ycrcb[:, :, 1:]
 
-            hist_y = cv2.calcHist([gray], [0], None, [32], [0, 256])
-            cv2.normalize(hist_y, hist_y, 0, 1, HIST_NORM)
-            hist_hs = cv2.calcHist([hsv], [0, 1], None, [16, 16], [0, 180, 0, 256])
-            cv2.normalize(hist_hs, hist_hs, 0, 1, HIST_NORM)
+                hist_y = cv2.calcHist([gray], [0], None, [32], [0, 256])
+                cv2.normalize(hist_y, hist_y, 0, 1, HIST_NORM)
+                hist_hs = cv2.calcHist([hsv], [0, 1], None, [16, 16], [0, 180, 0, 256])
+                cv2.normalize(hist_hs, hist_hs, 0, 1, HIST_NORM)
 
-            if prev_y is not None:
-                d_y = cv2.absdiff(gray, prev_y).mean()
-                d_c = cv2.absdiff(cbcr, prev_cbcr).mean()
-                d_hy = cv2.compareHist(prev_hist_y, hist_y, cv2.HISTCMP_BHATTACHARYYA)
-                d_hs = cv2.compareHist(prev_hist_hs, hist_hs, cv2.HISTCMP_BHATTACHARYYA)
-                d_edge = _compute_ecr(prev_y, gray)
-                d_struct = 1.0 - _compute_ssim_simplified(prev_y, gray)
-                diff_y_list.append(d_y)
-                diff_c_list.append(d_c)
-                diff_hy_list.append(d_hy)
-                diff_hs_list.append(d_hs)
-                diff_edge_list.append(d_edge)
-                diff_struct_list.append(d_struct)
-                clip_y_diffs.append(d_y)
+                if prev_y is not None:
+                    d_y = cv2.absdiff(gray, prev_y).mean()
+                    d_c = cv2.absdiff(cbcr, prev_cbcr).mean()
+                    d_hy = cv2.compareHist(prev_hist_y, hist_y, cv2.HISTCMP_BHATTACHARYYA)
+                    d_hs = cv2.compareHist(prev_hist_hs, hist_hs, cv2.HISTCMP_BHATTACHARYYA)
+                    d_edge = _compute_ecr(prev_y, gray)
+                    d_struct = 1.0 - _compute_ssim_simplified(prev_y, gray)
+                    diff_y_list.append(d_y)
+                    diff_c_list.append(d_c)
+                    diff_hy_list.append(d_hy)
+                    diff_hs_list.append(d_hs)
+                    diff_edge_list.append(d_edge)
+                    diff_struct_list.append(d_struct)
+                    clip_y_diffs.append(d_y)
 
-            prev_y, prev_cbcr, prev_hist_y, prev_hist_hs = gray, cbcr, hist_y, hist_hs
+                prev_y, prev_cbcr, prev_hist_y, prev_hist_hs = gray, cbcr, hist_y, hist_hs
 
-        if clip_y_diffs:
-            clip_motion.append(sum(clip_y_diffs) / len(clip_y_diffs))
-
-    cap.release()
+            if clip_y_diffs:
+                clip_motion.append(sum(clip_y_diffs) / len(clip_y_diffs))
+    finally:
+        cap.release()
     n = len(diff_y_list)
     if n < 8:
         return 32.0, 4.0

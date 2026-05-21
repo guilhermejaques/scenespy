@@ -28,6 +28,7 @@ import cv2
 
 torch = None
 TORCH_AVAILABLE = False
+LAST_IMPORT_ERRORS = {}
 
 
 def _resource_root():
@@ -89,6 +90,7 @@ _ACTIVE_UI_FONT_FAMILY = UI_FONT_FAMILY
 _CHILD_PROCS = set()
 _CHILD_PROCS_LOCK = threading.Lock()
 _AI_PACK_PATHS_ADDED = False
+_AI_PACK_DLL_HANDLES = []
 
 
 def _ai_pack_site_candidates():
@@ -102,6 +104,33 @@ def _ai_pack_site_candidates():
                     yield os.path.join(lib_dir, name, "site-packages")
 
 
+def _ai_pack_dll_candidates():
+    if sys.platform != "win32":
+        return
+    site_packages = os.path.join(AI_PACK_DIR, "Lib", "site-packages")
+    yield AI_PACK_DIR
+    yield os.path.join(AI_PACK_DIR, "Scripts")
+    yield os.path.join(site_packages, "torch", "lib")
+    nvidia_dir = os.path.join(site_packages, "nvidia")
+    if os.path.isdir(nvidia_dir):
+        for root, dirs, _files in os.walk(nvidia_dir):
+            if os.path.basename(root).lower() in {"bin", "lib"}:
+                yield root
+            dirs[:] = [name for name in dirs if name not in {"__pycache__", "include"}]
+
+
+def _add_ai_pack_dll_dirs():
+    if sys.platform != "win32" or not hasattr(os, "add_dll_directory"):
+        return
+    for path in _ai_pack_dll_candidates() or ():
+        if not path or not os.path.isdir(path):
+            continue
+        try:
+            _AI_PACK_DLL_HANDLES.append(os.add_dll_directory(path))
+        except Exception:
+            pass
+
+
 def add_ai_pack_to_path():
     global _AI_PACK_PATHS_ADDED
     if _AI_PACK_PATHS_ADDED:
@@ -109,6 +138,7 @@ def add_ai_pack_to_path():
     for path in _ai_pack_site_candidates():
         if os.path.isdir(path) and path not in sys.path:
             site.addsitedir(path)
+    _add_ai_pack_dll_dirs()
     _AI_PACK_PATHS_ADDED = True
 
 
@@ -445,13 +475,15 @@ def build_output_dir(base_output, mode, profile, accel):
     return path
 
 
-def is_valid_video_file(path: str) -> bool:
+def is_valid_video_file(path: str, stop_cb=None) -> bool:
     try:
-        out = check_output_hidden(
+        out = check_output_hidden_cancelable(
             ["ffprobe", "-v", "error", "-show_streams",
              "-select_streams", "v", "-of", "json", path],
-            stderr=subprocess.DEVNULL
+            stop_cb=stop_cb, stderr=subprocess.DEVNULL
         )
+        if stop_cb and stop_cb():
+            return False
         data = json.loads(out)
         for s in data.get("streams", []):
             if s.get("codec_type") == "video" and s.get("codec_name", "").lower() != "gif":
@@ -578,9 +610,10 @@ class AnalysisMosaicPreview:
         if fps > 0 and frames > 0:
             return frames / fps
         try:
-            return float(check_output_hidden(
+            return float(check_output_hidden_cancelable(
                 ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", path]
+                 "-of", "default=noprint_wrappers=1:nokey=1", path],
+                stop_cb=self.stop_cb
             ).decode().strip())
         except Exception:
             return 0.0
@@ -680,7 +713,13 @@ def _ensure_torch():
         import torch as _t
         torch = _t
         TORCH_AVAILABLE = True
+        LAST_IMPORT_ERRORS.pop("torch", None)
     except Exception:
+        LAST_IMPORT_ERRORS["torch"] = traceback.format_exc()
+        try:
+            log_crash("PyTorch import failed:\n" + LAST_IMPORT_ERRORS["torch"])
+        except Exception:
+            pass
         torch = None
         TORCH_AVAILABLE = False
     return TORCH_AVAILABLE
@@ -691,8 +730,14 @@ def _ensure_yolo():
     add_ai_pack_to_path()
     try:
         from ultralytics import YOLO
+        LAST_IMPORT_ERRORS.pop("ultralytics", None)
         return YOLO
     except Exception:
+        LAST_IMPORT_ERRORS["ultralytics"] = traceback.format_exc()
+        try:
+            log_crash("ultralytics import failed:\n" + LAST_IMPORT_ERRORS["ultralytics"])
+        except Exception:
+            pass
         return None
 
 
@@ -701,9 +746,29 @@ def _ensure_mediapipe():
     add_ai_pack_to_path()
     try:
         import mediapipe as mp
+        LAST_IMPORT_ERRORS.pop("mediapipe", None)
         return mp
     except Exception:
+        LAST_IMPORT_ERRORS["mediapipe"] = traceback.format_exc()
+        try:
+            log_crash("mediapipe import failed:\n" + LAST_IMPORT_ERRORS["mediapipe"])
+        except Exception:
+            pass
         return None
+
+
+def runtime_import_error_message(package):
+    detail = LAST_IMPORT_ERRORS.get(package)
+    if not detail:
+        return None
+    tail = [line.strip() for line in detail.strip().splitlines() if line.strip()]
+    cause = tail[-1] if tail else "unknown import error"
+    return (
+        f"{package} was found but could not be imported.\n"
+        f"AI pack folder: {AI_PACK_DIR}\n"
+        f"Cause: {cause}\n\n"
+        f"Full details were written to:\n{CRASH_LOG_FILE}"
+    )
 
 
 def _ensure_scenedetect():
@@ -807,16 +872,37 @@ def run_hidden_cancelable(cmd, stop_cb=None, poll_interval=0.05, **kwargs):
     cmd = normalize_command(cmd)
     if sys.platform == "win32":
         kwargs.setdefault("creationflags", CREATE_NO_WINDOW)
+    capture_output = kwargs.pop("capture_output", False)
+    timeout = kwargs.pop("timeout", None)
+    check = kwargs.pop("check", False)
+    input_data = kwargs.pop("input", None)
+    if capture_output:
+        if kwargs.get("stdout") is not None or kwargs.get("stderr") is not None:
+            raise ValueError("stdout and stderr arguments may not be used with capture_output.")
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
+    if input_data is not None:
+        kwargs.setdefault("stdin", subprocess.PIPE)
     proc = subprocess.Popen(cmd, **kwargs)
     register_child_process(proc)
     try:
+        deadline = time.time() + timeout if timeout is not None else None
         while proc.poll() is None:
             if stop_cb and stop_cb():
                 terminate_process(proc)
-                return subprocess.CompletedProcess(cmd, -9, None, None)
+                stdout, stderr = proc.communicate()
+                return subprocess.CompletedProcess(cmd, -9, stdout, stderr)
+            if deadline is not None and time.time() >= deadline:
+                terminate_process(proc)
+                stdout, stderr = proc.communicate()
+                raise subprocess.TimeoutExpired(cmd, timeout, output=stdout, stderr=stderr)
             time.sleep(poll_interval)
-        stdout, stderr = proc.communicate()
-        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+        stdout, stderr = proc.communicate(input=input_data)
+        result = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+        if check and result.returncode:
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd, output=stdout, stderr=stderr)
+        return result
     except Exception:
         terminate_process(proc)
         raise
@@ -834,8 +920,16 @@ def check_output_hidden(cmd, **kwargs):
     return result.stdout
 
 
+def check_output_hidden_cancelable(cmd, stop_cb=None, **kwargs):
+    kwargs.setdefault("stdout", subprocess.PIPE)
+    kwargs.setdefault("check", True)
+    result = run_hidden_cancelable(cmd, stop_cb=stop_cb, **kwargs)
+    if result.returncode == -9:
+        raise RuntimeError("Stopped")
+    return result.stdout
+
+
 atexit.register(terminate_all_child_processes)
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
-

@@ -1,9 +1,15 @@
 from .shared import (
+    AI_PACK_DIR,
     ctk,
     mb,
+    os,
     sys,
+    _ensure_mediapipe,
+    _ensure_torch,
+    _ensure_yolo,
     install_crash_logging,
     register_bundled_fonts,
+    runtime_import_error_message,
     single_instance,
     validate_runtime_dependencies,
 )
@@ -17,8 +23,30 @@ def _show_error_or_print(title, message):
         print(f"{title}: {message}", file=sys.stderr)
 
 
+def _runtime_selftest():
+    print(f"AI pack folder: {AI_PACK_DIR}")
+    checks = [
+        ("torch", _ensure_torch),
+        ("ultralytics", lambda: _ensure_yolo() is not None),
+        ("mediapipe", lambda: _ensure_mediapipe() is not None),
+    ]
+    failed = False
+    for name, check in checks:
+        ok = bool(check())
+        print(f"{name}: {'ok' if ok else 'failed'}")
+        if not ok:
+            failed = True
+            detail = runtime_import_error_message(name)
+            if detail:
+                print(detail, file=sys.stderr)
+    sys.exit(1 if failed else 0)
+
+
 def main():
     install_crash_logging()
+
+    if os.environ.get("SCENESPY_RUNTIME_SELFTEST") == "1":
+        _runtime_selftest()
 
     deps_ok, deps_message = validate_runtime_dependencies()
     if not deps_ok:
@@ -35,4 +63,3 @@ def main():
     register_bundled_fonts()
     app = ScenespyApp()
     app.mainloop()
-
