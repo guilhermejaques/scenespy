@@ -1,0 +1,12 @@
+# macOS build dependencies.
+#
+# On macOS 11 x86_64, newer opencv-contrib-python releases either do not
+# publish compatible wheels or load dylibs built for newer macOS versions.
+# Keep this build file separate from the cross-platform runtime pins so the
+# macOS executable build remains reproducible.
+customtkinter==5.2.2
+pillow==12.1.0
+numpy==1.26.4
+opencv-contrib-python==4.8.1.78
+av==16.1.0
+scenedetect==0.6.7.1

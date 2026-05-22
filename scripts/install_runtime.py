@@ -10,6 +10,7 @@ import urllib.request
 import venv
 import zipfile
 from pathlib import Path
+from platform import machine
 
 
 APP_NAME = "Scenespy"
@@ -18,6 +19,11 @@ TORCHVISION_VERSION = "0.20.1"
 CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu121"
 CPU_INDEX_URL = "https://download.pytorch.org/whl/cpu"
 WINDOWS_FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+WINDOWS_VC_REDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+MACOS_FFMPEG_URLS = {
+    "ffmpeg": "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip",
+    "ffprobe": "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip",
+}
 CUDA_MIN_DRIVER_LINUX = (530, 30, 2)
 CUDA_MIN_DRIVER_WINDOWS = (531, 14)
 AI_PACK_PACKAGES = [
@@ -77,6 +83,50 @@ def command_output(cmd):
 
 def command_exists(name):
     return shutil.which(name) is not None
+
+
+def windows_system_dir():
+    return Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32"
+
+
+def windows_vc_runtime_present():
+    if sys.platform != "win32":
+        return True
+    system_dir = windows_system_dir()
+    required = ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
+    return all((system_dir / name).exists() for name in required)
+
+
+def ensure_windows_vc_runtime():
+    if sys.platform != "win32":
+        return
+    if windows_vc_runtime_present():
+        print("Microsoft Visual C++ runtime already available.")
+        return
+
+    downloads = local_data_dir() / "downloads"
+    installer = downloads / "vc_redist.x64.exe"
+    if not installer.exists():
+        download_file(WINDOWS_VC_REDIST_URL, installer)
+
+    print("Installing Microsoft Visual C++ Redistributable for PyTorch.")
+    process = subprocess.run(
+        [str(installer), "/install", "/quiet", "/norestart"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if process.returncode not in {0, 1638, 3010}:
+        raise RuntimeError(
+            "Microsoft Visual C++ Redistributable installer failed with "
+            f"exit code {process.returncode}. Run install_runtime_windows.bat as Administrator and try again."
+        )
+    if process.returncode == 3010:
+        print("Microsoft Visual C++ Redistributable requested a restart.")
+    if not windows_vc_runtime_present():
+        raise RuntimeError(
+            "Microsoft Visual C++ runtime DLLs are still missing after installation. "
+            "Restart Windows or install https://aka.ms/vs/17/release/vc_redist.x64.exe manually."
+        )
 
 
 def parse_driver_version(value):
@@ -162,13 +212,32 @@ def torch_index_url(mode):
     return CUDA_INDEX_URL if mode == "cuda" else CPU_INDEX_URL
 
 
+def torch_versions():
+    if sys.platform == "darwin" and machine().lower() in {"x86_64", "amd64"}:
+        return "2.2.2", "0.17.2"
+    return TORCH_VERSION, TORCHVISION_VERSION
+
+
+def macos_intel():
+    return sys.platform == "darwin" and machine().lower() in {"x86_64", "amd64"}
+
+
+def ai_pack_packages():
+    if macos_intel():
+        return ["ultralytics==8.4.9"]
+    return AI_PACK_PACKAGES
+
+
 def write_installed_torch_constraints(py, target):
     code = (
         "from importlib.metadata import version; "
         "print('torch==' + version('torch')); "
         "print('torchvision==' + version('torchvision'))"
     )
-    target.write_text(command_output([py, "-c", code]) + "\n", encoding="utf-8")
+    constraints = command_output([py, "-c", code]) + "\n"
+    if macos_intel():
+        constraints += "numpy==1.26.4\nopencv-python==4.8.1.78\nopencv-contrib-python==4.8.1.78\n"
+    target.write_text(constraints, encoding="utf-8")
 
 
 def installed_torch_info(py):
@@ -199,9 +268,10 @@ def version_matches(installed, expected):
 
 def installed_torch_matches(py, torch_mode):
     info = installed_torch_info(py)
+    torch_version, torchvision_version = torch_versions()
     if not (
-        version_matches(info.get("torch"), TORCH_VERSION)
-        and version_matches(info.get("torchvision"), TORCHVISION_VERSION)
+        version_matches(info.get("torch"), torch_version)
+        and version_matches(info.get("torchvision"), torchvision_version)
     ):
         return False
     if torch_mode == "cuda":
@@ -209,7 +279,18 @@ def installed_torch_matches(py, torch_mode):
     return not bool(info.get("torch_cuda"))
 
 
+def python_executable_works(py):
+    if not py.exists():
+        return False
+    try:
+        subprocess.check_call([str(py), "-c", "import sys"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
+        return False
+
+
 def install_torch_packages(py, torch_mode, force=False):
+    torch_version, torchvision_version = torch_versions()
     cmd = [
         py,
         "-m",
@@ -221,9 +302,11 @@ def install_torch_packages(py, torch_mode, force=False):
         cmd.append("--force-reinstall")
     else:
         cmd.append("--upgrade")
+    if macos_intel():
+        cmd.append("numpy<2")
     cmd.extend([
-        f"torch=={TORCH_VERSION}",
-        f"torchvision=={TORCHVISION_VERSION}",
+        f"torch=={torch_version}",
+        f"torchvision=={torchvision_version}",
         "--index-url",
         torch_index_url(torch_mode),
     ])
@@ -233,27 +316,41 @@ def install_torch_packages(py, torch_mode, force=False):
 def ensure_ai_pack(torch_mode):
     pack_dir = ai_pack_dir()
     py = venv_python(pack_dir)
-    if not py.exists():
+    if not python_executable_works(py):
         print(f"Creating Scenespy AI environment: {pack_dir}")
         pack_dir.parent.mkdir(parents=True, exist_ok=True)
-        venv.EnvBuilder(with_pip=True, clear=False).create(pack_dir)
+        venv.EnvBuilder(with_pip=True, clear=True, symlinks=True).create(pack_dir)
 
     print("Installing AI packages for Detect faces.")
     run([py, "-m", "pip", "install", "--upgrade", "pip"])
     if installed_torch_matches(py, torch_mode):
-        print(f"PyTorch {TORCH_VERSION} for {torch_mode.upper()} is already installed.")
+        torch_version, _ = torch_versions()
+        print(f"PyTorch {torch_version} for {torch_mode.upper()} is already installed.")
     else:
         install_torch_packages(py, torch_mode, force=False)
         if not installed_torch_matches(py, torch_mode):
             print("Existing PyTorch build did not match the requested mode; reinstalling it.")
             install_torch_packages(py, torch_mode, force=True)
+    if macos_intel():
+        run([
+            py,
+            "-m",
+            "pip",
+            "install",
+            "--no-cache-dir",
+            "numpy==1.26.4",
+            "opencv-python==4.8.1.78",
+            "opencv-contrib-python==4.8.1.78",
+        ])
     with tempfile.TemporaryDirectory(prefix="scenespy-ai-constraints-") as tmp_name:
         constraints = Path(tmp_name) / "constraints.txt"
         write_installed_torch_constraints(py, constraints)
-        run([py, "-m", "pip", "install", "--no-cache-dir", "-c", constraints, *AI_PACK_PACKAGES])
+        run([py, "-m", "pip", "install", "--no-cache-dir", "-c", constraints, *ai_pack_packages()])
 
-    code = (
-        "import torch, torchvision, ultralytics, mediapipe; "
+    imports = "import torch, torchvision, ultralytics; "
+    if not macos_intel():
+        imports += "import mediapipe; "
+    code = imports + (
         "print('torch', torch.__version__); "
         "print('torchvision', torchvision.__version__); "
         "print('cuda', torch.cuda.is_available())"
@@ -311,6 +408,32 @@ def install_ffmpeg_windows():
                 shutil.copy2(source, dest / f"FFMPEG-{name}")
 
 
+def install_ffmpeg_macos_static():
+    dest = platform_bin_dir()
+    ffmpeg = dest / "ffmpeg"
+    ffprobe = dest / "ffprobe"
+    if ffmpeg.exists() and ffprobe.exists():
+        print(f"FFmpeg already installed: {dest}")
+        return
+
+    dest.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="scenespy-ffmpeg-") as tmp_name:
+        tmp = Path(tmp_name)
+        for name, url in MACOS_FFMPEG_URLS.items():
+            archive = tmp / f"{name}.zip"
+            download_file(url, archive)
+            extract_dir = tmp / name
+            extract_dir.mkdir()
+            with zipfile.ZipFile(archive) as zf:
+                zf.extractall(extract_dir)
+            matches = [p for p in extract_dir.rglob(name) if p.is_file()]
+            if not matches:
+                raise RuntimeError(f"Downloaded FFmpeg archive did not contain {name}.")
+            target = dest / name
+            shutil.copy2(matches[0], target)
+            target.chmod(target.stat().st_mode | 0o755)
+
+
 def install_ffmpeg_package_manager():
     if command_exists("ffmpeg") and command_exists("ffprobe"):
         print("FFmpeg and FFprobe are already available in PATH.")
@@ -361,8 +484,17 @@ def install_ffmpeg_runtime_links():
 
 def ensure_ffmpeg():
     print("Installing FFmpeg and FFprobe.")
+    if runtime_executable("ffmpeg") and runtime_executable("ffprobe"):
+        print(f"FFmpeg already installed: {platform_bin_dir()}")
+        return
     if sys.platform == "win32":
         install_ffmpeg_windows()
+    elif sys.platform == "darwin":
+        try:
+            install_ffmpeg_package_manager()
+        except Exception as exc:
+            print(f"Package manager FFmpeg install failed, using static macOS binaries: {exc}")
+            install_ffmpeg_macos_static()
     else:
         install_ffmpeg_package_manager()
 
@@ -413,6 +545,7 @@ def main():
         ensure_ffmpeg()
         verify_ffmpeg()
     if not args.skip_ai:
+        ensure_windows_vc_runtime()
         torch_mode = ensure_ai_pack_with_fallback(args.torch_mode)
         print(f"Installed PyTorch mode: {torch_mode}")
     print("Scenespy runtime dependencies installed.")

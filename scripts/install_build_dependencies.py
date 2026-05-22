@@ -3,6 +3,12 @@ import subprocess
 import sys
 
 
+def runtime_requirements_file():
+    if sys.platform == "darwin":
+        return "requirements-macos-build.txt"
+    return "requirements-base.txt"
+
+
 def ensure_tkinter():
     try:
         import tkinter  # noqa: F401
@@ -32,7 +38,18 @@ def verify_runtime_imports():
 def main():
     ensure_tkinter()
     run([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
-    run([sys.executable, "-m", "pip", "install", "-r", "requirements-base.txt", "pyinstaller"])
+    install_cmd = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "-r",
+        runtime_requirements_file(),
+        "pyinstaller",
+    ]
+    if sys.platform == "darwin":
+        install_cmd.insert(4, "--only-binary=:all:")
+    run(install_cmd)
     verify_runtime_imports()
 
 

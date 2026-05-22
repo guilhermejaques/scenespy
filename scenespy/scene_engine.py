@@ -46,6 +46,8 @@ class SceneEngine:
         self._cut_failures = []
         self._cut_output_dir = None
         self._temp_files = []
+        self._last_cut_ui_update = 0.0
+        self._cut_ui_update_interval = 0.15
 
     def add_temp_file(self, path):
         if path and path not in self._temp_files:
@@ -243,7 +245,7 @@ class SceneEngine:
             except Exception:
                 self._preview_cap = None
 
-        self._preview_thread = threading.Thread(target=self._preview_loop, daemon=False)
+        self._preview_thread = threading.Thread(target=self._preview_loop, daemon=True)
         self._preview_thread.start()
 
         if self.previewer and not self._video_info_shown:
@@ -984,6 +986,7 @@ class SceneEngine:
         self.completed_attempts = 0
         self._cut_start_time = time.time()
         self._cut_lock = threading.Lock()
+        self._last_cut_ui_update = 0.0
         if self.progress:
             label = "Cutting scenes..." if self.scene_mode else "Cutting segments..."
             self.progress.after(0, self.progress.reset)
@@ -1019,6 +1022,22 @@ class SceneEngine:
                 self._run_ffmpeg_copy(start_time, end_time, output_file)
             self._validate_cut_output(output_file, end_time - start_time)
 
+        def _schedule_cut_ui_update(force=False):
+            now = time.time()
+            if not force and now - self._last_cut_ui_update < self._cut_ui_update_interval:
+                return
+            self._last_cut_ui_update = now
+            completed = self.completed_attempts
+            total = self.total
+            done = self.done
+            detected = self.detected
+            eta = self._calculate_eta()
+            if self.progress and total > 0:
+                ratio = completed / total
+                self.progress.after(0, lambda v=ratio: self.progress.update(v))
+            if self.log:
+                self.log.after(0, lambda d=detected, c=done, e=eta: self.log.write_status(d, c, e))
+
         if self.total <= 1:
             try:
                 _cut_one(tasks[0])
@@ -1033,12 +1052,10 @@ class SceneEngine:
                     self.log.after(0, lambda e=err_msg, t=err_type: self.log.append_message(
                         f"Error: scene_000 could not be exported [{t}] ({e})", kind="error"))
             self.completed_attempts = 1
-            if self.log:
-                self.log.after(0, lambda: self.log.write_status(detected=self.detected, cut=self.done, eta="00:00"))
-            if self.progress:
-                self.progress.after(0, lambda v=1.0: self.progress.update(v))
+            _schedule_cut_ui_update(force=True)
         else:
-            with ThreadPoolExecutor(max_workers=min(MAX_CUT_WORKERS, self.total)) as pool:
+            max_workers = 1 if not self.scene_mode else min(MAX_CUT_WORKERS, self.total)
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {pool.submit(_cut_one, task): task for task in tasks}
                 for future in as_completed(futures):
                     if self._stop:
@@ -1064,13 +1081,7 @@ class SceneEngine:
 
                     with self._cut_lock:
                         self.completed_attempts += 1
-                        if self.progress:
-                            ratio = self.completed_attempts / self.total
-                            self.progress.after(0, lambda v=ratio: self.progress.update(v))
-                        if self.log:
-                            eta = self._calculate_eta()
-                            self.log.after(0, lambda d=self.detected, c=self.done, e=eta:
-                            self.log.write_status(d, c, e))
+                        _schedule_cut_ui_update(force=self.completed_attempts >= self.total)
 
         self._end_time = time.time()
         self._write_scene_metadata(outdir, scenes, fps)

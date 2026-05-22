@@ -95,16 +95,130 @@ O app aceita vídeos como:
 
 Arquivos inválidos, temporários ou corrompidos podem ser ignorados ou reparados automaticamente quando possível. 
 
-## Requisitos
+## Instalação
 
-Para rodar pelo código fonte:
+### Opção recomendada: GitHub Releases
+
+Para usuários finais, use a versão pronta do Scenespy na aba **Releases** do GitHub. Não use o botão **Code > Download ZIP** se você quer apenas instalar e usar o app. Já existe um pacote de release para cada sistema operacional suportado:
+
+- Windows: `Scenespy-windows-x64`
+- Linux: `Scenespy-linux-x64`
+- macOS: `Scenespy-macos`
+
+Baixe o pacote do seu sistema, extraia a pasta e rode o instalador de runtime que acompanha o app. Esse instalador configura as dependências externas usadas pelo app, como FFmpeg/FFprobe, Python privado e pacotes de IA.
+
+Windows:
+
+```bat
+install_runtime_windows.bat
+Scenespy.exe
+```
+
+Linux:
+
+```bash
+chmod +x install_runtime.sh
+./install_runtime.sh
+./Scenespy
+```
+
+macOS:
+
+```bash
+chmod +x install_runtime.sh
+./install_runtime.sh
+open Scenespy.app
+```
+
+### Alternativa: rodar pelo código-fonte
+
+Use este caminho se você baixou o ZIP do código-fonte ou clonou o repositório. Nesse modo, você é responsável por instalar Python, dependências Python, FFmpeg/FFprobe e garantir que o modelo `models/yolov8n-face.pt` exista.
+
+Requisitos para código-fonte:
 
 - Python 3.11.
 - FFmpeg e FFprobe disponíveis no `PATH` ou em `bin/<sistema>/`.
 - Dependências do `requirements.txt`.
-- O arquivo do modelo `models/yolov8n-face.pt` para o modo **Detect faces**.
+- O arquivo `models/yolov8n-face.pt` para o modo **Detect faces**.
+- No Windows, Microsoft Visual C++ Redistributable x64 pode ser necessário para o PyTorch.
 
-Dependências Python principais:
+Windows PowerShell:
+
+```powershell
+cd scenedetect
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python Scenespy.py
+```
+
+Se quiser abrir sem manter o console visível:
+
+```powershell
+python Scenespy.pyw
+```
+
+Se o PowerShell bloquear a ativação do ambiente virtual:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+macOS:
+
+```bash
+cd scenedetect
+brew install python@3.11 ffmpeg
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python Scenespy.py
+```
+
+Linux Debian/Ubuntu:
+
+```bash
+cd scenedetect
+sudo apt update
+sudo apt install python3.11 python3.11-venv python3-tk ffmpeg
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python Scenespy.py
+```
+
+Linux Fedora:
+
+```bash
+cd scenedetect
+sudo dnf install python3.11 python3.11-tkinter ffmpeg
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python Scenespy.py
+```
+
+Linux Arch, exemplo com `pyenv`:
+
+```bash
+cd scenedetect
+sudo pacman -S tk ffmpeg pyenv
+pyenv install 3.11.9
+pyenv local 3.11.9
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python Scenespy.py
+```
+
+No Arch, use `pyenv` ou outro método equivalente para garantir Python 3.11, porque a versão `python` dos repositórios pode ser mais nova que a suportada pelas dependências de IA.
+
+Dependências Python principais instaladas por `requirements.txt`:
 
 - `customtkinter`: interface desktop.
 - `pillow`: imagens e prévias.
@@ -115,40 +229,6 @@ Dependências Python principais:
 - `torch` e `torchvision`: necessários para o modo **Detect faces**.
 - `ultralytics`: carregamento do modelo YOLO de faces.
 - `mediapipe`: validação e landmarks faciais.
-
-## Instalação rápida
-
-Crie e ative um ambiente virtual antes de instalar as dependências.
-
-Windows PowerShell:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-Linux/macOS:
-
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-Execução:
-
-```bash
-python Scenespy.py
-```
-
-No Windows, também é possível abrir sem manter o console visível:
-
-```bash
-python Scenespy.pyw
-```
 
 ## Instalação para CPU apenas 
 
@@ -260,16 +340,6 @@ ffmpeg -hide_banner -encoders | Select-String h264_qsv
 
 No macOS, o app pode usar codificação via VideoToolbox (`h264_videotoolbox`) quando o FFmpeg instalado oferece esse encoder.
 
-Instalação recomendada:
-
-```bash
-brew install python@3.11 ffmpeg
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
 Teste do encoder:
 
 ```bash
@@ -278,88 +348,13 @@ ffmpeg -hide_banner -encoders | grep h264_videotoolbox
 
 Observação: o modo **Detect faces** usa PyTorch em CPU no macOS nesta versão do app. A opção **Apple** é para codificação de vídeo, não para inferência facial.
 
-## Linux
-
-Instale Python, ambiente virtual, Tkinter e FFmpeg pelo gerenciador da sua distribuição.
-
-Ubuntu/Debian:
-
-```bash
-sudo apt update
-sudo apt install python3.11 python3.11-venv python3-tk ffmpeg
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-Fedora:
-
-```bash
-sudo dnf install python3 python3-tkinter ffmpeg
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-Arch Linux:
-
-```bash
-sudo pacman -S python tk ffmpeg
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-Em algumas distribuições, o pacote `ffmpeg` dos repositórios oficiais pode não incluir todos os encoders de hardware. Se AMD, Intel ou NVIDIA não aparecerem no app, verifique os encoders disponíveis com:
-
-```bash
-ffmpeg -hide_banner -encoders
-```
-
-## Windows
-
-Instale Python 3.11 e marque a opção para adicionar Python ao `PATH`.
-
-Depois:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python Scenespy.py
-```
-
-Se o PowerShell bloquear a ativação do ambiente virtual:
-
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-```
-
-Se você estiver usando uma versão pronta do app, ela pode incluir FFmpeg e FFprobe em:
-
-```text
-bin/windows/ffmpeg.exe
-bin/windows/ffprobe.exe
-```
-
 ## FFmpeg e FFprobe
 
 Scenespy precisa do FFmpeg e do FFprobe para ler, validar e cortar vídeos.
 
-No Windows, a versão pronta do app pode incluir esses arquivos automaticamente:
+Nas versões prontas da aba **Releases**, o instalador de runtime baixa ou instala FFmpeg/FFprobe automaticamente.
 
-```text
-bin/windows/ffmpeg.exe
-bin/windows/ffprobe.exe
-```
-
-No repositório, esses binários não precisam ficar versionados. Para montar uma release, mantenha uma cópia local em `release-assets/windows/ffmpeg/`, copie para `bin/windows/` dentro da pasta final do app e gere o `.zip`.
-
-Os binários Windows recomendados vêm do FFmpeg essentials build da Gyan.dev. Os arquivos de licença do FFmpeg devem acompanhar qualquer distribuição do app.
+No Windows, `install_runtime_windows.bat` instala os binários do FFmpeg essentials build da Gyan.dev em `%LOCALAPPDATA%/Scenespy/runtime/`.
 
 No Linux e no macOS, a recomendação é instalar pelo sistema:
 
@@ -373,9 +368,9 @@ brew install ffmpeg
 
 Ao iniciar, o Scenespy procura primeiro em `bin/<sistema>/`. Se não encontrar, procura no `PATH` do sistema.
 
-## Verificação da instalação
+## Verificação da instalação pelo código-fonte
 
-Depois de instalar, rode:
+Depois de instalar pelo código-fonte, rode:
 
 ```bash
 python -m pip check

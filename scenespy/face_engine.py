@@ -73,11 +73,6 @@ class FaceDetectionEngine:
             return
 
         mp = _ensure_mediapipe()
-        if mp is None:
-            detail = shared.runtime_import_error_message("mediapipe")
-            if detail:
-                raise RuntimeError("Face detection requires mediapipe.\n\n" + detail)
-            raise RuntimeError("mediapipe package not found.")
         if self._stop:
             return
 
@@ -94,9 +89,10 @@ class FaceDetectionEngine:
         if self._stop:
             return
 
-        self.mp_face = mp.solutions.face_mesh.FaceMesh(
-            static_image_mode=False, max_num_faces=2, refine_landmarks=True,
-            min_detection_confidence=0.5, min_tracking_confidence=0.5)
+        if mp is not None:
+            self.mp_face = mp.solutions.face_mesh.FaceMesh(
+                static_image_mode=False, max_num_faces=2, refine_landmarks=True,
+                min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
     def stop(self):
         self._stop = True
@@ -143,8 +139,10 @@ class FaceDetectionEngine:
         return float(saturation.mean()) < 18.0
 
     def _valid_landmarks(self, face):
-        if self._stop or self.mp_face is None:
+        if self._stop:
             return False
+        if self.mp_face is None:
+            return True
         rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
         result = self.mp_face.process(rgb)
         if not result.multi_face_landmarks:

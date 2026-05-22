@@ -23,6 +23,7 @@ if [[ ! -d release/Scenespy.app ]]; then
   exit 1
 fi
 
+rm -rf release/Scenespy-macos
 mkdir -p release/Scenespy-macos
 mv release/Scenespy.app release/Scenespy-macos/Scenespy.app
 mkdir -p release/Scenespy-macos/_internal/dependencies

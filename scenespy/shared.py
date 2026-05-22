@@ -887,17 +887,24 @@ def run_hidden_cancelable(cmd, stop_cb=None, poll_interval=0.05, **kwargs):
     register_child_process(proc)
     try:
         deadline = time.time() + timeout if timeout is not None else None
-        while proc.poll() is None:
-            if stop_cb and stop_cb():
-                terminate_process(proc)
-                stdout, stderr = proc.communicate()
-                return subprocess.CompletedProcess(cmd, -9, stdout, stderr)
-            if deadline is not None and time.time() >= deadline:
-                terminate_process(proc)
-                stdout, stderr = proc.communicate()
-                raise subprocess.TimeoutExpired(cmd, timeout, output=stdout, stderr=stderr)
-            time.sleep(poll_interval)
-        stdout, stderr = proc.communicate(input=input_data)
+        communicate_input = input_data
+        while True:
+            remaining = poll_interval
+            if deadline is not None:
+                remaining = max(0.001, min(remaining, deadline - time.time()))
+            try:
+                stdout, stderr = proc.communicate(input=communicate_input, timeout=remaining)
+                break
+            except subprocess.TimeoutExpired:
+                communicate_input = None
+                if stop_cb and stop_cb():
+                    terminate_process(proc)
+                    stdout, stderr = proc.communicate()
+                    return subprocess.CompletedProcess(cmd, -9, stdout, stderr)
+                if deadline is not None and time.time() >= deadline:
+                    terminate_process(proc)
+                    stdout, stderr = proc.communicate()
+                    raise subprocess.TimeoutExpired(cmd, timeout, output=stdout, stderr=stderr)
         result = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
         if check and result.returncode:
             raise subprocess.CalledProcessError(
