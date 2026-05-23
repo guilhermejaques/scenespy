@@ -33,7 +33,8 @@ Reason:
 - The bundled/private Python runtime also declares macOS 10.9/10.13 minimum depending on binary.
 - PyTorch installed by install_runtime is compatible with macOS 10.13+ at the binary level.
 - However, the installed MediaPipe binary declares macOS 13.0 minimum.
-- Because Detect faces depends on the AI runtime, macOS 13+ is the safest public compatibility claim.
+- On macOS 11 and 12, install_runtime skips MediaPipe and Detect faces runs without MediaPipe landmark validation.
+- For the complete Detect faces validation path, macOS 13+ is the safest public compatibility claim.
 
 Architecture note:
 - The current app build is x86_64 only.

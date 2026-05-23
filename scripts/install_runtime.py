@@ -10,7 +10,7 @@ import urllib.request
 import venv
 import zipfile
 from pathlib import Path
-from platform import machine
+from platform import machine, mac_ver
 
 
 APP_NAME = "Scenespy"
@@ -222,8 +222,23 @@ def macos_intel():
     return sys.platform == "darwin" and machine().lower() in {"x86_64", "amd64"}
 
 
+def macos_major_version():
+    if sys.platform != "darwin":
+        return None
+    version = mac_ver()[0]
+    try:
+        return int(str(version).split(".", 1)[0])
+    except Exception:
+        return None
+
+
+def mediapipe_supported():
+    major = macos_major_version()
+    return sys.platform != "darwin" or major is None or major >= 13
+
+
 def ai_pack_packages():
-    if macos_intel():
+    if not mediapipe_supported():
         return ["ultralytics==8.4.9"]
     return AI_PACK_PACKAGES
 
@@ -348,8 +363,10 @@ def ensure_ai_pack(torch_mode):
         run([py, "-m", "pip", "install", "--no-cache-dir", "-c", constraints, *ai_pack_packages()])
 
     imports = "import torch, torchvision, ultralytics; "
-    if not macos_intel():
+    if mediapipe_supported():
         imports += "import mediapipe; "
+    else:
+        print("MediaPipe is skipped on macOS before 13. Detect faces will run without landmark validation.")
     code = imports + (
         "print('torch', torch.__version__); "
         "print('torchvision', torchvision.__version__); "

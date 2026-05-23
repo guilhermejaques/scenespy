@@ -129,6 +129,10 @@ The runtime installer installs:
 - FFmpeg/FFprobe through Homebrew when they are not already in PATH;
 - Torch CPU plus AI packages into `~/Library/Application Support/Scenespy/ai-pack/`.
 
+On macOS 11 and 12, MediaPipe is skipped because current MediaPipe wheels require
+macOS 13 or later. Detect faces still runs, but without MediaPipe landmark
+validation.
+
 ## Torch selection
 
 The runtime installer accepts:

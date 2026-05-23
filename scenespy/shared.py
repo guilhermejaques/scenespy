@@ -18,6 +18,7 @@ import random
 import importlib.util
 import shutil
 import site
+import platform
 import tkinter.filedialog as fd
 import tkinter.messagebox as mb
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -381,6 +382,27 @@ def detect_available_inference_accel():
 def _missing_modules(*names):
     add_ai_pack_to_path()
     return [name for name in names if importlib.util.find_spec(name) is None]
+
+
+def _macos_major_version():
+    if sys.platform != "darwin":
+        return None
+    try:
+        return int(str(platform.mac_ver()[0]).split(".", 1)[0])
+    except Exception:
+        return None
+
+
+def mediapipe_required():
+    major = _macos_major_version()
+    return sys.platform != "darwin" or major is None or major >= 13
+
+
+def face_detection_required_modules():
+    modules = ["torch", "ultralytics"]
+    if mediapipe_required():
+        modules.append("mediapipe")
+    return modules
 
 
 def _missing_executables(*names):

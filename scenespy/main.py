@@ -8,6 +8,7 @@ from .shared import (
     _ensure_torch,
     _ensure_yolo,
     install_crash_logging,
+    mediapipe_required,
     register_bundled_fonts,
     runtime_import_error_message,
     single_instance,
@@ -28,8 +29,11 @@ def _runtime_selftest():
     checks = [
         ("torch", _ensure_torch),
         ("ultralytics", lambda: _ensure_yolo() is not None),
-        ("mediapipe", lambda: _ensure_mediapipe() is not None),
     ]
+    if mediapipe_required():
+        checks.append(("mediapipe", lambda: _ensure_mediapipe() is not None))
+    else:
+        print("mediapipe: skipped (optional on macOS before 13)")
     failed = False
     for name, check in checks:
         ok = bool(check())

@@ -55,7 +55,7 @@ class ScenespyApp(ctk.CTk):
         requirements = {
             "scene": _missing_modules("scenedetect", "av") + _missing_executables("ffmpeg", "ffprobe"),
             "interval": _missing_executables("ffmpeg", "ffprobe"),
-            "faces": _missing_modules("torch", "ultralytics", "mediapipe") + _missing_executables("ffmpeg", "ffprobe"),
+            "faces": _missing_modules(*face_detection_required_modules()) + _missing_executables("ffmpeg", "ffprobe"),
         }
         if not os.path.isfile(MODEL_FILE):
             requirements["faces"].append("models/yolov8n-face.pt")
