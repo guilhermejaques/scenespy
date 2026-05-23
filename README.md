@@ -1,8 +1,10 @@
 # Scenespy
 
-Scenespy é um app desktop para separar vídeos em partes automaticamente. Ele pode detectar mudanças de cena, cortar por intervalo fixo de tempo ou extrair rostos encontrados no vídeo.
+Scenespy é um app desktop para detectar diferentes cenas de um vídeo e separar automaticamente. Ele pode detectar mudanças de cena, cortar por intervalo fixo de tempo ou extrair rostos encontrados no vídeo. 
+Ajuda no processo de criação de conteúdo para quem trabalha com vídeo, exige pouco de seu computador e não roda modelos de AI pesados.
 
-O objetivo é simples: escolher um vídeo, escolher uma pasta de saída, selecionar o modo de corte e deixar o app processar.
+O objetivo é simples: escolher um vídeo, escolher uma pasta de saída, selecionar o modo de corte e deixar o app processar. 
+
 
 ## Imagens do app
 
@@ -21,7 +23,7 @@ Detection and cutting of video scenes:
 
 ## O que ele faz
 
-- Detecta cortes de cena em vídeos.
+- Detecta e corta cenas de video.
 - Divide vídeos em segmentos por intervalo de segundos.
 - Detecta rostos e salva imagens dos melhores recortes encontrados.
 - Processa um ou vários vídeos em fila.
@@ -32,20 +34,22 @@ Detection and cutting of video scenes:
 
 ### Scene detection
 
-Analisa o vídeo e tenta encontrar mudanças naturais de cena. É útil para filmes, séries, trailers, vídeos de gameplay, aulas editadas e conteúdos com cortes visuais.
+Analisa o vídeo e tenta encontrar mudanças naturais de cena. É útil para filmes, séries, trailers, vídeos de gameplay, aulas editadas e conteúdos com cortes visuais. 
+É o modo que mais exige da máquina por causa do pipeline estatístico que tenta encontrar a diferença entre uma cena e outra.
 
 ### Every seconds
 
-Corta o vídeo em partes com duração fixa. É o modo mais previsível: você escolhe o intervalo em segundos e o app divide o vídeo.
+Corta o vídeo em partes com duração fixa. É o modo mais previsível: você escolhe o intervalo em segundos e o app divide o vídeo. 
 
 ### Detect faces
 
-Procura rostos no vídeo e salva imagens dos rostos detectados. Esse modo usa PyTorch, Ultralytics YOLO e MediaPipe, por isso é mais pesado que os modos de corte de vídeo.
+Procura rostos no vídeo e salva imagens dos rostos detectados. É um modo que pode percorrer cada frame do vídeo para encontrar os rostos, até aqueles difíceis de enxergar.
+Não faz classificação, portanto salva o rosto de uma mesma pessoa em momentos diferentes.
 
 ## Como usar
 
 1. Abra o Scenespy.
-2. Em **Source video(s)**, selecione um ou mais vídeos.
+2. Em **Source video**, selecione um ou mais vídeos.
 3. Em **Output folder**, escolha onde os arquivos serão salvos.
 4. Escolha o modo:
    - **Scene detection**
@@ -65,70 +69,122 @@ Os resultados serão criados dentro da pasta escolhida, em uma subpasta com data
 - **High**: detecta mais cortes. Melhor para vídeos rápidos, trailers, clipes e conteúdos com muita ação.
 - **Auto**: tenta escolher parâmetros automaticamente com base no vídeo. Não é usado no modo de rostos.
 
+IMPORTANTE: Cada vídeo é único, portanto se um modo de sensibilidade funcionou para um video, nao quer dizer que funcionará em outro video. O teste sempre é a melhor solução.
+
 ## Aceleração
-
-O app separa dois tipos de aceleração:
-
-- **Codificação de vídeo**: usada nos modos **Scene detection** e **Every seconds** quando o app precisa reencodar cortes precisos.
-- **Inferência de IA**: usada no modo **Detect faces** para rodar o modelo de detecção de rostos.
 
 Opções disponíveis:
 
-- **CPU**: opção mais compatível. Funciona em todos os modos, mas pode ser mais lenta.
-- **NVIDIA**: pode acelerar a codificação via FFmpeg/NVENC e também pode acelerar o modo de rostos via CUDA, se PyTorch com CUDA estiver instalado.
+- **CPU**: opção mais compatível (padrão). Funciona em todos os modos, mas pode ser mais lenta.
+- **NVIDIA**: pode acelerar a codificação via FFmpeg/NVENC e também pode acelerar o modo de rostos via CUDA, se PyTorch com CUDA estiver instalado. 
 - **AMD**: pode acelerar codificação de vídeo via FFmpeg/AMF em sistemas compatíveis. Não acelera o modo de rostos.
 - **Intel**: pode acelerar codificação de vídeo via FFmpeg/QSV em sistemas compatíveis. Não acelera o modo de rostos.
 - **Apple**: pode acelerar codificação de vídeo via FFmpeg/VideoToolbox no macOS. Não acelera o modo de rostos. 
 
-Nem toda aceleração funciona em todos os computadores. Quando uma opção não está disponível, o app volta para CPU quando possível.
+Hoje a forma mais relevante de acelerar o processamento é com NVIDIA CUDA, mas o app funcionará bem caso você não use CUDA, fique tranquilo.  
+
 
 ## Formatos suportados
 
 O app aceita vídeos como:
 
-- `.mp4`
-- `.mkv`
+- `.mp4` O formato mais compatível.
+- `.mkv` 
 - `.mov`
 - `.avi`
 - `.webm`
 - `.m4v`
 
 Arquivos inválidos, temporários ou corrompidos podem ser ignorados ou reparados automaticamente quando possível. 
+MKV suporta múltiplos áudios e pode apresentar problemas no container, por isso, em vídeos difíceis de processar, o app converterá de MKV para MP4 para tentar resolver o problema.
 
 ## Instalação
 
-### Opção recomendada: GitHub Releases
+### Instalação rápida | GitHub Releases
 
-Para usuários finais, use a versão pronta do Scenespy na aba **Releases** do GitHub. Não use o botão **Code > Download ZIP** se você quer apenas instalar e usar o app. Já existe um pacote de release para cada sistema operacional suportado:
+Use a versão pronta do Scenespy na aba **Releases** do GitHub. Não use o botão **Code > Download ZIP** se você quer apenas instalar e usar o app. Já existe um pacote de release para cada sistema operacional suportado:
 
 - Windows: `Scenespy-windows-x64`
 - Linux: `Scenespy-linux-x64`
 - macOS: `Scenespy-macos`
 
-Baixe o pacote do seu sistema, extraia a pasta e rode o instalador de runtime que acompanha o app. Esse instalador configura as dependências externas usadas pelo app, como FFmpeg/FFprobe, Python privado e pacotes de IA.
+Baixe o pacote do seu sistema, extraia a pasta e rode o instalador de runtime que acompanha o app. Esse instalador configura as dependências externas usadas pelo app, como FFmpeg/FFprobe, Python privado e pacotes de IA que são necessários. Abra a linha de comando em seu sistema e localize o diretório do app para rodar o instalador. 
 
 Windows:
 
 ```bat
-install_runtime_windows.bat
+install_runtime_windows.bat 
 Scenespy.exe
 ```
 
-Linux:
+Linux e Mac OS:
 
 ```bash
-chmod +x install_runtime.sh
-./install_runtime.sh
-./Scenespy
+chmod +x install_runtime.sh  # Comando para permissão, se necessário 
+./install_runtime.sh 
+./Scenespy # App 
 ```
 
-macOS:
+Para usuários iniciantes que não sabem rodar a linha de comando:
+Você só precisa localizar a pasta onde está o app e rodar o instalador antes de executar o app. veja:
 
-```bash
-chmod +x install_runtime.sh
-./install_runtime.sh
-open Scenespy.app
-```
+`cd Downloads` >  `cd Scenespy-linux-x64` > `./install_runtime.sh`
+
+Mais comandos:
+# Abrir terminal
+
+| Sistema | Como abrir |
+|---|---|
+| Windows | `Win + R` → `cmd` |
+| PowerShell | Pesquisar “PowerShell” |
+| macOS | `Command + Espaço` → `Terminal` |
+| Linux | `Ctrl + Alt + T` |
+
+---
+
+# Ver em qual pasta você está
+
+| Sistema | Comando |
+|---|---|
+| Windows CMD | `cd` |
+| PowerShell | `pwd` |
+| macOS/Linux | `pwd` |
+
+---
+
+# Listar arquivos
+
+| Sistema | Comando |
+|---|---|
+| Windows CMD | `dir` |
+| PowerShell | `ls` |
+| macOS/Linux | `ls` |
+
+---
+
+# Entrar em uma pasta
+
+| Sistema | Comando |
+|---|---|
+| Windows | `cd Downloads` |
+| macOS/Linux | `cd Downloads` |
+
+---
+
+# Voltar uma pasta
+
+| Sistema | Comando |
+|---|---|
+| Todos | `cd ..` |
+
+---
+
+# Rodar um arquivo
+| Sistema | Comando |
+|---|---|
+| Todos | `./ARQUIVO.SH` |
+
+
 
 ### Alternativa: rodar pelo código-fonte
 
