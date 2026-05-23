@@ -5,9 +5,6 @@ Ajuda no processo de criação de conteúdo para quem trabalha com vídeo, exige
 
 O objetivo é simples: escolher um vídeo, escolher uma pasta de saída, selecionar o modo de corte e deixar o app processar. 
 
-
-## Imagens do app
-
 Face detection and cropping from video:
 
 <img src="https://private-user-images.githubusercontent.com/159738624/594887552-222c8977-bdea-41b0-8aa6-9ab088195f5f.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzkyODc5MDksIm5iZiI6MTc3OTI4NzYwOSwicGF0aCI6Ii8xNTk3Mzg2MjQvNTk0ODg3NTUyLTIyMmM4OTc3LWJkZWEtNDFiMC04YWE2LTlhYjA4ODE5NWY1Zi5wbmc_WC1BbXotQWxnb3JpdGhtPUFXUzQtSE1BQy1TSEEyNTYmWC1BbXotQ3JlZGVudGlhbD1BS0lBVkNPRFlMU0E1M1BRSzRaQSUyRjIwMjYwNTIwJTJGdXMtZWFzdC0xJTJGczMlMkZhd3M0X3JlcXVlc3QmWC1BbXotRGF0ZT0yMDI2MDUyMFQxNDMzMjlaJlgtQW16LUV4cGlyZXM9MzAwJlgtQW16LVNpZ25hdHVyZT1iYmM1OGUxNTYwYTU3YWRkMzYwN2RkZDQxODhkZTc2Y2I0ZTMwMTg0YmQ5MjFhYzA3Yjk5MzA1YjQyNjI3OWIzJlgtQW16LVNpZ25lZEhlYWRlcnM9aG9zdCZyZXNwb25zZS1jb250ZW50LXR5cGU9aW1hZ2UlMkZwbmcifQ.3snJApXWeJoSs7cxQgF8QvGnrQrXHObymy4pqV8Xm9A" width="65%">
@@ -20,8 +17,6 @@ Detection and cutting of video scenes:
 <img src="https://private-user-images.githubusercontent.com/159738624/594885670-649c86c9-1149-4148-a3ef-d1ecda397edd.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzkyODc5NTQsIm5iZiI6MTc3OTI4NzY1NCwicGF0aCI6Ii8xNTk3Mzg2MjQvNTk0ODg1NjcwLTY0OWM4NmM5LTExNDktNDE0OC1hM2VmLWQxZWNkYTM5N2VkZC5wbmc_WC1BbXotQWxnb3JpdGhtPUFXUzQtSE1BQy1TSEEyNTYmWC1BbXotQ3JlZGVudGlhbD1BS0lBVkNPRFlMU0E1M1BRSzRaQSUyRjIwMjYwNTIwJTJGdXMtZWFzdC0xJTJGczMlMkZhd3M0X3JlcXVlc3QmWC1BbXotRGF0ZT0yMDI2MDUyMFQxNDM0MTRaJlgtQW16LUV4cGlyZXM9MzAwJlgtQW16LVNpZ25hdHVyZT0yNGI4OTU2OWJlNTZlNmIyY2M3N2ViMmE0NTFlNGE5YWIxM2E2ODM2MmRiZjU2YTMyMzljMDkzZWI2MmFmY2MzJlgtQW16LVNpZ25lZEhlYWRlcnM9aG9zdCZyZXNwb25zZS1jb250ZW50LXR5cGU9aW1hZ2UlMkZwbmcifQ.LGZMpCmui4iJZrA_qrWHzeZrGqPDrdg_BihNLje7a1Y" width="65%">
 
 <img src="https://private-user-images.githubusercontent.com/159738624/594885671-ae2498f9-720c-4b2e-b678-757703e9219d.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzkyODc5NTQsIm5iZiI6MTc3OTI4NzY1NCwicGF0aCI6Ii8xNTk3Mzg2MjQvNTk0ODg1NjcxLWFlMjQ5OGY5LTcyMGMtNGIyZS1iNjc4LTc1NzcwM2U5MjE5ZC5wbmc_WC1BbXotQWxnb3JpdGhtPUFXUzQtSE1BQy1TSEEyNTYmWC1BbXotQ3JlZGVudGlhbD1BS0lBVkNPRFlMU0E1M1BRSzRaQSUyRjIwMjYwNTIwJTJGdXMtZWFzdC0xJTJGczMlMkZhd3M0X3JlcXVlc3QmWC1BbXotRGF0ZT0yMDI2MDUyMFQxNDM0MTRaJlgtQW16LUV4cGlyZXM9MzAwJlgtQW16LVNpZ25hdHVyZT00MmRkMzM3NzIyMzg5NDMyMzg5YjAyMGE0MTAzYWNlM2M4ZDNkMGZlNDg1NjdhYWE3MmFiOTliODVlYjU2Zjg3JlgtQW16LVNpZ25lZEhlYWRlcnM9aG9zdCZyZXNwb25zZS1jb250ZW50LXR5cGU9aW1hZ2UlMkZwbmcifQ.Y0zdUAjqZCAbqy3yN27dJ9uUxqhTroKZqE8YGuKENQw" width="40%" alt="Output">
-
-## O que ele faz
 
 - Detecta e corta cenas de video.
 - Divide vídeos em segmentos por intervalo de segundos.
@@ -46,7 +41,7 @@ Corta o vídeo em partes com duração fixa. É o modo mais previsível: você e
 Procura rostos no vídeo e salva imagens dos rostos detectados. É um modo que pode percorrer cada frame do vídeo para encontrar os rostos, até aqueles difíceis de enxergar.
 Não faz classificação, portanto salva o rosto de uma mesma pessoa em momentos diferentes.
 
-## Como usar
+# Como usar
 
 1. Abra o Scenespy.
 2. Em **Source video**, selecione um ou mais vídeos.
@@ -98,9 +93,9 @@ O app aceita vídeos como:
 Arquivos inválidos, temporários ou corrompidos podem ser ignorados ou reparados automaticamente quando possível. 
 MKV suporta múltiplos áudios e pode apresentar problemas no container, por isso, em vídeos difíceis de processar, o app converterá de MKV para MP4 para tentar resolver o problema.
 
-## Instalação
+# Instalação
 
-### Instalação rápida | GitHub Releases
+## Instalação rápida | GitHub Releases
 
 Use a versão pronta do Scenespy na aba **Releases** do GitHub. Não use o botão **Code > Download ZIP** se você quer apenas instalar e usar o app. Já existe um pacote de release para cada sistema operacional suportado:
 
@@ -131,7 +126,7 @@ Você só precisa localizar a pasta onde está o app e rodar o instalador antes 
 `cd Downloads` >  `cd Scenespy-linux-x64` > `./install_runtime.sh`
 
 Mais comandos:
-# Abrir terminal
+Abrir terminal
 
 | Sistema | Como abrir |
 |---|---|
@@ -142,7 +137,7 @@ Mais comandos:
 
 ---
 
-# Ver em qual pasta você está
+Ver em qual pasta você está
 
 | Sistema | Comando |
 |---|---|
@@ -152,7 +147,7 @@ Mais comandos:
 
 ---
 
-# Listar arquivos
+Listar arquivos
 
 | Sistema | Comando |
 |---|---|
@@ -162,7 +157,7 @@ Mais comandos:
 
 ---
 
-# Entrar em uma pasta
+Entrar em uma pasta
 
 | Sistema | Comando |
 |---|---|
@@ -171,7 +166,7 @@ Mais comandos:
 
 ---
 
-# Voltar uma pasta
+Voltar uma pasta
 
 | Sistema | Comando |
 |---|---|
@@ -179,98 +174,22 @@ Mais comandos:
 
 ---
 
-# Rodar um arquivo
+Rodar um arquivo
 | Sistema | Comando |
 |---|---|
 | Todos | `./ARQUIVO.SH` |
 
 
+## Rodar pelo código-fonte
 
-### Alternativa: rodar pelo código-fonte
-
-Use este caminho se você baixou o ZIP do código-fonte ou clonou o repositório. Nesse modo, você é responsável por instalar Python, dependências Python, FFmpeg/FFprobe e garantir que o modelo `models/yolov8n-face.pt` exista.
+Você é responsável por instalar Python, dependências Python, FFmpeg/FFprobe e bibliotecas.
 
 Requisitos para código-fonte:
 
 - Python 3.11.
-- FFmpeg e FFprobe disponíveis no `PATH` ou em `bin/<sistema>/`.
+- FFmpeg e FFprobe.
 - Dependências do `requirements.txt`.
-- O arquivo `models/yolov8n-face.pt` para o modo **Detect faces**.
 - No Windows, Microsoft Visual C++ Redistributable x64 pode ser necessário para o PyTorch.
-
-Windows PowerShell:
-
-```powershell
-cd scenedetect
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python Scenespy.py
-```
-
-Se quiser abrir sem manter o console visível:
-
-```powershell
-python Scenespy.pyw
-```
-
-Se o PowerShell bloquear a ativação do ambiente virtual:
-
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-```
-
-macOS:
-
-```bash
-cd scenedetect
-brew install python@3.11 ffmpeg
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python Scenespy.py
-```
-
-Linux Debian/Ubuntu:
-
-```bash
-cd scenedetect
-sudo apt update
-sudo apt install python3.11 python3.11-venv python3-tk ffmpeg
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python Scenespy.py
-```
-
-Linux Fedora:
-
-```bash
-cd scenedetect
-sudo dnf install python3.11 python3.11-tkinter ffmpeg
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python Scenespy.py
-```
-
-Linux Arch, exemplo com `pyenv`:
-
-```bash
-cd scenedetect
-sudo pacman -S tk ffmpeg pyenv
-pyenv install 3.11.9
-pyenv local 3.11.9
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python Scenespy.py
-```
 
 No Arch, use `pyenv` ou outro método equivalente para garantir Python 3.11, porque a versão `python` dos repositórios pode ser mais nova que a suportada pelas dependências de IA.
 
@@ -286,9 +205,9 @@ Dependências Python principais instaladas por `requirements.txt`:
 - `ultralytics`: carregamento do modelo YOLO de faces.
 - `mediapipe`: validação e landmarks faciais.
 
-## Instalação para CPU apenas 
+### Instalação para CPU apenas 
 
-Use esta opção se você não precisa de CUDA ou quer a instalação mais simples.
+Use esta opção se você não precisa de CUDA NVIDIA ou quer a instalação mais simples.
 
 ```bash
 python -m pip install -r requirements.txt
@@ -307,9 +226,9 @@ Com CPU:
 - **Detect faces** funciona, mas pode ser mais lento.
 - Aceleração NVIDIA/AMD/Intel/Apple pode não aparecer ou pode não ser usada.
 
-## Instalação com NVIDIA CUDA 
+### Instalação com NVIDIA CUDA 
 
-CUDA só afeta o modo **Detect faces** quando PyTorch foi instalado com suporte à sua versão de CUDA. Ela também pode ajudar nos cortes de vídeo se o FFmpeg tiver suporte a NVENC.
+CUDA só afeta o modo **Detect faces** quando PyTorch foi instalado com suporte à sua versão de CUDA. Ela também pode ajudar nos cortes de vídeo.
 
 O `requirements.txt` fixa `torch==2.5.1` e `torchvision==0.20.1` sem escolher uma build CUDA específica. Para CUDA, instale PyTorch a partir do índice oficial da versão desejada.
 
@@ -335,7 +254,7 @@ True
 
 Se retornar `False`, o app ainda funciona em CPU, mas o modo **Detect faces** não usará a GPU.
 
-## NVIDIA sem CUDA
+### NVIDIA sem CUDA
 
 Mesmo sem PyTorch CUDA, a opção **NVIDIA** ainda pode acelerar cortes de vídeo se o FFmpeg tiver encoder NVENC (`h264_nvenc`) disponível.
 
@@ -344,7 +263,7 @@ Isso significa:
 - **Scene detection** e **Every seconds** podem usar NVIDIA para codificação.
 - **Detect faces** volta para CPU se `torch.cuda.is_available()` for `False`.
 
-## AMD
+### AMD
 
 No Scenespy, AMD é usada para codificação de vídeo via FFmpeg/AMF (`h264_amf`) quando disponível.
 
@@ -368,7 +287,7 @@ No Windows PowerShell:
 ffmpeg -hide_banner -encoders | Select-String h264_amf
 ```
 
-## Intel
+### Intel
 
 No Scenespy, Intel é usada para codificação de vídeo via FFmpeg/QSV (`h264_qsv`) quando disponível.
 
@@ -392,7 +311,7 @@ No Windows PowerShell:
 ffmpeg -hide_banner -encoders | Select-String h264_qsv
 ```
 
-## Apple Silicon e macOS
+### Apple Silicon e macOS
 
 No macOS, o app pode usar codificação via VideoToolbox (`h264_videotoolbox`) quando o FFmpeg instalado oferece esse encoder.
 
@@ -404,7 +323,7 @@ ffmpeg -hide_banner -encoders | grep h264_videotoolbox
 
 Observação: o modo **Detect faces** usa PyTorch em CPU no macOS nesta versão do app. A opção **Apple** é para codificação de vídeo, não para inferência facial.
 
-## FFmpeg e FFprobe
+### FFmpeg e FFprobe
 
 Scenespy precisa do FFmpeg e do FFprobe para ler, validar e cortar vídeos.
 
@@ -436,25 +355,6 @@ ffprobe -version
 ```
 
 Se todos os comandos funcionarem, a instalação básica está pronta.
-
-Para verificar CUDA:
-
-```bash
-python -c "import torch; print(torch.cuda.is_available())"
-```
-
-Para verificar encoders de hardware do FFmpeg:
-
-```bash
-ffmpeg -hide_banner -encoders
-```
-
-Procure por:
-
-- `h264_nvenc` para NVIDIA.
-- `h264_amf` para AMD.
-- `h264_qsv` para Intel.
-- `h264_videotoolbox` para Apple/macOS.
 
 ## Problemas comuns
 
@@ -494,14 +394,3 @@ Use Python 3.11. Algumas versões de Python podem não ter wheels compatíveis p
 
 O app declara `opencv-contrib-python` porque o MediaPipe depende dele. O Ultralytics também pode instalar `opencv-python`. Se `python -m pip check` não apontar conflito e o app abrir normalmente, não há ação obrigatória.
 
-## Distribuição
-
-Para usuários leigos, o ideal é distribuir uma versão pronta para Windows, preferencialmente como uma pasta com `.exe` ou um instalador.
-
-Uma versão empacotada evita que o usuário precise instalar Python, dependências, FFmpeg ou configurar ambiente virtual.
-
-Ao distribuir uma versão com FFmpeg incluído, mantenha também os arquivos de licença e informações da build usada.
-
-## Licença
-
-Veja o arquivo [LICENSE](LICENSE).
