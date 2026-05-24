@@ -5,6 +5,7 @@ Ajuda no processo de criação de conteúdo para quem trabalha com vídeo, exige
 
 O objetivo é simples: escolher um vídeo, escolher uma pasta de saída, selecionar o modo de corte e deixar o app processar. 
 
+---
 Face detection and cropping from video:
 
 <img src="https://private-user-images.githubusercontent.com/159738624/594887552-222c8977-bdea-41b0-8aa6-9ab088195f5f.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3Nzk2NTU0MDksIm5iZiI6MTc3OTY1NTEwOSwicGF0aCI6Ii8xNTk3Mzg2MjQvNTk0ODg3NTUyLTIyMmM4OTc3LWJkZWEtNDFiMC04YWE2LTlhYjA4ODE5NWY1Zi5wbmc_WC1BbXotQWxnb3JpdGhtPUFXUzQtSE1BQy1TSEEyNTYmWC1BbXotQ3JlZGVudGlhbD1BS0lBVkNPRFlMU0E1M1BRSzRaQSUyRjIwMjYwNTI0JTJGdXMtZWFzdC0xJTJGczMlMkZhd3M0X3JlcXVlc3QmWC1BbXotRGF0ZT0yMDI2MDUyNFQyMDM4MjlaJlgtQW16LUV4cGlyZXM9MzAwJlgtQW16LVNpZ25hdHVyZT1iYWI0NjNiZTBjNDcxNmY4ZDMwZGQxODgxNTQyMGZkYzAzZTgyZmVkOThjNGRiODkzODQ4ODM0YjAyMDk1NzNlJlgtQW16LVNpZ25lZEhlYWRlcnM9aG9zdCZyZXNwb25zZS1jb250ZW50LXR5cGU9aW1hZ2UlMkZwbmcifQ.Z0gxVTghTPQlXBJEgj1OvcYqs1sJisbXFQDG-MdVsbI" width="65%">
@@ -18,6 +19,8 @@ Detection and cutting of video scenes:
 
 <img src="https://private-user-images.githubusercontent.com/159738624/594885671-ae2498f9-720c-4b2e-b678-757703e9219d.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3Nzk2NTU0NTgsIm5iZiI6MTc3OTY1NTE1OCwicGF0aCI6Ii8xNTk3Mzg2MjQvNTk0ODg1NjcxLWFlMjQ5OGY5LTcyMGMtNGIyZS1iNjc4LTc1NzcwM2U5MjE5ZC5wbmc_WC1BbXotQWxnb3JpdGhtPUFXUzQtSE1BQy1TSEEyNTYmWC1BbXotQ3JlZGVudGlhbD1BS0lBVkNPRFlMU0E1M1BRSzRaQSUyRjIwMjYwNTI0JTJGdXMtZWFzdC0xJTJGczMlMkZhd3M0X3JlcXVlc3QmWC1BbXotRGF0ZT0yMDI2MDUyNFQyMDM5MThaJlgtQW16LUV4cGlyZXM9MzAwJlgtQW16LVNpZ25hdHVyZT0xNWRhZDUxYjVkMDE1YjY2NDg3Y2E3ZjE4MGEwZDhiZjVhYjAwZjdmOTg5ZDY0ZmU1ZjMzZjA2YWY4ODFmMTEwJlgtQW16LVNpZ25lZEhlYWRlcnM9aG9zdCZyZXNwb25zZS1jb250ZW50LXR5cGU9aW1hZ2UlMkZwbmcifQ.q0fuZnZXfsNvdWSZ6qVGRKEQV94rEIMA-qh0jGMcIZo" width="40%" alt="Output">
 
+## O que o app faz
+
 - Detecta e corta cenas de video.
 - Divide vídeos em segmentos por intervalo de segundos.
 - Detecta rostos e salva imagens dos melhores recortes encontrados.
@@ -25,23 +28,7 @@ Detection and cutting of video scenes:
 - Cria uma pasta de saída organizada para cada processamento.
 - Gera arquivos de metadata como `scenes.json` e, quando necessário, `cut_errors.json`.
 
-## Modos disponíveis
-
-### Scene detection
-
-Analisa o vídeo e tenta encontrar mudanças naturais de cena. É útil para filmes, séries, trailers, vídeos de gameplay, aulas editadas e conteúdos com cortes visuais. 
-É o modo que mais exige da máquina por causa do pipeline estatístico que tenta encontrar a diferença entre uma cena e outra.
-
-### Every seconds
-
-Corta o vídeo em partes com duração fixa. É o modo mais previsível: você escolhe o intervalo em segundos e o app divide o vídeo. 
-
-### Detect faces
-
-Procura rostos no vídeo e salva imagens dos rostos detectados. É um modo que pode percorrer cada frame do vídeo para encontrar os rostos, até aqueles difíceis de enxergar.
-Não faz classificação, portanto salva o rosto de uma mesma pessoa em momentos diferentes.
-
-# Como usar
+## Como usar
 
 1. Abra o Scenespy.
 2. Em **Source video**, selecione um ou mais vídeos.
@@ -57,9 +44,25 @@ Não faz classificação, portanto salva o rosto de uma mesma pessoa em momentos
 
 Os resultados serão criados dentro da pasta escolhida, em uma subpasta com data, modo, sensibilidade e aceleração usada.
 
+## Modos disponíveis
+
+### Scene detection
+
+Analisa o vídeo e tenta encontrar mudanças naturais de cena para cortar. É útil para filmes, séries, trailers, vídeos de gameplay, sem limite de tamanho. 
+É o modo que mais exige da máquina por causa do pipeline estatístico que tenta encontrar a diferença entre uma cena e outra.
+
+### Every seconds
+
+Corta o vídeo em partes com duração fixa. É o modo mais previsível: você escolhe o intervalo em segundos e o app divide o vídeo. 
+
+### Detect faces
+
+Procura rostos no vídeo e salva imagens dos rostos detectados. É um modo que pode percorrer cada frame do vídeo para encontrar rostos, até mesmo aqueles difíceis de visualizar.
+Não faz classificação por pessoa, salva o rosto de uma mesma pessoa em momentos diferentes.
+
 ## Sensibilidade
 
-- **Low**: detecta menos cortes. Melhor para vídeos calmos ou quando você quer evitar cortes falsos e fora de contexto. Pode ser bom para filmes, documentários e vídeos onde as sequências são mais longas.
+- **Low**: detecta menos cortes. Melhor para vídeos calmos ou quando você quer evitar cortes falsos e fora de contexto. Pode ser bom para filmes, documentários, vídeos onde as sequências são mais longas.
 - **Normal**: equilíbrio entre precisão e quantidade de cortes. Teste em seu vídeo e veja os resultados. 
 - **High**: detecta mais cortes. Melhor para vídeos rápidos, trailers, clipes e conteúdos com muita ação.
 - **Auto**: tenta escolher parâmetros automaticamente com base no vídeo. Não é usado no modo de rostos.
@@ -67,9 +70,6 @@ Os resultados serão criados dentro da pasta escolhida, em uma subpasta com data
 IMPORTANTE: Cada vídeo é único, portanto se um modo de sensibilidade funcionou para um video, nao quer dizer que funcionará em outro video. O teste sempre é a melhor solução.
 
 ## Aceleração
-
-Opções disponíveis:
-
 - **CPU**: opção mais compatível (padrão). Funciona em todos os modos, mas pode ser mais lenta.
 - **NVIDIA**: pode acelerar a codificação via FFmpeg/NVENC e também pode acelerar o modo de rostos via CUDA, se PyTorch com CUDA estiver instalado. 
 - **AMD**: pode acelerar codificação de vídeo via FFmpeg/AMF em sistemas compatíveis. Não acelera o modo de rostos.
@@ -78,8 +78,7 @@ Opções disponíveis:
 
 Hoje a forma mais relevante de acelerar o processamento é com NVIDIA CUDA, mas o app funcionará bem caso você não use CUDA, fique tranquilo.  
 
-
-## Formatos suportados
+### Formatos suportados
 
 O app aceita vídeos como:
 
@@ -93,19 +92,20 @@ O app aceita vídeos como:
 Arquivos inválidos, temporários ou corrompidos podem ser ignorados ou reparados automaticamente quando possível. 
 MKV suporta múltiplos áudios e pode apresentar problemas no container, por isso, em vídeos difíceis de processar, o app converterá de MKV para MP4 para tentar resolver o problema.
 
+---
 # Instalação
 
 ## Instalação rápida | GitHub Releases
 
 Use a versão pronta do Scenespy na aba **Releases** do GitHub. Não use o botão **Code > Download ZIP** se você quer apenas instalar e usar o app. Já existe um pacote de release para cada sistema operacional suportado:
 
-- Windows: `Scenespy-windows-x64`
-- Linux: `Scenespy-linux-x64`
-- macOS: `Scenespy-macos`
+- Windows: [Scenespy-Windows-x64](https://github.com/guilhermejaques/scenespy/releases/tag/0.1.0)
+- Linux: [Scenespy-Linux-x64](https://github.com/guilhermejaques/scenespy/releases/tag/0.1.0)
+- macOS: [Scenespy-MacOS-x64](https://github.com/guilhermejaques/scenespy/releases/tag/0.1.0)
 
-Baixe o pacote do seu sistema, extraia a pasta e rode o instalador de runtime que acompanha o app. Esse instalador configura as dependências externas usadas pelo app, como FFmpeg/FFprobe, Python privado e pacotes de IA que são necessários. Abra a linha de comando em seu sistema e localize o diretório do app para rodar o instalador. 
+Baixe o pacote para o seu sistema, extraia a pasta e rode o instalador `install_runtime` que acompanha o app. Esse instalador configura e instala as dependências externas usadas pelo app, como FFmpeg/FFprobe, Python privado e pacotes de IA que são necessários. Abra a linha de comando em seu sistema e localize o diretório do app para rodar o instalador, depois rode o app `Scenespy`. 
 
-Windows:
+Windows (instalador .bat pode rodar como administrador, use o botão direito para isso)
 
 ```bat
 install_runtime_windows.bat 
@@ -115,17 +115,17 @@ Scenespy.exe
 Linux e Mac OS:
 
 ```bash
-chmod +x install_runtime.sh  # Comando para permissão, se necessário 
+chmod +x install_runtime.sh  # Comando para permissão
 ./install_runtime.sh 
 ./Scenespy # App 
 ```
 
 Para usuários iniciantes que não sabem rodar a linha de comando:
-Você só precisa localizar a pasta onde está o app e rodar o instalador antes de executar o app. veja:
+você só precisa localizar a pasta onde está o app e rodar o instalador antes de executar o app. Veja um exemplo:
 
-`cd Downloads` >  `cd Scenespy-linux-x64` > `./install_runtime.sh`
+`cd Downloads` >  `cd Scenespy-Linux-x64` > `chmod +x install_runtime.sh` > `./install_runtime.sh`
 
-Mais comandos:
+### Comandos para usar no terminal:
 Abrir terminal
 
 | Sistema | Como abrir |
