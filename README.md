@@ -265,16 +265,23 @@ This means:
 - **Scene detection** and **Every seconds** can use NVIDIA for encoding.
 - **Detect faces** falls back to CPU if `torch.cuda.is_available()` is `False`.
 
-Standard CPU-only installation process
+The installation process is standard (with Python 3.11, FFmpeg, and FFprobe installed).
 ```bash
 python -m pip install -r requirements.txt
 ```
 
 ---
 
+## More information
+
 ### AMD
 
 In Scenespy, AMD is used for video encoding through FFmpeg/AMF (`h264_amf`) when available.
+
+The installation process is standard (with Python 3.11, FFmpeg, and FFprobe installed).
+```bash
+python -m pip install -r requirements.txt
+```
 
 Practical requirements:
 
@@ -302,6 +309,11 @@ ffmpeg -hide_banner -encoders | Select-String h264_amf
 
 In Scenespy, Intel is used for video encoding through FFmpeg/QSV (`h264_qsv`) when available.
 
+The installation process is standard (with Python 3.11, FFmpeg, and FFprobe installed).
+```bash
+python -m pip install -r requirements.txt
+```
+
 Practical requirements:
 
 - Intel CPU/GPU with Quick Sync Video.
@@ -327,6 +339,11 @@ ffmpeg -hide_banner -encoders | Select-String h264_qsv
 ### Apple Silicon and MacOS
 
 On MacOS, the app can use VideoToolbox encoding (`h264_videotoolbox`) when the installed FFmpeg provides this encoder.
+
+The installation process is standard (with Python 3.11, FFmpeg, and FFprobe installed).
+```bash
+python -m pip install -r requirements.txt
+```
 
 Encoder test:
 
