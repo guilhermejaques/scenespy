@@ -353,7 +353,7 @@ ffmpeg -hide_banner -encoders | grep h264_videotoolbox
 
 Note: **Detect faces** mode uses PyTorch on CPU on macOS in this app version. The **Apple** option is for video encoding, not facial inference.
 
-### FFmpeg and FFprobe
+# FFmpeg and FFprobe
 
 Scenespy requires FFmpeg and FFprobe to read, validate, and cut videos.
 
@@ -373,20 +373,7 @@ brew install ffmpeg
 
 When starting, Scenespy first searches in `bin/<system>/`. If not found, it searches in the system `PATH`.
 
-## Verifying installation from source code
-
-After installing from source, run:
-
-```bash
-python -m pip check
-python -c "import customtkinter, PIL, numpy, cv2, av, scenedetect, ultralytics, mediapipe, torch; print('ok')"
-ffmpeg -version
-ffprobe -version
-```
-
-If all commands work, the basic installation is ready.
-
-## Common problems
+# Common problems
 
 ### `ffmpeg` or `ffprobe` not found
 
