@@ -1,144 +1,149 @@
 # Scenespy
 
-Scenespy é um app desktop para detectar diferentes cenas de um vídeo e separar automaticamente. Ele pode detectar mudanças de cena, cortar por intervalo fixo de tempo ou extrair rostos encontrados no vídeo. 
-Ajuda no processo de criação de conteúdo para quem trabalha com vídeo, exige pouco de seu computador e não roda modelos de AI pesados.
+Scenespy is a desktop app designed to detect different scenes in a video and automatically separate them. It can detect scene changes, cut videos by fixed time intervals, or extract faces found in the video. It helps streamline the content creation workflow for people who work with video, requires very little from your computer, and does not run heavy AI models.
 
-O objetivo é simples: escolher um vídeo, escolher uma pasta de saída, selecionar o modo de corte e deixar o app processar. 
+The goal is simple: choose a video, choose an output folder, select the cutting mode, and let the app process it.
 
 ---
 Face detection and cropping from video:
 
-<img width="65%" height="805" alt="Image" src="https://github.com/user-attachments/assets/222c8977-bdea-41b0-8aa6-9ab088195f5f" />
-<img width="60%" height="930" alt="Image" src="https://github.com/user-attachments/assets/8bdfd2b3-a0b2-4244-97c0-bc078a1ff509" />
-
+<img width="65%" alt="Image" src="https://github.com/user-attachments/assets/222c8977-bdea-41b0-8aa6-9ab088195f5f" />
+<img width="65%" alt="Image" src="https://github.com/user-attachments/assets/8bdfd2b3-a0b2-4244-97c0-bc078a1ff509" />
 
 ---
 Detection and cutting of video scenes:
 
-<img width="65%" height="800" alt="Image" src="https://github.com/user-attachments/assets/649c86c9-1149-4148-a3ef-d1ecda397edd" />
-<img width="60%" height="560" alt="Image" src="https://github.com/user-attachments/assets/ae2498f9-720c-4b2e-b678-757703e9219d" />
+<img width="65%" alt="Image" src="https://github.com/user-attachments/assets/649c86c9-1149-4148-a3ef-d1ecda397edd" />
+<img width="65%" alt="Image" src="https://github.com/user-attachments/assets/ae2498f9-720c-4b2e-b678-757703e9219d" />
 
-## O que o app faz
+---
 
-- Detecta e corta cenas de video.
-- Divide vídeos em segmentos por intervalo de segundos.
-- Detecta rostos e salva imagens dos melhores recortes encontrados.
-- Processa um ou vários vídeos em fila.
-- Cria uma pasta de saída organizada para cada processamento.
-- Gera arquivos de metadata como `scenes.json` e, quando necessário, `cut_errors.json`.
+## What the app does
 
-## Como usar
+- Detects and cuts video scenes.
+- Splits videos into segments by time interval in seconds.
+- Detects faces and saves images of the best crops found.
+- Processes one or multiple videos in queue.
+- Creates an organized output folder for each process.
+- Generates metadata files such as `scenes.json` and, when necessary, `cut_errors.json`.
 
-1. Abra o Scenespy.
-2. Em **Source video**, selecione um ou mais vídeos.
-3. Em **Output folder**, escolha onde os arquivos serão salvos.
-4. Escolha o modo:
+## How to use
+
+1. Open Scenespy.
+2. In **Source video**, select one or more videos.
+3. In **Output folder**, choose where the files will be saved.
+4. Select the mode:
    - **Scene detection**
    - **Every seconds**
    - **Detect faces**
-5. Ajuste a sensibilidade, se necessário.
-6. Escolha a aceleração de hardware disponível.
-7. Clique em **Start**.
-8. Aguarde o processamento terminar.
+5. Adjust sensitivity if necessary.
+6. Choose the available hardware acceleration.
+7. Click **Start**.
+8. Wait for the processing to finish.
 
-Os resultados serão criados dentro da pasta escolhida, em uma subpasta com data, modo, sensibilidade e aceleração usada.
+The results will be created inside the selected folder, in a subfolder containing the date, mode, sensitivity, and acceleration used.
 
-## Modos disponíveis
+---
+
+## Available modes
 
 ### Scene detection
 
-Analisa o vídeo e tenta encontrar mudanças naturais de cena para cortar. É útil para filmes, séries, trailers, vídeos de gameplay, sem limite de tamanho. 
-É o modo que mais exige da máquina por causa do pipeline estatístico que tenta encontrar a diferença entre uma cena e outra.
+Analyzes the video and tries to find natural scene changes to cut the video. Useful for movies, series, trailers, gameplay videos, with no size limit.  
+This is the mode that requires the most from the machine because of the statistical pipeline that tries to identify the difference between one scene and another.
 
 ### Every seconds
 
-Corta o vídeo em partes com duração fixa. É o modo mais previsível: você escolhe o intervalo em segundos e o app divide o vídeo. 
+Cuts the video into fixed-duration parts. It is the most predictable mode: you choose the interval in seconds and the app splits the video.
 
 ### Detect faces
 
-Procura rostos no vídeo e salva imagens dos rostos detectados. É um modo que pode percorrer cada frame do vídeo para encontrar rostos, até mesmo aqueles difíceis de visualizar.
-Não faz classificação por pessoa, salva o rosto de uma mesma pessoa em momentos diferentes.
+Searches for faces in the video and saves images of the detected faces. It is a mode that can scan every frame of the video to find faces, even those difficult to visualize.  
+It does not classify by person and saves the same person's face at different moments.
 
-## Sensibilidade
+## Sensitivity
 
-- **Low**: detecta menos cortes. Melhor para vídeos calmos ou quando você quer evitar cortes falsos e fora de contexto. Pode ser bom para filmes, documentários, vídeos onde as sequências são mais longas.
-- **Normal**: equilíbrio entre precisão e quantidade de cortes. Teste em seu vídeo e veja os resultados. 
-- **High**: detecta mais cortes. Melhor para vídeos rápidos, trailers, clipes e conteúdos com muita ação.
-- **Auto**: tenta escolher parâmetros automaticamente com base no vídeo. Não é usado no modo de rostos.
+- **Low**: detects fewer cuts. Better for calm videos or when you want to avoid false and out-of-context cuts. Can work well for movies, documentaries, and videos where sequences are longer.
+- **Normal**: balance between precision and number of cuts. Test it on your video and check the results.
+- **High**: detects more cuts. Better for fast-paced videos, trailers, clips, and content with a lot of action.
+- **Auto**: tries to automatically choose parameters based on the video. Not used in face mode.
 
-IMPORTANTE: Cada vídeo é único, portanto se um modo de sensibilidade funcionou para um video, nao quer dizer que funcionará em outro video. O teste sempre é a melhor solução.
+IMPORTANT: Every video is unique, so if one sensitivity mode worked for a specific video, it does not mean it will work for another. Testing is always the best solution.
 
-## Aceleração
-- **CPU**: opção mais compatível (padrão). Funciona em todos os modos, mas pode ser mais lenta.
-- **NVIDIA**: pode acelerar a codificação via FFmpeg/NVENC e também pode acelerar o modo de rostos via CUDA, se PyTorch com CUDA estiver instalado. 
-- **AMD**: pode acelerar codificação de vídeo via FFmpeg/AMF em sistemas compatíveis. Não acelera o modo de rostos.
-- **Intel**: pode acelerar codificação de vídeo via FFmpeg/QSV em sistemas compatíveis. Não acelera o modo de rostos.
-- **Apple**: pode acelerar codificação de vídeo via FFmpeg/VideoToolbox no macOS. Não acelera o modo de rostos. 
+## Acceleration
 
-Hoje a forma mais relevante de acelerar o processamento é com NVIDIA CUDA, mas o app funcionará bem caso você não use CUDA, fique tranquilo.  
+- **CPU**: most compatible option (default). Works in all modes, but may be slower.
+- **NVIDIA**: can accelerate encoding through FFmpeg/NVENC and can also accelerate face mode through CUDA if PyTorch with CUDA support is installed.
+- **AMD**: can accelerate video encoding through FFmpeg/AMF on compatible systems. Does not accelerate face mode.
+- **Intel**: can accelerate video encoding through FFmpeg/QSV on compatible systems. Does not accelerate face mode.
+- **Apple**: can accelerate video encoding through FFmpeg/VideoToolbox on macOS. Does not accelerate face mode.
 
-### Formatos suportados
+Today, the most relevant way to accelerate processing is with NVIDIA CUDA, but the app will work fine even if you do not use CUDA.
 
-O app aceita vídeos como:
+### Supported formats
 
-- `.mp4` O formato mais compatível.
-- `.mkv` 
+The app accepts videos such as:
+
+- `.mp4` The most compatible format.
+- `.mkv`
 - `.mov`
 - `.avi`
 - `.webm`
 - `.m4v`
 
-Arquivos inválidos, temporários ou corrompidos podem ser ignorados ou reparados automaticamente quando possível. 
-MKV suporta múltiplos áudios e pode apresentar problemas no container, por isso, em vídeos difíceis de processar, o app converterá de MKV para MP4 para tentar resolver o problema.
+Invalid, temporary, or corrupted files may be ignored or automatically repaired when possible.  
+MKV supports multiple audio tracks and may present container issues, so for difficult-to-process videos, the app will convert MKV to MP4 in an attempt to solve the problem.
 
 ---
-# Instalação
 
-## Instalação rápida | GitHub Releases
+# Installation
 
-Use a versão pronta do Scenespy na aba **Releases** do GitHub. Não use o botão **Code > Download ZIP** se você quer apenas instalar e usar o app. Já existe um pacote de release para cada sistema operacional suportado:
+## Quick installation | GitHub Releases
+
+Use the ready-to-use version of Scenespy from the GitHub **Releases** tab. Do not use the **Code > Download ZIP** button if you only want to install and use the app. A release package already exists for each supported operating system:
 
 - Windows: [Scenespy-Windows-x64](https://github.com/guilhermejaques/scenespy/releases/tag/0.1.0)
 - Linux: [Scenespy-Linux-x64](https://github.com/guilhermejaques/scenespy/releases/tag/0.1.0)
 - macOS: [Scenespy-MacOS-x64](https://github.com/guilhermejaques/scenespy/releases/tag/0.1.0)
 
-Baixe o pacote para o seu sistema, extraia a pasta e rode o instalador `install_runtime` que acompanha o app. Esse instalador configura e instala as dependências externas usadas pelo app, como FFmpeg/FFprobe, Python privado e pacotes de IA que são necessários. Abra a linha de comando em seu sistema e localize o diretório do app para rodar o instalador, depois rode o app `Scenespy`. 
+Download the package for your system, extract the folder, and run the `install_runtime` installer included with the app. This installer configures and installs the external dependencies used by the app, such as FFmpeg/FFprobe, private Python, and AI packages that are required. Open the command line on your system and locate the app directory to run the installer, then launch the `Scenespy` app.
 
-Windows (instalador .bat pode rodar como administrador, use o botão direito para isso)
+Windows (`.bat` installer may run as administrator, use right-click for that)
 
 ```bat
 install_runtime_windows.bat 
 Scenespy.exe
 ```
 
-Linux e Mac OS:
+Linux and macOS:
 
 ```bash
-chmod +x install_runtime.sh  # Comando para permissão
+chmod +x install_runtime.sh  # Permission command
 ./install_runtime.sh 
 ./Scenespy # App 
 ```
 
-Para usuários iniciantes que não sabem rodar a linha de comando:
-você só precisa localizar a pasta onde está o app e rodar o instalador antes de executar o app. Veja um exemplo:
+For beginner users who do not know how to use the command line:  
+you only need to locate the folder where the app is and run the installer before executing the app. Example:
 
-`cd Downloads` >  `cd Scenespy-Linux-x64` > `chmod +x install_runtime.sh` > `./install_runtime.sh`
+`cd Downloads` > `cd Scenespy-Linux-x64` > `chmod +x install_runtime.sh` > `./install_runtime.sh`
 
-### Comandos para usar no terminal:
-Abrir terminal
+### Commands to use in the terminal
 
-| Sistema | Como abrir |
+Open terminal
+
+| System | How to open |
 |---|---|
 | Windows | `Win + R` → `cmd` |
-| PowerShell | Pesquisar “PowerShell” |
-| macOS | `Command + Espaço` → `Terminal` |
+| PowerShell | Search for “PowerShell” |
+| macOS | `Command + Space` → `Terminal` |
 | Linux | `Ctrl + Alt + T` |
 
 ---
 
-Ver em qual pasta você está
+Check which folder you are in
 
-| Sistema | Comando |
+| System | Command |
 |---|---|
 | Windows CMD | `cd` |
 | PowerShell | `pwd` |
@@ -146,9 +151,9 @@ Ver em qual pasta você está
 
 ---
 
-Listar arquivos
+List files
 
-| Sistema | Comando |
+| System | Command |
 |---|---|
 | Windows CMD | `dir` |
 | PowerShell | `ls` |
@@ -156,82 +161,82 @@ Listar arquivos
 
 ---
 
-Entrar em uma pasta
+Enter a folder
 
-| Sistema | Comando |
+| System | Command |
 |---|---|
 | Windows | `cd Downloads` |
 | macOS/Linux | `cd Downloads` |
 
 ---
 
-Voltar uma pasta
+Go back one folder
 
-| Sistema | Comando |
+| System | Command |
 |---|---|
-| Todos | `cd ..` |
+| All | `cd ..` |
 
 ---
 
-Rodar um arquivo
-| Sistema | Comando |
+Run a file
+
+| System | Command |
 |---|---|
-| Todos | `./ARQUIVO.SH` |
+| All | `./FILE.SH` |
 
+## Run from source code
 
-## Rodar pelo código-fonte
+You are responsible for installing Python, Python dependencies, FFmpeg/FFprobe, and libraries.
 
-Você é responsável por instalar Python, dependências Python, FFmpeg/FFprobe e bibliotecas.
-
-Requisitos para código-fonte:
+Requirements for source code:
 
 - Python 3.11.
-- FFmpeg e FFprobe.
-- Dependências do `requirements.txt`.
-- No Windows, Microsoft Visual C++ Redistributable x64 pode ser necessário para o PyTorch.
+- FFmpeg and FFprobe.
+- Dependencies from `requirements.txt`.
+- On Windows, Microsoft Visual C++ Redistributable x64 may be required for PyTorch.
 
-No Arch, use `pyenv` ou outro método equivalente para garantir Python 3.11, porque a versão `python` dos repositórios pode ser mais nova que a suportada pelas dependências de IA.
+On Arch, use `pyenv` or another equivalent method to ensure Python 3.11, because the `python` version in the repositories may be newer than what AI dependencies support.
 
-Dependências Python principais instaladas por `requirements.txt`:
+Main Python dependencies installed by `requirements.txt`:
 
-- `customtkinter`: interface desktop.
-- `pillow`: imagens e prévias.
-- `numpy`: processamento numérico.
-- `opencv-contrib-python`: leitura de frames, análise visual e dependência do MediaPipe.
-- `av`: backend PyAV usado pelo PySceneDetect.
-- `scenedetect`: detecção base de mudanças de cena.
-- `torch` e `torchvision`: necessários para o modo **Detect faces**.
-- `ultralytics`: carregamento do modelo YOLO de faces.
-- `mediapipe`: validação e landmarks faciais.
+- `customtkinter`: desktop interface.
+- `pillow`: images and previews.
+- `numpy`: numerical processing.
+- `opencv-contrib-python`: frame reading, visual analysis, and MediaPipe dependency.
+- `av`: PyAV backend used by PySceneDetect.
+- `scenedetect`: base scene change detection.
+- `torch` and `torchvision`: required for **Detect faces** mode.
+- `ultralytics`: loads the YOLO face model.
+- `mediapipe`: facial validation and landmarks.
 
-### Instalação para CPU apenas 
+### CPU-only installation
 
-Use esta opção se você não precisa de CUDA NVIDIA ou quer a instalação mais simples.
+Use this option if you do not need NVIDIA CUDA or want the simplest installation.
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-Se você quiser garantir uma instalação estritamente CPU para PyTorch:
+If you want to guarantee a strictly CPU-only PyTorch installation:
 
 ```bash
 python -m pip install --force-reinstall torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
 ```
 
-Com CPU:
+With CPU:
 
-- **Scene detection** funciona.
-- **Every seconds** funciona.
-- **Detect faces** funciona, mas pode ser mais lento.
-- Aceleração NVIDIA/AMD/Intel/Apple pode não aparecer ou pode não ser usada.
+- **Scene detection** works.
+- **Every seconds** works.
+- **Detect faces** works, but may be slower.
+- NVIDIA/AMD/Intel/Apple acceleration may not appear or may not be used.
 
-### Instalação com NVIDIA CUDA 
+### Installation with NVIDIA CUDA
 
-CUDA só afeta o modo **Detect faces** quando PyTorch foi instalado com suporte à sua versão de CUDA. Ela também pode ajudar nos cortes de vídeo.
+CUDA only affects **Detect faces** mode when PyTorch was installed with support for your CUDA version. It can also help with video cutting.
 
-O `requirements.txt` fixa `torch==2.5.1` e `torchvision==0.20.1` sem escolher uma build CUDA específica. Para CUDA, instale PyTorch a partir do índice oficial da versão desejada.
+The `requirements.txt` pins `torch==2.5.1` and `torchvision==0.20.1` without choosing a specific CUDA build. For CUDA, install PyTorch from the official index for the desired version.
 
-Exemplo para CUDA 12.1:
+Example for CUDA 12.1:
 
 ```bash
 python -m pip install --upgrade pip
@@ -239,48 +244,48 @@ python -m pip install -r requirements.txt
 python -m pip install --force-reinstall torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
 ```
 
-Depois, confirme se CUDA foi detectada:
+Then confirm whether CUDA was detected:
 
 ```bash
 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ```
 
-O resultado esperado para CUDA ativa é:
+Expected result for active CUDA:
 
 ```text
 True
 ```
 
-Se retornar `False`, o app ainda funciona em CPU, mas o modo **Detect faces** não usará a GPU.
+If it returns `False`, the app will still work on CPU, but **Detect faces** mode will not use the GPU.
 
-### NVIDIA sem CUDA
+### NVIDIA without CUDA
 
-Mesmo sem PyTorch CUDA, a opção **NVIDIA** ainda pode acelerar cortes de vídeo se o FFmpeg tiver encoder NVENC (`h264_nvenc`) disponível.
+Even without PyTorch CUDA, the **NVIDIA** option can still accelerate video cutting if FFmpeg has the NVENC encoder (`h264_nvenc`) available.
 
-Isso significa:
+This means:
 
-- **Scene detection** e **Every seconds** podem usar NVIDIA para codificação.
-- **Detect faces** volta para CPU se `torch.cuda.is_available()` for `False`.
+- **Scene detection** and **Every seconds** can use NVIDIA for encoding.
+- **Detect faces** falls back to CPU if `torch.cuda.is_available()` is `False`.
 
 ### AMD
 
-No Scenespy, AMD é usada para codificação de vídeo via FFmpeg/AMF (`h264_amf`) quando disponível.
+In Scenespy, AMD is used for video encoding through FFmpeg/AMF (`h264_amf`) when available.
 
-Requisitos práticos:
+Practical requirements:
 
-- GPU AMD compatível.
-- Driver AMD instalado.
-- FFmpeg compilado com suporte a AMF.
+- Compatible AMD GPU.
+- AMD driver installed.
+- FFmpeg compiled with AMF support.
 
-AMD não acelera o modo **Detect faces** neste app. O modo de rostos usa CPU ou NVIDIA CUDA.
+AMD does not accelerate **Detect faces** mode in this app. Face mode uses CPU or NVIDIA CUDA.
 
-Para testar se o FFmpeg reconhece AMF:
+To test whether FFmpeg recognizes AMF:
 
 ```bash
 ffmpeg -hide_banner -encoders | grep h264_amf
 ```
 
-No Windows PowerShell:
+On Windows PowerShell:
 
 ```powershell
 ffmpeg -hide_banner -encoders | Select-String h264_amf
@@ -288,49 +293,49 @@ ffmpeg -hide_banner -encoders | Select-String h264_amf
 
 ### Intel
 
-No Scenespy, Intel é usada para codificação de vídeo via FFmpeg/QSV (`h264_qsv`) quando disponível.
+In Scenespy, Intel is used for video encoding through FFmpeg/QSV (`h264_qsv`) when available.
 
-Requisitos práticos:
+Practical requirements:
 
-- CPU/GPU Intel com Quick Sync Video.
-- Driver Intel atualizado.
-- FFmpeg compilado com suporte a QSV.
+- Intel CPU/GPU with Quick Sync Video.
+- Updated Intel driver.
+- FFmpeg compiled with QSV support.
 
-Intel não acelera o modo **Detect faces** neste app.
+Intel does not accelerate **Detect faces** mode in this app.
 
-Teste:
+Test:
 
 ```bash
 ffmpeg -hide_banner -encoders | grep h264_qsv
 ```
 
-No Windows PowerShell:
+On Windows PowerShell:
 
 ```powershell
 ffmpeg -hide_banner -encoders | Select-String h264_qsv
 ```
 
-### Apple Silicon e macOS
+### Apple Silicon and macOS
 
-No macOS, o app pode usar codificação via VideoToolbox (`h264_videotoolbox`) quando o FFmpeg instalado oferece esse encoder.
+On macOS, the app can use VideoToolbox encoding (`h264_videotoolbox`) when the installed FFmpeg provides this encoder.
 
-Teste do encoder:
+Encoder test:
 
 ```bash
 ffmpeg -hide_banner -encoders | grep h264_videotoolbox
 ```
 
-Observação: o modo **Detect faces** usa PyTorch em CPU no macOS nesta versão do app. A opção **Apple** é para codificação de vídeo, não para inferência facial.
+Note: **Detect faces** mode uses PyTorch on CPU on macOS in this app version. The **Apple** option is for video encoding, not facial inference.
 
-### FFmpeg e FFprobe
+### FFmpeg and FFprobe
 
-Scenespy precisa do FFmpeg e do FFprobe para ler, validar e cortar vídeos.
+Scenespy requires FFmpeg and FFprobe to read, validate, and cut videos.
 
-Nas versões prontas da aba **Releases**, o instalador de runtime baixa ou instala FFmpeg/FFprobe automaticamente.
+In the ready-to-use versions from the **Releases** tab, the runtime installer automatically downloads or installs FFmpeg/FFprobe.
 
-No Windows, `install_runtime_windows.bat` instala os binários do FFmpeg essentials build da Gyan.dev em `%LOCALAPPDATA%/Scenespy/runtime/`.
+On Windows, `install_runtime_windows.bat` installs the FFmpeg essentials build binaries from Gyan.dev into `%LOCALAPPDATA%/Scenespy/runtime/`.
 
-No Linux e no macOS, a recomendação é instalar pelo sistema:
+On Linux and macOS, the recommendation is to install through the system:
 
 ```bash
 sudo apt install ffmpeg
@@ -340,11 +345,11 @@ sudo apt install ffmpeg
 brew install ffmpeg
 ```
 
-Ao iniciar, o Scenespy procura primeiro em `bin/<sistema>/`. Se não encontrar, procura no `PATH` do sistema.
+When starting, Scenespy first searches in `bin/<system>/`. If not found, it searches in the system `PATH`.
 
-## Verificação da instalação pelo código-fonte
+## Verifying installation from source code
 
-Depois de instalar pelo código-fonte, rode:
+After installing from source, run:
 
 ```bash
 python -m pip check
@@ -353,43 +358,42 @@ ffmpeg -version
 ffprobe -version
 ```
 
-Se todos os comandos funcionarem, a instalação básica está pronta.
+If all commands work, the basic installation is ready.
 
-## Problemas comuns
+## Common problems
 
-### `ffmpeg` ou `ffprobe` não encontrado
+### `ffmpeg` or `ffprobe` not found
 
-Instale FFmpeg e garanta que os executáveis estejam no `PATH`, ou coloque os binários em `bin/<sistema>/`.
+Install FFmpeg and make sure the executables are available in the `PATH`, or place the binaries in `bin/<system>/`.
 
-### Modo Detect faces não abre
+### Detect faces mode does not open
 
-Verifique se `torch`, `ultralytics`, `mediapipe` e o modelo `models/yolov8n-face.pt` existem.
+Check whether `torch`, `ultralytics`, `mediapipe`, and the `models/yolov8n-face.pt` model exist.
 
 ```bash
 python -c "import torch, ultralytics, mediapipe; print('ok')"
 ```
 
-### CUDA não aparece
+### CUDA does not appear
 
-Verifique se você instalou uma build CUDA do PyTorch e se o driver NVIDIA está atualizado.
+Check whether you installed a CUDA build of PyTorch and whether the NVIDIA driver is updated.
 
 ```bash
 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ```
 
-### AMD, Intel ou Apple não aparecem
+### AMD, Intel, or Apple do not appear
 
-Essas opções dependem do FFmpeg, dos drivers e do sistema operacional. Confira se o encoder correspondente existe:
+These options depend on FFmpeg, drivers, and the operating system. Check whether the corresponding encoder exists:
 
 ```bash
 ffmpeg -hide_banner -encoders
 ```
 
-### Instalação falha no MediaPipe
+### MediaPipe installation fails
 
-Use Python 3.11. Algumas versões de Python podem não ter wheels compatíveis para todas as dependências.
+Use Python 3.11. Some Python versions may not have compatible wheels for all dependencies.
 
-### Existem `opencv-python` e `opencv-contrib-python` instalados
+### Both `opencv-python` and `opencv-contrib-python` are installed
 
-O app declara `opencv-contrib-python` porque o MediaPipe depende dele. O Ultralytics também pode instalar `opencv-python`. Se `python -m pip check` não apontar conflito e o app abrir normalmente, não há ação obrigatória.
-
+The app declares `opencv-contrib-python` because MediaPipe depends on it. Ultralytics may also install `opencv-python`. If `python -m pip check` does not report conflicts and the app opens normally, no mandatory action is required.
