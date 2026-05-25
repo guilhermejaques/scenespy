@@ -184,8 +184,8 @@ You are responsible for installing Python, Python dependencies, FFmpeg/FFprobe, 
 
 Requirements for source code:
 
-- Python 3.11.X
-- FFmpeg and FFprobe.
+- [Python 3.11.X](https://www.python.org/downloads/)
+- [FFmpeg](https://ffmpeg.org/download.html) and [FFprobe](https://ffmpeg.org/download.html).
 - Dependencies from `requirements.txt`.
 - On Windows, Microsoft Visual C++ Redistributable x64 may be required for PyTorch.
 
@@ -360,6 +360,9 @@ Scenespy requires FFmpeg and FFprobe to read, validate, and cut videos.
 In the ready-to-use versions from the **Releases** tab, the runtime installer automatically downloads or installs FFmpeg/FFprobe.
 
 On Windows, `install_runtime_windows.bat` installs the FFmpeg essentials build binaries from Gyan.dev into `%LOCALAPPDATA%/Scenespy/runtime/`.
+
+See the [FFmpeg](https://ffmpeg.org/) website for more information.
+
 
 On Linux and MacOS, the recommendation is to install through the system:
 
