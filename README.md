@@ -115,13 +115,15 @@ install_runtime_windows.bat
 Scenespy.exe
 ```
 
-Linux and macOS:
+Linux and MacOS:
 
 ```bash
 chmod +x install_runtime.sh  # Permission command
 ./install_runtime.sh 
 ./Scenespy # App 
 ```
+
+---
 
 For beginner users who do not know how to use the command line:  
 you only need to locate the folder where the app is and run the installer before executing the app. Example:
@@ -136,10 +138,8 @@ Open terminal
 |---|---|
 | Windows | `Win + R` → `cmd` |
 | PowerShell | Search for “PowerShell” |
-| macOS | `Command + Space` → `Terminal` |
+| MacOS | `Command + Space` → `Terminal` |
 | Linux | `Ctrl + Alt + T` |
-
----
 
 Check which folder you are in
 
@@ -147,9 +147,7 @@ Check which folder you are in
 |---|---|
 | Windows CMD | `cd` |
 | PowerShell | `pwd` |
-| macOS/Linux | `pwd` |
-
----
+| MacOS/Linux | `pwd` |
 
 List files
 
@@ -157,18 +155,14 @@ List files
 |---|---|
 | Windows CMD | `dir` |
 | PowerShell | `ls` |
-| macOS/Linux | `ls` |
-
----
+| MacOS/Linux | `ls` |
 
 Enter a folder
 
 | System | Command |
 |---|---|
 | Windows | `cd Downloads` |
-| macOS/Linux | `cd Downloads` |
-
----
+| MacOS/Linux | `cd Downloads` |
 
 Go back one folder
 
@@ -176,13 +170,13 @@ Go back one folder
 |---|---|
 | All | `cd ..` |
 
----
-
 Run a file
 
 | System | Command |
 |---|---|
-| All | `./FILE.SH` |
+| All | `./filename.sh` |
+
+---
 
 ## Run from source code
 
@@ -190,7 +184,7 @@ You are responsible for installing Python, Python dependencies, FFmpeg/FFprobe, 
 
 Requirements for source code:
 
-- Python 3.11.
+- Python 3.11.X
 - FFmpeg and FFprobe.
 - Dependencies from `requirements.txt`.
 - On Windows, Microsoft Visual C++ Redistributable x64 may be required for PyTorch.
@@ -230,6 +224,8 @@ With CPU:
 - **Detect faces** works, but may be slower.
 - NVIDIA/AMD/Intel/Apple acceleration may not appear or may not be used.
 
+---
+
 ### Installation with NVIDIA CUDA
 
 CUDA only affects **Detect faces** mode when PyTorch was installed with support for your CUDA version. It can also help with video cutting.
@@ -258,6 +254,8 @@ True
 
 If it returns `False`, the app will still work on CPU, but **Detect faces** mode will not use the GPU.
 
+---
+
 ### NVIDIA without CUDA
 
 Even without PyTorch CUDA, the **NVIDIA** option can still accelerate video cutting if FFmpeg has the NVENC encoder (`h264_nvenc`) available.
@@ -266,6 +264,8 @@ This means:
 
 - **Scene detection** and **Every seconds** can use NVIDIA for encoding.
 - **Detect faces** falls back to CPU if `torch.cuda.is_available()` is `False`.
+
+---
 
 ### AMD
 
@@ -291,6 +291,8 @@ On Windows PowerShell:
 ffmpeg -hide_banner -encoders | Select-String h264_amf
 ```
 
+---
+
 ### Intel
 
 In Scenespy, Intel is used for video encoding through FFmpeg/QSV (`h264_qsv`) when available.
@@ -314,6 +316,8 @@ On Windows PowerShell:
 ```powershell
 ffmpeg -hide_banner -encoders | Select-String h264_qsv
 ```
+
+---
 
 ### Apple Silicon and macOS
 
