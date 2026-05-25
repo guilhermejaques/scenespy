@@ -191,10 +191,6 @@ Requirements for source code:
 
 On Arch, use `pyenv` or another equivalent method to ensure Python 3.11, because the `python` version in the repositories may be newer than what AI dependencies support.
 
-```bash
-python -m pip install -r requirements.txt
-```
-
 Main Python dependencies installed by `requirements.txt`:
 
 - `customtkinter`: desktop interface.
@@ -206,6 +202,11 @@ Main Python dependencies installed by `requirements.txt`:
 - `torch` and `torchvision`: required for **Detect faces** mode.
 - `ultralytics`: loads the YOLO face model.
 - `mediapipe`: facial validation and landmarks.
+
+```bash
+python -m pip install -r requirements.txt
+```
+
 
 ---
 
