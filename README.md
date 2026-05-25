@@ -80,7 +80,7 @@ IMPORTANT: Every video is unique, so if one sensitivity mode worked for a specif
 
 Today, the most relevant way to accelerate processing is with NVIDIA CUDA, but the app will work fine even if you do not use CUDA.
 
-### Supported formats
+## Supported formats
 
 The app accepts videos such as:
 
