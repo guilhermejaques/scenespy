@@ -191,6 +191,10 @@ Requirements for source code:
 
 On Arch, use `pyenv` or another equivalent method to ensure Python 3.11, because the `python` version in the repositories may be newer than what AI dependencies support.
 
+```bash
+python -m pip install -r requirements.txt
+```
+
 Main Python dependencies installed by `requirements.txt`:
 
 - `customtkinter`: desktop interface.
@@ -203,13 +207,9 @@ Main Python dependencies installed by `requirements.txt`:
 - `ultralytics`: loads the YOLO face model.
 - `mediapipe`: facial validation and landmarks.
 
-### CPU-only installation
+---
 
-Use this option if you do not need NVIDIA CUDA or want the simplest installation.
-
-```bash
-python -m pip install -r requirements.txt
-```
+### CPU-only installation 
 
 If you want to guarantee a strictly CPU-only PyTorch installation:
 
@@ -256,7 +256,7 @@ If it returns `False`, the app will still work on CPU, but **Detect faces** mode
 
 ---
 
-### NVIDIA without CUDA
+#### NVIDIA without CUDA
 
 Even without PyTorch CUDA, the **NVIDIA** option can still accelerate video cutting if FFmpeg has the NVENC encoder (`h264_nvenc`) available.
 
@@ -264,6 +264,11 @@ This means:
 
 - **Scene detection** and **Every seconds** can use NVIDIA for encoding.
 - **Detect faces** falls back to CPU if `torch.cuda.is_available()` is `False`.
+
+Standard CPU-only installation process
+```bash
+python -m pip install -r requirements.txt
+```
 
 ---
 
@@ -319,9 +324,9 @@ ffmpeg -hide_banner -encoders | Select-String h264_qsv
 
 ---
 
-### Apple Silicon and macOS
+### Apple Silicon and MacOS
 
-On macOS, the app can use VideoToolbox encoding (`h264_videotoolbox`) when the installed FFmpeg provides this encoder.
+On MacOS, the app can use VideoToolbox encoding (`h264_videotoolbox`) when the installed FFmpeg provides this encoder.
 
 Encoder test:
 
@@ -339,7 +344,7 @@ In the ready-to-use versions from the **Releases** tab, the runtime installer au
 
 On Windows, `install_runtime_windows.bat` installs the FFmpeg essentials build binaries from Gyan.dev into `%LOCALAPPDATA%/Scenespy/runtime/`.
 
-On Linux and macOS, the recommendation is to install through the system:
+On Linux and MacOS, the recommendation is to install through the system:
 
 ```bash
 sudo apt install ffmpeg
