@@ -9,14 +9,14 @@ O objetivo é simples: escolher um vídeo, escolher uma pasta de saída, selecio
 Face detection and cropping from video:
 
 <img width="65%" height="805" alt="Image" src="https://github.com/user-attachments/assets/222c8977-bdea-41b0-8aa6-9ab088195f5f" />
-<img width="65%" height="930" alt="Image" src="https://github.com/user-attachments/assets/8bdfd2b3-a0b2-4244-97c0-bc078a1ff509" />
+<img width="60%" height="930" alt="Image" src="https://github.com/user-attachments/assets/8bdfd2b3-a0b2-4244-97c0-bc078a1ff509" />
 
 
 ---
 Detection and cutting of video scenes:
 
 <img width="65%" height="800" alt="Image" src="https://github.com/user-attachments/assets/649c86c9-1149-4148-a3ef-d1ecda397edd" />
-<img width="65%" height="560" alt="Image" src="https://github.com/user-attachments/assets/ae2498f9-720c-4b2e-b678-757703e9219d" />
+<img width="60%" height="560" alt="Image" src="https://github.com/user-attachments/assets/ae2498f9-720c-4b2e-b678-757703e9219d" />
 
 ## O que o app faz
 
