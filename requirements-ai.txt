@@ -1,5 +1,4 @@
 # AI dependencies for running Detect faces from source.
-#
 # In packaged releases, install_runtime.py installs torch/torchvision from the
 # official PyTorch CPU or CUDA index and installs the remaining packages from
 # its pinned package list.
