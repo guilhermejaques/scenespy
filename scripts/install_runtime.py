@@ -28,7 +28,8 @@ CUDA_MIN_DRIVER_LINUX = (530, 30, 2)
 CUDA_MIN_DRIVER_WINDOWS = (531, 14)
 AI_PACK_PACKAGES = [
     "ultralytics==8.4.9",
-    "mediapipe==0.10.9",
+    "mediapipe==0.10.21",
+    "protobuf==4.25.8",
 ]
 
 
