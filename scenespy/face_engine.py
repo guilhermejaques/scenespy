@@ -155,6 +155,29 @@ class FaceDetectionEngine:
             return False
         return True
 
+    def _face_crop_box(self, box, frame_shape):
+        x1, y1, x2, y2 = box
+        frame_h, frame_w = frame_shape[:2]
+        face_w = max(1, x2 - x1)
+        face_h = max(1, y2 - y1)
+        crop_h = min(frame_h, max(face_h * 1.9, face_w * 1.75))
+        crop_w = min(frame_w, max(face_w * 1.7, crop_h * 0.88))
+        crop_h = min(frame_h, max(crop_h, crop_w / 0.92))
+        eye_x = (x1 + x2) / 2.0
+        eye_y = y1 + face_h * 0.38
+        crop_x1 = eye_x - crop_w / 2.0
+        crop_y1 = eye_y - crop_h * 0.42
+        crop_x1 = min(max(0.0, crop_x1), frame_w - crop_w)
+        crop_y1 = min(max(0.0, crop_y1), frame_h - crop_h)
+        crop_x2 = crop_x1 + crop_w
+        crop_y2 = crop_y1 + crop_h
+        return (
+            int(round(crop_x1)),
+            int(round(crop_y1)),
+            int(round(crop_x2)),
+            int(round(crop_y2)),
+        )
+
     def _bbox_to_measurement(self, box):
         x1, y1, x2, y2 = [float(v) for v in box]
         return np.array([
@@ -264,16 +287,37 @@ class FaceDetectionEngine:
         quality = float(track.get("quality", 0.0))
         confidence = float(track.get("confidence", 0.0))
 
+        if self.profile == "High" and self.mp_face is not None:
+            strong_landmarks = (
+                valid_ratio >= 0.75 and
+                sharpness >= cfg["min_sharpness"]
+            )
+            partial_landmarks = (
+                valid_ratio >= 0.25 and
+                confidence >= 0.70 and
+                quality >= 0.72 and
+                sharpness >= 20.0
+            )
+            rotated_face = (
+                valid_ratio == 0.0 and
+                confidence >= 0.70 and
+                quality >= 0.78 and
+                sharpness >= 100.0
+            )
+            return strong_landmarks or partial_landmarks or rotated_face
+
         landmark_pass = (
             valid_ratio >= cfg["min_valid_ratio"] and
             sharpness >= cfg["min_sharpness"]
         )
         detector_pass = (
+            self.mp_face is None and
             confidence >= cfg["strong_conf"] and
             quality >= cfg["min_quality"] and
             sharpness >= cfg["min_sharpness"]
         )
         permissive_high_pass = (
+            self.mp_face is None and
             self.profile == "High" and
             confidence >= cfg["strong_conf"] and
             quality >= cfg["min_quality"] and
@@ -443,15 +487,8 @@ class FaceDetectionEngine:
                     if not (min_aspect <= aspect <= max_aspect):
                         continue
 
-                    h_frame, w_frame, _ = frame.shape
-                    expand_x = int(w * 0.28)
-                    expand_top = int(h * 0.45)
-                    expand_bottom = int(h * 0.20)
-                    cx1 = max(0, x1 - expand_x)
-                    cy1 = max(0, y1 - expand_top)
-                    cx2 = min(w_frame, x2 + expand_x)
-                    cy2 = min(h_frame, y2 + expand_bottom)
-
+                    cx1, cy1, cx2, cy2 = self._face_crop_box(
+                        (x1, y1, x2, y2), frame.shape)
                     face_crop = frame[cy1:cy2, cx1:cx2]
                     if face_raw.size == 0:
                         continue
