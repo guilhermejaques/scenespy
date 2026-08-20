@@ -286,6 +286,8 @@ class FaceDetectionEngine:
         sharpness = float(track.get("score", 0.0))
         quality = float(track.get("quality", 0.0))
         confidence = float(track.get("confidence", 0.0))
+        face_aspect = float(track.get("face_aspect", 1.0))
+        touches_top = bool(track.get("touches_top", False))
 
         if self.profile == "High" and self.mp_face is not None:
             strong_landmarks = (
@@ -304,7 +306,22 @@ class FaceDetectionEngine:
                 quality >= 0.78 and
                 sharpness >= 100.0
             )
-            return strong_landmarks or partial_landmarks or rotated_face
+            side_profile = (
+                track.get("frames", 0) >= 6 and
+                track.get("valid", 0) >= 2 and
+                valid_ratio >= 0.12 and
+                confidence >= 0.76 and
+                0.50 <= face_aspect <= 0.82
+            )
+            close_face = (
+                track.get("frames", 0) >= 12 and
+                confidence >= 0.79 and
+                quality >= 0.50 and
+                sharpness >= 20.0 and
+                touches_top and
+                0.75 <= face_aspect <= 1.45
+            )
+            return strong_landmarks or partial_landmarks or rotated_face or side_profile or close_face
 
         landmark_pass = (
             valid_ratio >= cfg["min_valid_ratio"] and
@@ -340,6 +357,8 @@ class FaceDetectionEngine:
             "score": detection["sharp"],
             "quality": detection["quality"],
             "confidence": detection["confidence"],
+            "face_aspect": detection["face_aspect"],
+            "touches_top": detection["touches_top"],
             "face": detection["face_crop"].copy(),
             "first_seen": timestamp,
             "last_seen": timestamp,
@@ -360,6 +379,8 @@ class FaceDetectionEngine:
         if detection["quality"] > track.get("quality", 0.0):
             track["score"] = detection["sharp"]
             track["quality"] = detection["quality"]
+            track["face_aspect"] = detection["face_aspect"]
+            track["touches_top"] = detection["touches_top"]
             track["face"] = detection["face_crop"].copy()
             track["best_time"] = timestamp
             track["best_frame"] = int(frame_idx)
@@ -515,6 +536,8 @@ class FaceDetectionEngine:
                         "sharp": sharp,
                         "quality": quality,
                         "confidence": confidence,
+                        "face_aspect": aspect,
+                        "touches_top": y1 <= max(2, int(frame.shape[0] * 0.03)),
                         "landmarks_valid": landmarks_valid,
                     })
 
