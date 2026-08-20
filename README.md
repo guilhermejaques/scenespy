@@ -28,6 +28,7 @@ Detection and cutting of video scenes:
 - Generates metadata files such as `scenes.json` and, when necessary, `cut_errors.json`.
 
 ## How to use
+If you want to use scenespy directly in Google Colab or other cloud services: [Scenespy ipynb](https://github.com/guilhermejaques/scenespy/blob/main/Scenespy_Colab.ipynb)
 
 1. Open Scenespy.
 2. In **Source video**, select one or more videos.
