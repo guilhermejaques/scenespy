@@ -19,10 +19,7 @@ import importlib.util
 import shutil
 import site
 import platform
-import tkinter.filedialog as fd
-import tkinter.messagebox as mb
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import customtkinter as ctk
 from PIL import Image, ImageOps
 import numpy as np
 import cv2
@@ -325,6 +322,25 @@ MODE_ACCEL_COMPAT = {
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 
 MODE_ABBREV = {"faces": "FD", "scene": "SD", "interval": "ES"}
+
+
+def status_labels(mode):
+    return {
+        "scene": ("Scenes detected", "Scenes cut"),
+        "interval": ("Segments total", "Segments cut"),
+        "faces": ("Faces detected", "Faces saved"),
+    }.get(mode, ("Items detected", "Items done"))
+
+
+def format_status_lines(mode, detected=None, cut=None, eta=None):
+    detected_label, cut_label = status_labels(mode)
+    eta_label = "Estimated time"
+    width = max(len(eta_label), len(detected_label), len(cut_label))
+    return [
+        f"{detected_label:<{width}} : {detected if detected is not None else '-'}",
+        f"{cut_label:<{width}} : {cut if cut is not None else '-'}",
+        f"{eta_label:<{width}} : {eta if eta is not None else '--:--'}",
+    ]
 
 DEBUG = False
 

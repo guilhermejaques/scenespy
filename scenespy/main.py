@@ -1,7 +1,9 @@
+import tkinter.messagebox as mb
+
+import customtkinter as ctk
+
 from .shared import (
     AI_PACK_DIR,
-    ctk,
-    mb,
     os,
     sys,
     _ensure_mediapipe,

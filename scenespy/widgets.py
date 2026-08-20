@@ -1,4 +1,7 @@
 import tkinter as tk
+import tkinter.filedialog as fd
+
+import customtkinter as ctk
 
 from .shared import *
 
@@ -126,11 +129,7 @@ class LogBox(ctk.CTkTextbox):
         self.initialized = True
 
     def set_mode(self, mode):
-        self.status_labels = {
-            "scene": ("Scenes detected", "Scenes cut"),
-            "interval": ("Segments total", "Segments cut"),
-            "faces": ("Faces detected", "Faces saved"),
-        }.get(mode, ("Items detected", "Items done"))
+        self.status_labels = status_labels(mode)
 
     def write_status(self, detected=None, cut=None, eta=None):
         lines = self._status_lines(detected=detected, cut=cut, eta=eta)

@@ -24,6 +24,7 @@ class FaceDetectionEngine:
         self.done = 0
         self._face_ratio = 0.0
         self._saved_faces = []
+        self._output_dir = None
 
         self.device = None
         self.model = None
@@ -425,6 +426,7 @@ class FaceDetectionEngine:
             tracks = []
             outdir = build_output_dir(self.output, mode="faces",
                                       profile=self.profile, accel=self.accel)
+            self._output_dir = outdir
             frame_idx = 0
             track_id = 0
             min_lm_frames = 1 if self.profile == "High" else 2

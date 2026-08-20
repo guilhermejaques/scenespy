@@ -20,6 +20,7 @@ datas = [
 ]
 binaries = []
 hiddenimports = [
+    "scenespy.api",
     # External AI packs import torch at runtime. Because torch is excluded from
     # the app bundle, PyInstaller does not see all stdlib modules torch imports.
     "cProfile",
