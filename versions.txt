@@ -1,5 +1,9 @@
 Scenespy OS compatibility summary
 
+Supported source/runtime Python versions:
+- Python 3.11.x
+- Python 3.12.x
+
 Shared packaged app dependency pins:
 - Python used for current Windows build/test: 3.11.9
 - PyInstaller: 6.20.0
@@ -7,6 +11,7 @@ Shared packaged app dependency pins:
 - pillow: 11.3.0
 - numpy: 1.26.4
 - opencv-contrib-python: 4.11.0.86
+- opencv-python: 4.11.0.86
 - av: 16.1.0
 - scenedetect: 0.6.7.1
 
@@ -17,6 +22,8 @@ Shared AI runtime dependency pins:
 - ultralytics: 8.4.9
 - mediapipe: 0.10.21
 - protobuf: 4.25.8
+- jax: 0.7.1
+- jaxlib: 0.7.1
 
 
 macOS compatibility summary

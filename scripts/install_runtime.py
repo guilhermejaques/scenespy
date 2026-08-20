@@ -30,6 +30,8 @@ AI_PACK_PACKAGES = [
     "ultralytics==8.4.9",
     "mediapipe==0.10.21",
     "protobuf==4.25.8",
+    "jax==0.7.1",
+    "jaxlib==0.7.1",
 ]
 
 

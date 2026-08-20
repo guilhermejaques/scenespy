@@ -185,12 +185,12 @@ You are responsible for installing Python, Python dependencies, FFmpeg/FFprobe, 
 
 Requirements for source code:
 
-- [Python 3.11.X](https://www.python.org/downloads/)
+- [Python 3.11 or 3.12](https://www.python.org/downloads/)
 - [FFmpeg](https://ffmpeg.org/download.html) and [FFprobe](https://ffmpeg.org/download.html).
 - Dependencies from `requirements.txt`.
 - On Windows, Microsoft Visual C++ Redistributable x64 may be required for PyTorch.
 
-On Arch, use `pyenv` or another equivalent method to ensure Python 3.11, because the `python` version in the repositories may be newer than what AI dependencies support.
+On distributions that ship a newer Python, use `pyenv` or another equivalent method to select Python 3.11 or 3.12.
 
 Main Python dependencies installed by `requirements.txt`:
 
@@ -410,7 +410,7 @@ ffmpeg -hide_banner -encoders
 
 ### MediaPipe installation fails
 
-Use Python 3.11. Some Python versions may not have compatible wheels for all dependencies.
+Use Python 3.11 or 3.12. Other Python versions may not have compatible wheels for all dependencies.
 
 ### Both `opencv-python` and `opencv-contrib-python` are installed
 
