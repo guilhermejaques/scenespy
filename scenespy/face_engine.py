@@ -350,6 +350,7 @@ class FaceDetectionEngine:
         return {
             "id": track_id,
             "box": detection["box"],
+            "best_box": tuple(int(value) for value in detection["box"]),
             "state": state,
             "covariance": covariance,
             "ttl": ttl_frames,
@@ -383,6 +384,7 @@ class FaceDetectionEngine:
             track["face_aspect"] = detection["face_aspect"]
             track["touches_top"] = detection["touches_top"]
             track["face"] = detection["face_crop"].copy()
+            track["best_box"] = tuple(int(value) for value in detection["box"])
             track["best_time"] = timestamp
             track["best_frame"] = int(frame_idx)
         if detection.get("landmarks_valid") or (
@@ -688,6 +690,7 @@ class FaceDetectionEngine:
             "first_frame": int(track.get("first_frame", 0)),
             "last_frame": int(track.get("last_frame", 0)),
             "best_frame": int(track.get("best_frame", 0)),
+            "box": list(track.get("best_box") or track.get("box") or ()),
             "frames_seen": frames_seen,
             "valid_landmark_frames": valid_frames,
             "valid_landmark_ratio": round(valid_frames / max(frames_seen, 1), 4),

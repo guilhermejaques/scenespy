@@ -21,6 +21,8 @@ datas = [
 binaries = []
 hiddenimports = [
     "scenespy.api",
+    "PySide6.QtMultimedia",
+    "PySide6.QtMultimediaWidgets",
     # External AI packs import torch at runtime. Because torch is excluded from
     # the app bundle, PyInstaller does not see all stdlib modules torch imports.
     "cProfile",
@@ -37,7 +39,6 @@ hiddenimports += collect_submodules("PIL")
 hiddenimports += collect_submodules("html")
 
 for package in (
-    "customtkinter",
     "scenedetect",
 ):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)

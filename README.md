@@ -20,9 +20,11 @@ Detection and cutting of video scenes:
 
 ## What the app does
 
-- Detects and cuts video scenes.
-- Splits videos into segments by time interval in seconds.
-- Detects faces and saves images of the best crops found.
+- Detects video scenes and places editable cut markers on a timeline.
+- Splits videos by time interval using markers that can be adjusted before export.
+- Detects faces and places reviewable face events at the moments where they appear.
+- Plays video and audio inside the editor with play, pause, seek, and skip controls.
+- Saves non-destructive `.scenespy` projects so analysis can be reviewed later.
 - Processes one or multiple videos in queue.
 - Creates an organized output folder for each process.
 - Generates metadata files such as `scenes.json` and, when necessary, `cut_errors.json`.
@@ -39,10 +41,11 @@ If you want to use scenespy directly in Google Colab or other cloud services: [S
    - **Detect faces**
 5. Adjust sensitivity if necessary.
 6. Choose the available hardware acceleration.
-7. Click **Start**.
-8. Wait for the processing to finish.
+7. Click **Analyze video**.
+8. Review the generated markers on the timeline. Move or remove cuts and include or exclude face events as needed.
+9. Click **Export reviewed result** when the timeline is ready.
 
-The results will be created inside the selected folder, in a subfolder containing the date, mode, sensitivity, and acceleration used.
+The source video is never modified. Final files are created only when the reviewed result is exported.
 
 ---
 
@@ -194,7 +197,7 @@ On distributions that ship a newer Python, use `pyenv` or another equivalent met
 
 Main Python dependencies installed by `requirements.txt`:
 
-- `customtkinter`: desktop interface.
+- `PySide6`: desktop editor interface and multimedia playback.
 - `pillow`: images and previews.
 - `numpy`: numerical processing.
 - `opencv-contrib-python`: frame reading, visual analysis, and MediaPipe dependency.

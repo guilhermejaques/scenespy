@@ -4,7 +4,8 @@ from .scene_analysis import *
 class SceneEngine:
     """Detects scene boundaries and exports video segments. Scene detection Pipeline!"""
     def __init__(self, video, output, cfg, logbox=None, progressbar=None,
-                 previewer=None, preview_enabled=True, preview_pool=None):
+                 previewer=None, preview_enabled=True, preview_pool=None,
+                 export_results=True):
         self.video = video
         self.output = output
         self.cfg = cfg
@@ -13,6 +14,8 @@ class SceneEngine:
         self.previewer = previewer
         self.preview_enabled = preview_enabled
         self.preview_pool = preview_pool or [video]
+        self.export_results = bool(export_results)
+        self.analysis_scenes = []
         self._stop = False
         self.detected = 0
         self.total = 0
@@ -265,10 +268,13 @@ class SceneEngine:
             if not scenes or self._stop:
                 return False
 
+            self.analysis_scenes = list(scenes)
+
             if self.log:
                 self.log.after(0, lambda: self.log.write_status(detected=self.detected, cut=0, eta="--:--"))
 
-            self._cut_scenes(scenes)
+            if self.export_results:
+                self._cut_scenes(scenes)
             if self._stop:
                 return False
         finally:

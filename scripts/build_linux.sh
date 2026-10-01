@@ -15,10 +15,6 @@ if [[ ! -f models/yolov8n-face.pt ]]; then
 fi
 
 "$PYTHON" scripts/install_build_dependencies.py
-if ! "$PYTHON" -c "import tkinter; print(tkinter.TkVersion)" >/dev/null 2>&1; then
-  echo "Python tkinter support is missing. Install python3-tk/python3.11-tk before building." >&2
-  exit 1
-fi
 rm -rf build dist release/Scenespy-linux-x64
 "$PYTHON" -m PyInstaller --clean --noconfirm --distpath release Scenespy.spec
 
