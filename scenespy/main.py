@@ -37,5 +37,5 @@ def main():
         QMessageBox.information(None, "Application Already Running", "This application is already running.")
         raise SystemExit(0)
     window = ScenespyApp()
-    window.show()
+    window.showMaximized()
     raise SystemExit(application.exec())

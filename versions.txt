@@ -8,6 +8,8 @@ Shared packaged app dependency pins:
 - Python used for current Windows build/test: 3.11.9
 - PyInstaller: 6.20.0
 - PySide6: 6.10.0
+- QtAwesome: 1.4.2
+- QtPy: 2.4.3
 - pillow: 11.3.0
 - numpy: 1.26.4
 - opencv-contrib-python: 4.11.0.86

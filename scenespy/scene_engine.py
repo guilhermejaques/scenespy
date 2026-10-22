@@ -33,6 +33,8 @@ class SceneEngine:
         self._ffmpeg_proc_lock = threading.Lock()
         self._ui_alive = True
         self._duration = None
+        self._ffmpeg_preview_time = None
+        self._ffmpeg_preview_image = None
         self._last_preview_ratio = -1
         self._keyframes_cache = None
         self._has_audio_cache = None
@@ -1476,11 +1478,13 @@ class SceneEngine:
 
     def _preview_loop(self):
         while not self._preview_stop:
-            if self.previewer and self.preview_enabled:
+            if (self.previewer and self.preview_enabled and
+                    getattr(self.previewer, "enabled", True)):
                 now = time.time()
                 if now - self.last_preview >= PREVIEW_INTERVAL:
                     try:
-                        if self._analysis_mosaic:
+                        if (self._analysis_mosaic and
+                                self._analysis_mosaic.is_running()):
                             time.sleep(0.05)
                             continue
                         if self.total <= 0:
@@ -1497,8 +1501,10 @@ class SceneEngine:
                         img = self._get_preview_frame_at(t)
                         if img and self._ui_alive:
                             self.previewer.after(
-                                0, lambda img=img: (
-                                    self.previewer.update_image(img)
+                                0, lambda img=img, seconds=t: (
+                                    (self.previewer.update_image_at(img, seconds)
+                                     if hasattr(self.previewer, "update_image_at") else
+                                     self.previewer.update_image(img))
                                     if self._ui_alive else None))
                     except Exception:
                         pass
@@ -1506,15 +1512,28 @@ class SceneEngine:
             time.sleep(0.05)
 
     def _get_preview_frame_at(self, t):
+        frame = None
         try:
             with self._preview_lock:
-                if not self._preview_cap:
-                    return None
-                self._preview_cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
-                ret, frame = self._preview_cap.read()
-            if not ret or frame is None:
-                return None
-            return resize_for_preview(
-                Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
+                if self._preview_cap and self._preview_cap.isOpened():
+                    self._preview_cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+                    ret, frame = self._preview_cap.read()
+            if frame is not None and ret:
+                return resize_for_preview(
+                    Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
         except Exception:
-            return None
+            frame = None
+
+        # Some formats play in Qt/FFmpeg but are unsupported by the local
+        # OpenCV backend. Keep this fallback deliberately sparse and cached.
+        cached_at = self._ffmpeg_preview_time
+        if (self._ffmpeg_preview_image is not None and cached_at is not None and
+                abs(float(t) - cached_at) < 1.0):
+            return self._ffmpeg_preview_image.copy()
+        image = preview_frame_with_ffmpeg(
+            self.video, t, stop_cb=lambda: self._stop)
+        if image is not None:
+            self._ffmpeg_preview_time = float(t)
+            self._ffmpeg_preview_image = image
+            return image.copy()
+        return None

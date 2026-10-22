@@ -40,6 +40,7 @@ hiddenimports += collect_submodules("html")
 
 for package in (
     "scenedetect",
+    "qtawesome",
 ):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas

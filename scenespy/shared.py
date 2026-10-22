@@ -16,6 +16,7 @@ import traceback
 import faulthandler
 import random
 import importlib.util
+import io
 import shutil
 import site
 import platform
@@ -583,6 +584,24 @@ def resize_for_preview(img, max_w=PREVIEW_MAX_WIDTH, max_h=PREVIEW_MAX_HEIGHT):
     return img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.BILINEAR)
 
 
+def preview_frame_with_ffmpeg(path, seconds, stop_cb=None):
+    """Decode one small preview frame when OpenCV cannot handle the source codec."""
+    try:
+        data = check_output_hidden_cancelable(
+            ["ffmpeg", "-v", "error", "-ss", f"{max(0.0, float(seconds)):.3f}",
+             "-i", path, "-frames:v", "1", "-vf",
+             f"scale={PREVIEW_MAX_WIDTH}:{PREVIEW_MAX_HEIGHT}:force_original_aspect_ratio=decrease",
+             "-f", "image2pipe", "-vcodec", "png", "pipe:1"],
+            stop_cb=stop_cb,
+        )
+        if not data:
+            return None
+        with Image.open(io.BytesIO(data)) as image:
+            return image.convert("RGB").copy()
+    except Exception:
+        return None
+
+
 class AnalysisMosaicPreview:
     """Shows random video thumbnails while scene analysis is running."""
     def __init__(self, videos, previewer, stop_cb=None):
@@ -612,6 +631,9 @@ class AnalysisMosaicPreview:
                 pass
         self._thread = None
         self._release_caps()
+
+    def is_running(self):
+        return bool(self._thread and self._thread.is_alive())
 
     def _release_caps(self):
         with self._lock:
@@ -714,6 +736,9 @@ class AnalysisMosaicPreview:
             return
 
         while not self._stop and not self.stop_cb():
+            if not getattr(self.previewer, "enabled", True):
+                time.sleep(0.1)
+                continue
             image = self._compose()
             if image and self.previewer:
                 self.previewer.after(0, lambda img=image: self.previewer.update_image(img))

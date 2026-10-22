@@ -18,6 +18,7 @@ class CutEvent:
     source: str = "scene"
     confidence: float | None = None
     event_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    original_frame: int = 0
 
 
 @dataclass
@@ -29,7 +30,12 @@ class FaceEvent:
     confidence: float = 0.0
     quality: float = 0.0
     box: list[int] = field(default_factory=list)
+    crop_box: list[int] = field(default_factory=list)
     enabled: bool = True
+    review_frames: list[dict] = field(default_factory=list)
+    original_best_frame: int = 0
+    original_box: list[int] = field(default_factory=list)
+    original_crop_box: list[int] = field(default_factory=list)
     event_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
@@ -43,9 +49,26 @@ class MediaItem:
     height: int = 0
     mode: str = "scene"
     sensitivity: str = "Normal"
+    analyzed: bool = False
+    exported: bool = False
     cuts: list[CutEvent] = field(default_factory=list)
     faces: list[FaceEvent] = field(default_factory=list)
+    excluded_segments: list[int] = field(default_factory=list)
+    removed_segments: list[int] = field(default_factory=list)
     media_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+    def seconds_for_frame(self, frame: int | float) -> float:
+        """Map a frame onto the player's canonical media duration."""
+        if float(frame) >= self.total_frames:
+            return max(0.0, self.duration)
+        return max(0.0, min(self.duration, float(frame) / max(self.fps, 0.001)))
+
+    def frame_for_seconds(self, seconds: int | float) -> int:
+        """Map player time back onto the frame-based project model."""
+        if self.duration <= 0 or self.fps <= 0:
+            return 0
+        seconds = max(0.0, min(self.duration, float(seconds)))
+        return max(0, min(self.total_frames, round(seconds * self.fps)))
 
     def normalize_cuts(self) -> None:
         last_frame = max(0, self.total_frames - 1)
@@ -89,6 +112,10 @@ class ScenespyProject:
         media = []
         for item in raw.get("media", []):
             item = dict(item)
+            if "analyzed" not in item:
+                item["analyzed"] = bool(item.get("cuts") or item.get("faces"))
+            if "exported" not in item:
+                item["exported"] = False
             item["cuts"] = [CutEvent(**event) for event in item.get("cuts", [])]
             item["faces"] = [FaceEvent(**event) for event in item.get("faces", [])]
             media.append(MediaItem(**item))

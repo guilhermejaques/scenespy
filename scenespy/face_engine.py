@@ -5,13 +5,15 @@ from . import shared as shared
 class FaceDetectionEngine:
     """Detects and saves representative face crops from a video. Pipeline Face Detection!"""
     def __init__(self, video, output, logbox=None, progressbar=None,
-                 previewer=None, profile="Normal", accel="cpu", preview_enabled=True):
+                 previewer=None, profile="Normal", accel="cpu", preview_enabled=True,
+                 reset_frames=None):
         self.video = video
         self.output = output
         self.log = logbox
         self.progress = progressbar
         self.previewer = previewer
         self.preview_enabled = preview_enabled
+        self.reset_frames = {int(frame) for frame in (reset_frames or []) if int(frame) > 0}
         self._ui_alive = True
         self._last_eta_update = 0
 
@@ -347,10 +349,16 @@ class FaceDetectionEngine:
         state, covariance = self._new_sort_state(detection["box"])
         timestamp = self._frame_time(frame_idx, fps)
         valid = 1 if detection.get("landmarks_valid") else 0
+        candidate = {
+            "frame": int(frame_idx),
+            "box": list(detection["box"]),
+            "crop_box": list(detection["crop_box"]),
+        }
         return {
             "id": track_id,
             "box": detection["box"],
             "best_box": tuple(int(value) for value in detection["box"]),
+            "best_crop_box": tuple(int(value) for value in detection["crop_box"]),
             "state": state,
             "covariance": covariance,
             "ttl": ttl_frames,
@@ -368,11 +376,21 @@ class FaceDetectionEngine:
             "first_frame": int(frame_idx),
             "last_frame": int(frame_idx),
             "best_frame": int(frame_idx),
+            "recent_candidates": [candidate],
+            "review_candidates": [candidate],
         }
 
     def _update_face_track(self, track, detection, ttl_frames, min_lm_frames, frame_idx, fps):
         timestamp = self._frame_time(frame_idx, fps)
         self._sort_update(track, detection["box"])
+        candidate = {
+            "frame": int(frame_idx),
+            "box": list(detection["box"]),
+            "crop_box": list(detection["crop_box"]),
+        }
+        recent = track.setdefault("recent_candidates", [])
+        recent.append(candidate)
+        del recent[:-16]
         track["ttl"] = ttl_frames
         track["frames"] += 1
         track["last_seen"] = timestamp
@@ -385,8 +403,12 @@ class FaceDetectionEngine:
             track["touches_top"] = detection["touches_top"]
             track["face"] = detection["face_crop"].copy()
             track["best_box"] = tuple(int(value) for value in detection["box"])
+            track["best_crop_box"] = tuple(int(value) for value in detection["crop_box"])
             track["best_time"] = timestamp
             track["best_frame"] = int(frame_idx)
+            track["review_candidates"] = list(recent)
+        elif len(track.setdefault("review_candidates", [])) < 31:
+            track["review_candidates"].append(candidate)
         if detection.get("landmarks_valid") or (
                 track["frames"] >= min_lm_frames and self._valid_landmarks(detection["face_raw"])):
             track["valid"] = min(track["valid"] + 1, track["frames"])
@@ -450,9 +472,18 @@ class FaceDetectionEngine:
                     break
 
                 frame_idx += 1
+                if frame_idx - 1 in self.reset_frames and tracks:
+                    cfg = self.profile_cfg
+                    min_required = max(
+                        min_required_frames, int(effective_fps * cfg["min_frames"]))
+                    for track in tracks:
+                        self._save_face_track_if_valid(
+                            track, outdir, min_required, cfg)
+                    tracks = []
                 should_infer = ((frame_idx - 1) % sample_cycle) < sample_keep
                 if not should_infer:
-                    if self.previewer and self.preview_enabled:
+                    if (self.previewer and self.preview_enabled and
+                            getattr(self.previewer, "enabled", True)):
                         now = time.time()
                         if now - self.last_preview >= PREVIEW_INTERVAL:
                             draw = frame.copy()
@@ -462,9 +493,12 @@ class FaceDetectionEngine:
                             img = resize_for_preview(
                                 Image.fromarray(cv2.cvtColor(draw, cv2.COLOR_BGR2RGB)))
                             if img and self._ui_alive:
+                                preview_time = self._frame_time(max(0, frame_idx - 1), fps)
                                 self.previewer.after(
-                                    0, lambda img=img: (
-                                        self.previewer.update_image(img)
+                                    0, lambda img=img, seconds=preview_time: (
+                                        (self.previewer.update_image_at(img, seconds)
+                                         if hasattr(self.previewer, "update_image_at") else
+                                         self.previewer.update_image(img))
                                         if self._ui_alive else None))
                             self.last_preview = now
 
@@ -535,6 +569,7 @@ class FaceDetectionEngine:
                     landmarks_valid = self._valid_landmarks(face_raw)
                     detections.append({
                         "box": (x1, y1, x2, y2),
+                        "crop_box": (cx1, cy1, cx2, cy2),
                         "face_raw": face_raw,
                         "face_crop": face_crop,
                         "sharp": sharp,
@@ -576,7 +611,8 @@ class FaceDetectionEngine:
 
                 tracks = active_tracks
 
-                if self.previewer and self.preview_enabled:
+                if (self.previewer and self.preview_enabled and
+                        getattr(self.previewer, "enabled", True)):
                     now = time.time()
                     if now - self.last_preview >= PREVIEW_INTERVAL:
                         draw = frame.copy()
@@ -586,9 +622,12 @@ class FaceDetectionEngine:
                         img = resize_for_preview(
                             Image.fromarray(cv2.cvtColor(draw, cv2.COLOR_BGR2RGB)))
                         if img and self._ui_alive:
+                            preview_time = self._frame_time(max(0, frame_idx - 1), fps)
                             self.previewer.after(
-                                0, lambda img=img: (
-                                    self.previewer.update_image(img)
+                                0, lambda img=img, seconds=preview_time: (
+                                    (self.previewer.update_image_at(img, seconds)
+                                     if hasattr(self.previewer, "update_image_at") else
+                                     self.previewer.update_image(img))
                                     if self._ui_alive else None))
                         self.last_preview = now
 
@@ -680,6 +719,12 @@ class FaceDetectionEngine:
         best_time = float(track.get("best_time", first_seen))
         frames_seen = int(track.get("frames", 0))
         valid_frames = int(track.get("valid", 0))
+        candidates_by_frame = {
+            int(candidate["frame"]): candidate
+            for candidate in track.get("review_candidates", [])
+            if candidate.get("frame") is not None
+        }
+        candidates = [candidates_by_frame[frame] for frame in sorted(candidates_by_frame)]
         return {
             "track_id": int(track.get("id", 0)),
             "file": filename,
@@ -691,6 +736,8 @@ class FaceDetectionEngine:
             "last_frame": int(track.get("last_frame", 0)),
             "best_frame": int(track.get("best_frame", 0)),
             "box": list(track.get("best_box") or track.get("box") or ()),
+            "crop_box": list(track.get("best_crop_box") or ()),
+            "review_frames": candidates[:31],
             "frames_seen": frames_seen,
             "valid_landmark_frames": valid_frames,
             "valid_landmark_ratio": round(valid_frames / max(frames_seen, 1), 4),
