@@ -6,7 +6,7 @@ class FaceDetectionEngine:
     """Detects and saves representative face crops from a video. Pipeline Face Detection!"""
     def __init__(self, video, output, logbox=None, progressbar=None,
                  previewer=None, profile="Normal", accel="cpu", preview_enabled=True,
-                 reset_frames=None):
+                 reset_frames=None, keep_rejected=False):
         self.video = video
         self.output = output
         self.log = logbox
@@ -14,6 +14,7 @@ class FaceDetectionEngine:
         self.previewer = previewer
         self.preview_enabled = preview_enabled
         self.reset_frames = {int(frame) for frame in (reset_frames or []) if int(frame) > 0}
+        self.keep_rejected = bool(keep_rejected)
         self._ui_alive = True
         self._last_eta_update = 0
 
@@ -26,6 +27,7 @@ class FaceDetectionEngine:
         self.done = 0
         self._face_ratio = 0.0
         self._saved_faces = []
+        self._face_candidates = []
         self._output_dir = None
 
         self.device = None
@@ -414,14 +416,32 @@ class FaceDetectionEngine:
             track["valid"] = min(track["valid"] + 1, track["frames"])
 
     def _save_face_track_if_valid(self, track, outdir, min_required, cfg):
-        if (track["frames"] >= min_required and
-                self._track_passes_face_gate(track, cfg) and
-                track.get("face") is not None):
+        has_enough_frames = track["frames"] >= min_required
+        passes_gate = self._track_passes_face_gate(track, cfg)
+        accepted = bool(has_enough_frames and passes_gate and track.get("face") is not None)
+        if accepted:
             fname = f"face_{self.done + 1:04d}.png"
             path = os.path.join(outdir, fname)
             if cv2.imwrite(path, track["face"]):
                 self.done += 1
-                self._saved_faces.append(self._face_metadata(track, fname))
+                metadata = self._face_metadata(track, fname)
+                metadata.update(accepted=True, rejection_reason="")
+                self._saved_faces.append(metadata)
+                self._face_candidates.append(metadata)
+                return
+        if not self.keep_rejected:
+            return
+        reason = ("Insufficient duration" if not has_enough_frames else
+                  "Automatic quality filter" if not passes_gate else
+                  "Crop could not be saved")
+        fname = f"candidate_{int(track.get('id', 0)):06d}.png"
+        face = track.get("face")
+        saved = bool(face is not None and cv2.imwrite(
+            os.path.join(outdir, fname), face,
+            [int(cv2.IMWRITE_PNG_COMPRESSION), 1]))
+        metadata = self._face_metadata(track, fname if saved else "")
+        metadata.update(accepted=False, rejection_reason=reason)
+        self._face_candidates.append(metadata)
 
     def run(self):
         if self._stop:
@@ -775,12 +795,16 @@ class FaceDetectionEngine:
                     "faces_detected": int(self.detected),
                     "faces_saved": int(self.done),
                     "tracks_saved": len(self._saved_faces),
+                    "tracks_rejected": max(
+                        0, len(self._face_candidates) - len(self._saved_faces)),
                     "identity_note": (
                         "track_id groups continuous face tracks only; it is not a global person identity."
                     ),
                 },
                 "faces": self._saved_faces,
             }
+            if self.keep_rejected:
+                metadata["candidates"] = self._face_candidates
             with open(os.path.join(outdir, "faces.json"), "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=2)
         except Exception as e:

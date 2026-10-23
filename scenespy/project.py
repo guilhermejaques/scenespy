@@ -36,6 +36,8 @@ class FaceEvent:
     original_best_frame: int = 0
     original_box: list[int] = field(default_factory=list)
     original_crop_box: list[int] = field(default_factory=list)
+    rejection_reason: str = ""
+    auto_included: bool = True
     event_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 

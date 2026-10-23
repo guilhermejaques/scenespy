@@ -63,6 +63,9 @@ class ProjectModelTests(unittest.TestCase):
                 original_best_frame=20,
                 original_box=[1, 2, 3, 4],
                 original_crop_box=[0, 0, 8, 10],
+                enabled=False,
+                rejection_reason="Automatic quality filter",
+                auto_included=False,
             )],
             excluded_segments=[2],
             removed_segments=[3],
@@ -78,6 +81,10 @@ class ProjectModelTests(unittest.TestCase):
         self.assertEqual(len(loaded.media[0].faces[0].review_frames), 2)
         self.assertEqual(loaded.media[0].faces[0].original_best_frame, 20)
         self.assertEqual(loaded.media[0].faces[0].original_crop_box, [0, 0, 8, 10])
+        self.assertFalse(loaded.media[0].faces[0].enabled)
+        self.assertFalse(loaded.media[0].faces[0].auto_included)
+        self.assertEqual(loaded.media[0].faces[0].rejection_reason,
+                         "Automatic quality filter")
         self.assertEqual(loaded.media[0].excluded_segments, [2])
         self.assertEqual(loaded.media[0].removed_segments, [3])
         self.assertTrue(loaded.media[0].analyzed)
