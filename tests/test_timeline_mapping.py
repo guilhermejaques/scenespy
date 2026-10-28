@@ -6,6 +6,11 @@ from scenespy.qt_app import ScenespyApp
 
 
 class TimelineMappingTests(unittest.TestCase):
+    def test_interval_preview_boundaries_match_frame_rounding(self):
+        self.assertEqual(
+            ScenespyApp._interval_analysis_boundaries(301, 30.0, 3),
+            [90, 180, 270])
+
     def test_rejected_face_candidate_is_mapped_as_disabled(self):
         engine = SimpleNamespace(
             _output_dir="cache",
@@ -32,6 +37,13 @@ class TimelineMappingTests(unittest.TestCase):
         self.assertEqual(events[0].best_frame, 104)
         self.assertEqual(events[0].rejection_reason,
                          "Automatic quality filter")
+
+        live_event = ScenespyApp._mapped_face_event(
+            engine._face_candidates[0], FrameMap([(100, 200)], 300),
+            "cache", engine._output_dir)
+        self.assertEqual(live_event.best_frame, events[0].best_frame)
+        self.assertEqual(live_event.crop_file, events[0].crop_file)
+        self.assertEqual(live_event.enabled, events[0].enabled)
 
     def test_preanalysis_exclusion_is_removed_from_result_timeline(self):
         mapping = FrameMap([(0, 330)], 108_000)

@@ -73,6 +73,26 @@ class FaceCandidateTests(unittest.TestCase):
         self.assertEqual(len(engine._face_candidates), 1)
         self.assertTrue(engine._face_candidates[0]["accepted"])
 
+    def test_finalized_tracks_are_published_once_with_saved_state(self):
+        published = []
+        engine = FaceDetectionEngine(
+            "video.mp4", "output", keep_rejected=True,
+            face_callback=published.append)
+
+        with tempfile.TemporaryDirectory() as folder:
+            engine._track_passes_face_gate = lambda _track, _cfg: True
+            engine._save_face_track_if_valid(
+                sample_track(1), folder, min_required=3, cfg={})
+            engine._track_passes_face_gate = lambda _track, _cfg: False
+            engine._save_face_track_if_valid(
+                sample_track(2), folder, min_required=3, cfg={})
+
+        self.assertEqual(len(published), 2)
+        self.assertTrue(published[0]["accepted"])
+        self.assertFalse(published[1]["accepted"])
+        self.assertTrue(published[0]["file"].startswith("face_"))
+        self.assertTrue(published[1]["file"].startswith("candidate_"))
+
 
 if __name__ == "__main__":
     unittest.main()

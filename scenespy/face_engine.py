@@ -6,7 +6,7 @@ class FaceDetectionEngine:
     """Detects and saves representative face crops from a video. Pipeline Face Detection!"""
     def __init__(self, video, output, logbox=None, progressbar=None,
                  previewer=None, profile="Normal", accel="cpu", preview_enabled=True,
-                 reset_frames=None, keep_rejected=False):
+                 reset_frames=None, keep_rejected=False, face_callback=None):
         self.video = video
         self.output = output
         self.log = logbox
@@ -15,6 +15,7 @@ class FaceDetectionEngine:
         self.preview_enabled = preview_enabled
         self.reset_frames = {int(frame) for frame in (reset_frames or []) if int(frame) > 0}
         self.keep_rejected = bool(keep_rejected)
+        self.face_callback = face_callback
         self._ui_alive = True
         self._last_eta_update = 0
 
@@ -37,7 +38,7 @@ class FaceDetectionEngine:
         self.YOLO = None
         self.mp = None
 
-        self.profile_cfg = {
+        profile_configs = {
             "Low": {"conf": 0.45, "min_size": 64, "ttl": 0.6,
                     "min_frames": 0.35, "min_valid_ratio": 0.65, "min_sharpness": 10,
                     "min_quality": 0.42, "strong_conf": 0.78},
@@ -47,10 +48,26 @@ class FaceDetectionEngine:
             "High": {"conf": 0.22, "min_size": 24, "ttl": 2.5,
                      "min_frames": 0.12, "min_valid_ratio": 0.18, "min_sharpness": 2,
                      "min_quality": 0.18, "strong_conf": 0.38},
-        }[profile]
+        }
+        if profile not in profile_configs:
+            available = ", ".join(profile_configs)
+            raise ValueError(
+                f"Unsupported face sensitivity: {profile!r}. "
+                f"Choose one of: {available}.")
+        self.profile_cfg = profile_configs[profile]
 
         self.last_preview = 0
         self._cap = None
+
+    def _publish_face_candidate(self, metadata):
+        """Publish one finalized track without making UI failures fatal."""
+        if not self.face_callback or self._stop or not self._ui_alive:
+            return
+        try:
+            self.face_callback(dict(metadata))
+        except Exception as error:
+            if DEBUG:
+                print(f"[DEBUG] Failed to publish face candidate: {error}")
 
     def _load_deps(self):
         """Load heavy dependencies on worker thread to avoid blocking UI."""
@@ -428,6 +445,7 @@ class FaceDetectionEngine:
                 metadata.update(accepted=True, rejection_reason="")
                 self._saved_faces.append(metadata)
                 self._face_candidates.append(metadata)
+                self._publish_face_candidate(metadata)
                 return
         if not self.keep_rejected:
             return
@@ -442,6 +460,7 @@ class FaceDetectionEngine:
         metadata = self._face_metadata(track, fname if saved else "")
         metadata.update(accepted=False, rejection_reason=reason)
         self._face_candidates.append(metadata)
+        self._publish_face_candidate(metadata)
 
     def run(self):
         if self._stop:

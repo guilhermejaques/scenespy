@@ -5,7 +5,8 @@ class SceneEngine:
     """Detects scene boundaries and exports video segments. Scene detection Pipeline!"""
     def __init__(self, video, output, cfg, logbox=None, progressbar=None,
                  previewer=None, preview_enabled=True, preview_pool=None,
-                 export_results=True):
+                 export_results=True, analysis_callback=None,
+                 preview_analysis_callback=None):
         self.video = video
         self.output = output
         self.cfg = cfg
@@ -15,6 +16,8 @@ class SceneEngine:
         self.preview_enabled = preview_enabled
         self.preview_pool = preview_pool or [video]
         self.export_results = bool(export_results)
+        self.analysis_callback = analysis_callback
+        self.preview_analysis_callback = preview_analysis_callback
         self.analysis_scenes = []
         self._stop = False
         self.detected = 0
@@ -53,6 +56,37 @@ class SceneEngine:
         self._temp_files = []
         self._last_cut_ui_update = 0.0
         self._cut_ui_update_interval = 0.15
+        self._last_preview_boundaries = ()
+
+    def _publish_analysis_scenes(self, scenes):
+        """Publish only the finalized boundaries used by the result."""
+        if not self.analysis_callback or self._stop or not self._ui_alive:
+            return
+        try:
+            self.analysis_callback(list(scenes))
+        except Exception as error:
+            if self.cfg.get("DEBUG", False):
+                print(f"[DEBUG] Failed to publish analysis scenes: {error}")
+
+    def _publish_preview_scenes(self, scenes):
+        if not self.preview_analysis_callback or self._stop or not self._ui_alive:
+            return
+        try:
+            self.preview_analysis_callback(list(scenes))
+        except Exception as error:
+            if self.cfg.get("DEBUG", False):
+                print(f"[DEBUG] Failed to publish preview scenes: {error}")
+
+    def _publish_preview_boundaries(self, boundaries, total_frames, fps=None):
+        """Publish a deduplicated provisional layout at analysis milestones."""
+        normalized = tuple(sorted({
+            int(frame) for frame in boundaries
+            if 0 < int(frame) < int(total_frames)}))
+        if not normalized or normalized == self._last_preview_boundaries:
+            return
+        self._last_preview_boundaries = normalized
+        self._publish_preview_scenes(
+            self._scenes_from_boundaries(normalized, total_frames, fps=fps))
 
     def add_temp_file(self, path):
         if path and path not in self._temp_files:
@@ -234,6 +268,7 @@ class SceneEngine:
         self._analysis_mosaic = None
         self._analysis_status_step = 0
         self._last_analysis_stage_label = None
+        self._last_preview_boundaries = ()
 
         if self.previewer and self.preview_enabled:
             try:
@@ -271,6 +306,7 @@ class SceneEngine:
                 return False
 
             self.analysis_scenes = list(scenes)
+            self._publish_analysis_scenes(self.analysis_scenes)
 
             if self.log:
                 self.log.after(0, lambda: self.log.write_status(detected=self.detected, cut=0, eta="--:--"))
@@ -471,7 +507,11 @@ class SceneEngine:
                     self._total_frames = int(video.frame_rate * 1)
                 video_duration = max((self._total_frames or 1) / fps, 1.0)
 
+        published_cut_frames = ()
+        published_preview_ratio = -1.0
+
         def _progress_cb(frame_num, _):
+            nonlocal published_cut_frames, published_preview_ratio
             if self._stop:
                 raise RuntimeError("Stopped")
 
@@ -486,6 +526,25 @@ class SceneEngine:
             if time.time() - getattr(self, "_last_ui_update", 0) < 0.3:
                 return True
             self._last_ui_update = time.time()
+
+            if self.preview_analysis_callback:
+                try:
+                    cut_frames = tuple(
+                        int(cut.get_frames()) for cut in
+                        scene_manager.get_cut_list(show_warning=False))
+                    preview_ratio = frame_idx / max(self._total_frames or frame_idx, 1)
+                    should_publish = (
+                        cut_frames != published_cut_frames and cut_frames and
+                        (published_preview_ratio < 0 or
+                         preview_ratio - published_preview_ratio >= 0.025))
+                    if should_publish:
+                        published_cut_frames = cut_frames
+                        published_preview_ratio = preview_ratio
+                        self._publish_preview_boundaries(
+                            cut_frames,
+                            self._total_frames or max(frame_idx, 1), fps=fps)
+                except Exception:
+                    pass
 
             if video_duration and video_duration > 0:
                 ratio = min(current_time / video_duration, 1.0)
@@ -616,6 +675,9 @@ class SceneEngine:
                                         weights=CompWeights(
                                             delta_hue=0.85, delta_sat=0.85, delta_lum=1.0, delta_edges=1.15))
                     )
+                    published_cut_frames = ()
+                    published_preview_ratio = -1.0
+                    self._last_preview_boundaries = ()
                     self._write_analysis_status("running scene detector", 0.05)
                     scene_manager.detect_scenes(video=video, callback=_progress_cb)
                     if self._stop:
@@ -695,11 +757,19 @@ class SceneEngine:
             stop_cb=lambda: self._stop, features=feature_cache)
         if self._stop:
             return []
+        self._publish_preview_boundaries(
+            (candidate["frame"] for candidate in
+             hard_candidates + gradual_candidates),
+            total_frames, fps=fps)
         semantic_candidates = _detect_semantic_transitions(
             self.video, fps, total_frames, profile=profile,
             stop_cb=lambda: self._stop, features=feature_cache)
         if self._stop:
             return []
+        self._publish_preview_boundaries(
+            (candidate["frame"] for candidate in
+             hard_candidates + gradual_candidates + semantic_candidates),
+            total_frames, fps=fps)
         self._log_detection_stage("transition_candidates")
 
         min_gap = self._boundary_min_gap_frames(fps, min_dur, profile)
@@ -711,6 +781,9 @@ class SceneEngine:
             stop_cb=lambda: self._stop)
         if self._stop:
             return []
+        self._publish_preview_boundaries(
+            (candidate["frame"] for candidate in candidates),
+            total_frames, fps=fps)
         self._log_detection_stage("candidate_refine")
         self._write_analysis_status("refining cuts", 0.70)
         candidates = self._merge_candidates(candidates, min_gap, total_frames)
@@ -718,9 +791,15 @@ class SceneEngine:
             self.video, candidates, fps, total_frames, stop_cb=lambda: self._stop)
         if self._stop:
             return []
+        self._publish_preview_boundaries(
+            (candidate["frame"] for candidate in candidates),
+            total_frames, fps=fps)
         self._log_detection_stage("candidate_context")
         self._write_analysis_status("checking context", 0.82)
         candidates, rejected = self._classify_candidates(candidates, fps, total_frames, profile, min_dur)
+        self._publish_preview_boundaries(
+            (candidate["frame"] for candidate in candidates),
+            total_frames, fps=fps)
         self._log_detection_stage("candidate_classify")
         self._write_analysis_status("preparing cuts", 0.90)
         self._scene_candidates = candidates

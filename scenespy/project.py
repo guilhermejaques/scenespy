@@ -57,6 +57,8 @@ class MediaItem:
     faces: list[FaceEvent] = field(default_factory=list)
     excluded_segments: list[int] = field(default_factory=list)
     removed_segments: list[int] = field(default_factory=list)
+    show_detected_faces: bool = True
+    show_saved_faces: bool = True
     media_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def seconds_for_frame(self, frame: int | float) -> float:
