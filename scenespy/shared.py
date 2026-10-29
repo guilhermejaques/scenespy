@@ -931,10 +931,14 @@ def terminate_all_child_processes(grace_seconds=0.5):
         _CHILD_PROCS.difference_update(procs)
 
 
-def run_hidden_cancelable(cmd, stop_cb=None, poll_interval=0.05, **kwargs):
+def run_hidden_cancelable(cmd, stop_cb=None, poll_interval=0.05,
+                          low_priority=False, **kwargs):
     cmd = normalize_command(cmd)
     if sys.platform == "win32":
-        kwargs.setdefault("creationflags", CREATE_NO_WINDOW)
+        flags = CREATE_NO_WINDOW
+        if low_priority:
+            flags |= 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
+        kwargs.setdefault("creationflags", flags)
     capture_output = kwargs.pop("capture_output", False)
     timeout = kwargs.pop("timeout", None)
     check = kwargs.pop("check", False)

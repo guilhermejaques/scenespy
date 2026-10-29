@@ -52,6 +52,8 @@ class ProjectModelTests(unittest.TestCase):
     def test_project_round_trip_preserves_editor_events(self):
         project = ScenespyProject(media=[MediaItem(
             "video.mp4", 5, 24, 120,
+            mode="interval", sensitivity="High", interval=17,
+            acceleration="nvidia",
             analyzed=True, exported=True,
             cuts=[CutEvent(48, "manual", original_frame=42)],
             faces=[FaceEvent(
@@ -69,7 +71,7 @@ class ProjectModelTests(unittest.TestCase):
             )],
             excluded_segments=[2],
             removed_segments=[3],
-        )])
+        )], queue_mode=True)
         with tempfile.TemporaryDirectory() as folder:
             path = project.save(Path(folder, "review"))
             loaded = ScenespyProject.load(path)
@@ -89,6 +91,11 @@ class ProjectModelTests(unittest.TestCase):
         self.assertEqual(loaded.media[0].removed_segments, [3])
         self.assertTrue(loaded.media[0].analyzed)
         self.assertTrue(loaded.media[0].exported)
+        self.assertEqual(loaded.media[0].mode, "interval")
+        self.assertEqual(loaded.media[0].sensitivity, "High")
+        self.assertEqual(loaded.media[0].interval, 17)
+        self.assertEqual(loaded.media[0].acceleration, "nvidia")
+        self.assertTrue(loaded.queue_mode)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ class SceneEngine:
     def __init__(self, video, output, cfg, logbox=None, progressbar=None,
                  previewer=None, preview_enabled=True, preview_pool=None,
                  export_results=True, analysis_callback=None,
-                 preview_analysis_callback=None):
+                 preview_analysis_callback=None, preview_frames=None):
         self.video = video
         self.output = output
         self.cfg = cfg
@@ -18,6 +18,7 @@ class SceneEngine:
         self.export_results = bool(export_results)
         self.analysis_callback = analysis_callback
         self.preview_analysis_callback = preview_analysis_callback
+        self.preview_frames = tuple(int(frame) for frame in (preview_frames or ()))
         self.analysis_scenes = []
         self._stop = False
         self.detected = 0
@@ -45,7 +46,6 @@ class SceneEngine:
         self._preview_lock = threading.Lock()
         self._preview_thread = None
         self._preview_stop = False
-        self._analysis_mosaic = None
         self._analysis_status_step = 0
         self._last_analysis_stage_label = None
         self._video_obj = None
@@ -142,16 +142,56 @@ class SceneEngine:
         self._rejected_scene_candidates = []
         self._cut_failures = []
         self._cut_output_dir = None
-        if self._analysis_mosaic:
-            self._analysis_mosaic.stop()
-            self._analysis_mosaic = None
         self.cleanup_temp_files()
 
     def disable_preview(self):
         self.preview_enabled = False
-        if self._analysis_mosaic:
-            self._analysis_mosaic.stop()
-            self._analysis_mosaic = None
+        self.finish_preview()
+
+    def start_preview(self):
+        """Start the sparse, progress-driven preview independently of run()."""
+        if (not self.preview_enabled or not self.previewer or
+                (self._preview_thread and self._preview_thread.is_alive())):
+            return
+        self._preview_stop = False
+        self._ui_alive = True
+        self.last_preview = 0
+        self._last_preview_ratio = -1
+        try:
+            with self._preview_lock:
+                self._preview_cap = cv2.VideoCapture(self.video)
+        except Exception:
+            self._preview_cap = None
+        try:
+            preview_time = self._preview_time_for_ratio(0.0)
+            img = self._get_preview_frame_at(preview_time)
+            if img and self._ui_alive:
+                self.previewer.after(
+                    0, lambda img=img, seconds=preview_time: (
+                        self.previewer.update_image_at(img, seconds)
+                        if hasattr(self.previewer, "update_image_at") else
+                        self.previewer.update_image(img)))
+        except Exception:
+            pass
+        self._preview_thread = threading.Thread(
+            target=self._preview_loop, daemon=True)
+        self._preview_thread.start()
+
+    def finish_preview(self, show_final=False):
+        """Stop the preview worker, optionally publishing its final frame."""
+        if (show_final and self.preview_enabled and self.previewer and
+                self._ui_alive and getattr(self.previewer, "enabled", True)):
+            try:
+                preview_time = self._preview_time_for_ratio(1.0)
+                img = self._get_preview_frame_at(preview_time)
+                if img:
+                    self.previewer.after(
+                        0, lambda img=img, seconds=preview_time: (
+                            self.previewer.update_image_at(img, seconds)
+                            if hasattr(self.previewer, "update_image_at") else
+                            self.previewer.update_image(img)))
+            except Exception:
+                pass
         self._preview_stop = True
         if self._preview_thread and self._preview_thread.is_alive() and threading.current_thread() is not self._preview_thread:
             try:
@@ -166,6 +206,16 @@ class SceneEngine:
                 self._preview_cap = None
         except Exception:
             pass
+
+    def _preview_time_for_ratio(self, ratio):
+        ratio = max(0.0, min(1.0, float(ratio)))
+        if self.preview_frames:
+            index = min(
+                len(self.preview_frames) - 1,
+                int(ratio * len(self.preview_frames)))
+            return max(0.0, self.preview_frames[index] / max(
+                self._get_video_fps(), 0.001))
+        return ratio * self._get_video_duration()
 
     def total_time(self):
         if not self._start_time:
@@ -236,6 +286,12 @@ class SceneEngine:
         return "..."
 
     def _write_analysis_status(self, label, progress=None):
+        if progress is not None:
+            # Keep the sampled preview on the same percentage as the progress
+            # bar.  Scene detection has several post-scan stages, so the raw
+            # decoded-frame ratio alone is not the overall task ratio.
+            self._analysis_ratio = max(
+                self._analysis_ratio, max(0.0, min(1.0, float(progress))))
         if self.progress:
             if label and label != self._last_analysis_stage_label:
                 self._last_analysis_stage_label = label
@@ -265,28 +321,11 @@ class SceneEngine:
         self._rejected_scene_candidates = []
         self._cut_failures = []
         self._cut_output_dir = None
-        self._analysis_mosaic = None
         self._analysis_status_step = 0
         self._last_analysis_stage_label = None
         self._last_preview_boundaries = ()
 
-        if self.previewer and self.preview_enabled:
-            try:
-                img = self._get_preview_frame_at(0)
-                if img and self._ui_alive:
-                    self.previewer.after(0, lambda img=img: self.previewer.update_image(img))
-            except Exception:
-                pass
-
-        if self.preview_enabled:
-            try:
-                with self._preview_lock:
-                    self._preview_cap = cv2.VideoCapture(self.video)
-            except Exception:
-                self._preview_cap = None
-
-        self._preview_thread = threading.Thread(target=self._preview_loop, daemon=True)
-        self._preview_thread.start()
+        self.start_preview()
 
         if self.previewer and not self._video_info_shown:
             info_text = self._get_video_info_text()
@@ -294,14 +333,7 @@ class SceneEngine:
             self._video_info_shown = True
 
         try:
-            if self.preview_enabled and self.previewer:
-                self._analysis_mosaic = AnalysisMosaicPreview(
-                    self.preview_pool, self.previewer, stop_cb=lambda: self._stop)
-                self._analysis_mosaic.start()
             scenes = self._detect_scenes_progressive() if scene_mode else self._fixed_interval()
-            if self._analysis_mosaic:
-                self._analysis_mosaic.stop()
-                self._analysis_mosaic = None
             if not scenes or self._stop:
                 return False
 
@@ -316,25 +348,8 @@ class SceneEngine:
             if self._stop:
                 return False
         finally:
-            if self._analysis_mosaic:
-                self._analysis_mosaic.stop()
-                self._analysis_mosaic = None
             self._ui_alive = False
-            self._preview_stop = True
-            if self._preview_thread and self._preview_thread.is_alive():
-                try:
-                    self._preview_thread.join(timeout=1.0)
-                except Exception:
-                    pass
-            self._preview_thread = None
-
-            try:
-                with self._preview_lock:
-                    if self._preview_cap:
-                        self._preview_cap.release()
-                    self._preview_cap = None
-            except Exception:
-                pass
+            self.finish_preview()
             self.cleanup_temp_files()
 
         self._end_time = time.time()
@@ -550,11 +565,14 @@ class SceneEngine:
                 ratio = min(current_time / video_duration, 1.0)
             else:
                 ratio = self.done / max(self.total, 1)
-            ratio = max(self._analysis_ratio, ratio)
+            # The initial frame scan occupies 40% of the scene-analysis bar.
+            # Preview timestamps must follow that displayed percentage rather
+            # than racing to the end of the video while the bar is at 40%.
+            ratio = max(self._analysis_ratio, ratio * 0.4)
             self._analysis_ratio = ratio
 
             if self.progress:
-                self.progress.after(0, lambda v=ratio * 0.4: self.progress.update(v))
+                self.progress.after(0, lambda v=ratio: self.progress.update(v))
 
             if self.log:
                 eta = self._analysis_eta_text(ratio)
@@ -993,6 +1011,9 @@ class SceneEngine:
                 scenes.append((start_frame, end_frame))
             t += interval
         self.detected = len(scenes)
+        self._analysis_ratio = 1.0
+        if self.progress:
+            self.progress.after(0, lambda: self.progress.update(1.0))
         return scenes
 
     def _record_cut_failure(self, task, error):
@@ -1197,7 +1218,7 @@ class SceneEngine:
 
     def _get_progress_ratio(self):
         if self.total > 0:
-            return self.done / self.total
+            return getattr(self, "completed_attempts", self.done) / self.total
         return self._analysis_ratio
 
     def _calculate_eta(self):
@@ -1562,21 +1583,13 @@ class SceneEngine:
                 now = time.time()
                 if now - self.last_preview >= PREVIEW_INTERVAL:
                     try:
-                        if (self._analysis_mosaic and
-                                self._analysis_mosaic.is_running()):
-                            time.sleep(0.05)
-                            continue
-                        if self.total <= 0:
-                            time.sleep(0.05)
-                            continue
                         ratio = self._get_progress_ratio()
                         ratio = max(0.0, min(1.0, ratio))
                         if abs(ratio - self._last_preview_ratio) < 0.02:
                             time.sleep(0.02)
                             continue
                         self._last_preview_ratio = ratio
-                        duration = self._get_video_duration()
-                        t = ratio * duration
+                        t = self._preview_time_for_ratio(ratio)
                         img = self._get_preview_frame_at(t)
                         if img and self._ui_alive:
                             self.previewer.after(

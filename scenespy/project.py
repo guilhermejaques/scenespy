@@ -51,6 +51,8 @@ class MediaItem:
     height: int = 0
     mode: str = "scene"
     sensitivity: str = "Normal"
+    interval: int = 10
+    acceleration: str = "cpu"
     analyzed: bool = False
     exported: bool = False
     cuts: list[CutEvent] = field(default_factory=list)
@@ -93,6 +95,7 @@ class ScenespyProject:
     media: list[MediaItem] = field(default_factory=list)
     output_folder: str = ""
     project_path: str = ""
+    queue_mode: bool = False
     version: int = PROJECT_VERSION
 
     def save(self, path: str | os.PathLike | None = None) -> str:
@@ -127,5 +130,6 @@ class ScenespyProject:
             media=media,
             output_folder=raw.get("output_folder", ""),
             project_path=str(path),
+            queue_mode=bool(raw.get("queue_mode", False)),
             version=int(raw.get("version", PROJECT_VERSION)),
         )

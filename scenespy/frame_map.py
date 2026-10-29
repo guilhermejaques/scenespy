@@ -142,3 +142,29 @@ def create_analysis_proxy(source, target, mapping, fps, stop_cb=None):
         raise RuntimeError(detail or "Could not prepare the edited analysis stream")
     return target
 
+
+def create_playback_proxy(source, target, fps, total_frames, stop_cb=None):
+    """Create a frame-aligned, seek-friendly proxy used only for playback."""
+    executable = ffmpeg_path()
+    if not executable:
+        raise RuntimeError("FFmpeg is required to create a playback proxy")
+    target = str(Path(target))
+    Path(target).parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        executable, "-y", "-v", "error", "-noautorotate", "-i", str(source),
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-vf", "scale=960:540:force_original_aspect_ratio=decrease:force_divisible_by=2",
+        "-r", f"{float(fps):.12g}", "-fps_mode", "cfr",
+        "-frames:v", str(max(1, int(total_frames))),
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+        "-g", "12", "-keyint_min", "12", "-sc_threshold", "0",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart", target,
+    ]
+    result = run_hidden_cancelable(
+        command, stop_cb=stop_cb, capture_output=True, low_priority=True)
+    if result.returncode:
+        detail = (result.stderr or b"").decode(errors="ignore").strip()
+        raise RuntimeError(detail or "Could not create the playback proxy")
+    return target
+

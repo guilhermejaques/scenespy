@@ -1,9 +1,28 @@
 import unittest
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from scenespy.frame_map import FrameMap
+from scenespy.frame_map import FrameMap, create_playback_proxy
 
 
 class FrameMapTests(unittest.TestCase):
+    def test_playback_proxy_is_small_seek_friendly_and_frame_limited(self):
+        with TemporaryDirectory() as folder, \
+                patch("scenespy.frame_map.ffmpeg_path", return_value="ffmpeg"), \
+                patch("scenespy.frame_map.run_hidden_cancelable",
+                      return_value=SimpleNamespace(returncode=0, stderr=b"")) as run:
+            target = f"{folder}/proxy.mp4"
+            create_playback_proxy("source.mp4", target, 29.97, 300)
+
+        command = run.call_args.args[0]
+        self.assertIn(
+            "scale=960:540:force_original_aspect_ratio=decrease:force_divisible_by=2",
+            command)
+        self.assertEqual(command[command.index("-frames:v") + 1], "300")
+        self.assertEqual(command[command.index("-g") + 1], "12")
+        self.assertIn("0:a:0?", command)
+
     def test_maps_concatenated_frames_to_original_ranges(self):
         mapping = FrameMap([(0, 100), (200, 260)], 300)
         self.assertEqual(mapping.analysis_frames, 160)
