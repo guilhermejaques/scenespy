@@ -19,9 +19,10 @@ import cv2
 import qtawesome as qta
 
 from PySide6.QtCore import (QEasingCurve, QEvent, QPoint, QPointF, QProcess, QPropertyAnimation,
-                            QRectF, QSize, Qt, QThread, QTimer, QUrl, QVariantAnimation,
+                            QRectF, QSettings, QSize, Qt, QThread, QTimer, QUrl, QVariantAnimation,
                             Signal)
 from PySide6.QtGui import (QAction, QBrush, QColor, QDesktopServices, QFont, QFontDatabase,
+                           QFontMetrics,
                            QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath,
                            QPen, QPixmap, QPolygonF)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -31,10 +32,12 @@ from PySide6.QtWidgets import (
     QGraphicsRectItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSlider,
     QScrollBar, QSizePolicy, QSpinBox, QSplitter, QStackedLayout, QStatusBar, QStyle,
+    QStyleOptionFrame,
     QStyleOptionSlider, QToolButton, QVBoxLayout, QWidget, QWidgetAction,
 )
 
 from .media import probe_media
+from . import __version__
 from .project import CutEvent, FaceEvent, MediaItem, ScenespyProject
 from .face_engine import FaceDetectionEngine
 from .frame_map import FrameMap, create_analysis_proxy, create_playback_proxy
@@ -72,11 +75,16 @@ INDICATOR_PLAY_POINTS = (
     QPointF(-2.5, -4), QPointF(4, 0), QPointF(-2.5, 4))
 
 
+def primary_modifier(platform=None):
+    """Return Ctrl on Windows/Linux and Command on macOS."""
+    platform = platform or sys.platform
+    return (Qt.KeyboardModifier.MetaModifier if platform == "darwin" else
+            Qt.KeyboardModifier.ControlModifier)
+
+
 def primary_shortcut(key, shift=False, platform=None):
     """Build a Ctrl shortcut on Windows/Linux and Command on macOS."""
-    platform = platform or sys.platform
-    modifier = (Qt.KeyboardModifier.MetaModifier if platform == "darwin" else
-                Qt.KeyboardModifier.ControlModifier)
+    modifier = primary_modifier(platform)
     if shift:
         modifier |= Qt.KeyboardModifier.ShiftModifier
     return QKeySequence(modifier | key)
@@ -96,7 +104,18 @@ def timecode(seconds, duration=None):
 
 
 def transport_timecode(seconds, duration=None):
-    return timecode(seconds, duration).split(".", 1)[0]
+    total_seconds = max(0, int(float(seconds or 0)))
+    reference_seconds = max(0, float(duration or 0))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if max(float(seconds or 0), reference_seconds) >= 3600:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def player_timecode(seconds, duration=None):
+    """Precise editable time used by the player transport."""
+    return timecode(seconds, duration)
 
 
 def timecode_has_hours(duration):
@@ -104,9 +123,7 @@ def timecode_has_hours(duration):
 
 
 def scrub_timecode(seconds, duration):
-    """Useful hover precision for short clips without cluttering longer media."""
-    if float(duration or 0) < 60:
-        return timecode(seconds, duration)
+    """Compact time shown while hovering over transport controls."""
     return transport_timecode(seconds, duration)
 
 
@@ -130,12 +147,17 @@ def final_face_crop_box(box, frame_width, frame_height):
     ]
 
 
+def face_event_source_frame(event):
+    """Convert the face engine's one-based frame number to media coordinates."""
+    return max(0, int(event.best_frame) - 1)
+
+
 def face_event_is_included(media, event):
     """Return whether a face's selected frame belongs to an active segment."""
     if not media or not event:
         return False
     unavailable = set(media.excluded_segments) | set(media.removed_segments)
-    source_frame = max(0, int(event.best_frame) - 1)
+    source_frame = face_event_source_frame(event)
     return any(
         start <= source_frame < end and index not in unavailable
         for index, (start, end) in enumerate(media.segments(), 1))
@@ -238,6 +260,67 @@ class ScrubSlider(QSlider):
     def hideEvent(self, event):
         self._time_bubble.hide()
         super().hideEvent(event)
+
+
+class MillisecondTimeEdit(QLineEdit):
+    """Line edit that de-emphasizes its millisecond suffix when not editing."""
+    timeStepped = Signal(float)
+
+    def keyPressEvent(self, event):
+        if (event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down) and
+                event.modifiers() == Qt.KeyboardModifier.NoModifier):
+            current = parse_timecode(self.text())
+            if current is not None:
+                text = self.text()
+                cursor = (self.selectionStart() if self.hasSelectedText()
+                          else self.cursorPosition())
+                dot = text.rfind(".")
+                colons = [index for index, char in enumerate(text) if char == ":"]
+                if dot >= 0 and cursor >= dot:
+                    amount = .001
+                elif colons and cursor > colons[-1]:
+                    amount = 1.0
+                elif len(colons) >= 2 and cursor > colons[-2]:
+                    amount = 60.0
+                elif colons:
+                    amount = 3600.0 if len(colons) >= 2 else 60.0
+                else:
+                    amount = 1.0
+                direction = 1.0 if event.key() == Qt.Key.Key_Up else -1.0
+                self.timeStepped.emit(current + direction * amount)
+                self.setCursorPosition(min(cursor, len(self.text())))
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event):
+        text = self.text()
+        if self.hasFocus() or len(text) < 5 or text[-4] != ".":
+            super().paintEvent(event)
+            return
+
+        option = QStyleOptionFrame()
+        self.initStyleOption(option)
+        painter = QPainter(self)
+        self.style().drawPrimitive(
+            QStyle.PrimitiveElement.PE_PanelLineEdit,
+            option, painter, self)
+        contents = self.style().subElementRect(
+            QStyle.SubElement.SE_LineEditContents,
+            option, self).adjusted(4, 0, -4, 0)
+        main_text, millis_text = text[:-4], text[-4:]
+        metrics = self.fontMetrics()
+        main_width = metrics.horizontalAdvance(main_text)
+        millis_width = metrics.horizontalAdvance(millis_text)
+        x = contents.center().x() - (main_width + millis_width) / 2
+        baseline = (contents.center().y() +
+                    (metrics.ascent() - metrics.descent()) / 2)
+        painter.setFont(self.font())
+        painter.setPen(QColor("#f3f4f6" if self.isEnabled() else "#5d626a"))
+        painter.drawText(QPointF(x, baseline), main_text)
+        painter.setPen(QColor("#7d8794" if self.isEnabled() else "#555a62"))
+        painter.drawText(QPointF(x + main_width, baseline), millis_text)
+        painter.end()
 
 
 class VideoBackdrop(QWidget):
@@ -501,7 +584,92 @@ class FramedComboBox(QComboBox):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(color, 1.0))
-        painter.drawRoundedRect(QRectF(self.rect()).adjusted(.5, .5, -.5, -.5), 7, 7)
+        left_inset = 1.5 if self.property("protectLeftBorder") else .5
+        painter.drawRoundedRect(
+            QRectF(self.rect()).adjusted(left_inset, .5, -.5, -.5), 7, 7)
+        painter.end()
+
+
+class IntervalSpinBox(QSpinBox):
+    """Seconds editor with a read-only minute conversion in the same field."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setSuffix(" seconds")
+        self._minutes_label = QLabel(self)
+        self._minutes_label.setObjectName("intervalMinutesHint")
+        self._minutes_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._minutes_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.valueChanged.connect(self._update_minutes_hint)
+        self._update_minutes_hint(self.value())
+
+    def _update_minutes_hint(self, seconds):
+        minutes = ("0" if seconds < 60 else
+                   f"{seconds / 60:.3f}".rstrip("0").rstrip("."))
+        self._minutes_label.setText(f"{minutes} min")
+        self._layout_minutes_hint()
+
+    def _layout_minutes_hint(self):
+        hint_width = self._minutes_label.sizeHint().width()
+        right = 34
+        seconds_width = self.fontMetrics().horizontalAdvance(
+            f"{self.value()} seconds")
+        required_width = seconds_width + hint_width + right + 20
+        if self.width() < required_width:
+            self._minutes_label.hide()
+            self.lineEdit().setTextMargins(0, 0, 0, 0)
+            return
+        self._minutes_label.show()
+        self._minutes_label.setGeometry(
+            max(0, self.width() - right - hint_width), 0,
+            hint_width, self.height())
+        self.lineEdit().setTextMargins(0, 0, hint_width + 14, 0)
+        self._minutes_label.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._layout_minutes_hint()
+
+
+class ShortcutMenu(QMenu):
+    """Menu whose shortcut column stays muted, including during hover."""
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        metrics = painter.fontMetrics()
+        active_action = self.activeAction()
+        for action in self.actions():
+            shortcut = action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+            label = action.text()
+            if not shortcut and "\t" in label:
+                label, shortcut = label.split("\t", 1)
+            if not shortcut or action.isSeparator() or not action.isVisible():
+                continue
+            item_rect = self.actionGeometry(action)
+            active = action is active_action
+            painter.fillRect(item_rect, QColor("#286da9" if active else "#292c30"))
+
+            shortcut_width = metrics.horizontalAdvance(shortcut)
+            label_rect = item_rect.adjusted(12, 0, -shortcut_width - 36, 0)
+            painter.setPen(QColor("#ffffff" if active else "#e5e7eb"))
+            painter.drawText(
+                label_rect,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter |
+                Qt.TextFlag.TextShowMnemonic,
+                label,
+            )
+
+            shortcut_rect = item_rect.adjusted(
+                item_rect.width() - shortcut_width - 24, 0, -12, 0)
+            painter.setPen(QColor("#9ca3af"))
+            painter.drawText(
+                shortcut_rect,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                shortcut,
+            )
         painter.end()
 
 
@@ -526,6 +694,10 @@ class CompactMenuItem(QWidget):
                  metrics.horizontalAdvance(self._text))
         height = self._vertical_margin * 2 + max(self._icon_size, metrics.height())
         return QSize(width, height)
+
+    def setIcon(self, icon):
+        self._icon = icon
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -1008,7 +1180,14 @@ class SceneSegmentItem(QGraphicsRectItem):
         self.setZValue(1)
 
     def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         super().paint(painter, option, widget)
+        header = QRectF(
+            self.rect().left() + .5, self.rect().top() + .5,
+            max(0.0, self.rect().width() - 1), 5)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self.base_color.lighter(118))
+        painter.drawRect(header)
         if not (self.isSelected() or self.direct_hover or self.linked_hover):
             return
         inner = self.rect().adjusted(1, 1, -1, -1)
@@ -1019,9 +1198,23 @@ class SceneSegmentItem(QGraphicsRectItem):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(glow)
         painter.drawRect(inner)
+
+        top_glow = QLinearGradient(
+            inner.topLeft(), inner.topRight())
+        top_glow.setColorAt(0.0, QColor(255, 255, 255, 55))
+        top_glow.setColorAt(0.18, QColor(255, 255, 255, 125))
+        top_glow.setColorAt(0.5, QColor(255, 255, 255, 185))
+        top_glow.setColorAt(0.82, QColor(255, 255, 255, 125))
+        top_glow.setColorAt(1.0, QColor(255, 255, 255, 55))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QColor(255, 255, 255, 38), 3))
-        painter.drawRect(self.rect().adjusted(2, 2, -2, -2))
+        painter.setPen(QPen(QBrush(top_glow), 2.5))
+        painter.drawLine(
+            QPointF(inner.left() + 1, inner.top() + 1),
+            QPointF(inner.right() - 1, inner.top() + 1))
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 45), 1.5))
+        painter.drawRect(self.rect().adjusted(1.5, 1.5, -1.5, -1.5))
 
     def set_linked_hover(self, active):
         self.linked_hover = bool(active)
@@ -1350,6 +1543,7 @@ class TimelineView(QGraphicsView):
         self.playhead = None
         self.show_detected_faces = True
         self.show_saved_faces = True
+        self.show_milliseconds = True
         self._indicator_items = []
         self._indicator_lefts = []
         self._active_indicator_items = set()
@@ -1360,18 +1554,37 @@ class TimelineView(QGraphicsView):
         self._live_face_lane_right_edges = []
         self._live_segment_media_id = None
         self._clip_duration_label = None
+        self._hover_guide = None
+        self._hover_time_bubble = QLabel(None, Qt.WindowType.ToolTip)
+        self._hover_time_bubble.setAttribute(
+            Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self._hover_time_bubble.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._hover_time_bubble.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._hover_time_bubble.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._hover_time_bubble.setFixedHeight(19)
+        self._hover_time_bubble.setStyleSheet(
+            "QLabel { background:transparent; color:rgba(229,231,235,180); "
+            "border:0; padding:1px 3px; font-size:9px; font-weight:600; }")
         self._clip_duration_timer = QTimer(self)
         self._clip_duration_timer.setSingleShot(True)
         self._clip_duration_timer.timeout.connect(self.clear_clip_duration)
         self.setMinimumHeight(205)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
         self.setBackgroundBrush(QColor(BG_MAIN))
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         # Extra face lanes normally fit in the unused lower area.  In the rare
         # case where many faces share the same moment, keep every lane reachable.
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.scene().selectionChanged.connect(self._selection_changed)
+        # Render the empty state immediately so the import prompt is visible
+        # on startup, not only after an action (such as Reset Layout) rebuilds
+        # the timeline.
+        self.rebuild()
 
     def set_media(self, media):
         changed = media is not self.media
@@ -1506,6 +1719,8 @@ class TimelineView(QGraphicsView):
         self._live_face_lane_right_edges = []
         self._live_segment_media_id = None
         self._clip_duration_label = None
+        self._hover_guide = None
+        self._hover_time_bubble.hide()
         self.scene().clear()
         self._indicator_items = []
         self._indicator_lefts = []
@@ -1518,14 +1733,17 @@ class TimelineView(QGraphicsView):
             self.media.cuts, key=lambda cut: cut.frame)), self.media.total_frames]
         removed = set(self.media.removed_segments)
         self._visible_layout = []
-        display_start = 0
+        display_start = 0.0
         for index, (start, end) in enumerate(zip(boundaries, boundaries[1:]), 1):
             if index in removed:
                 continue
             self._visible_layout.append((start, end, index, display_start))
-            display_start += end - start
-        self._display_total_frames = display_start
-        self._display_duration = display_start / max(self.media.fps, .001)
+            display_start += max(
+                0.0,
+                self.media.seconds_for_frame(end) -
+                self.media.seconds_for_frame(start),
+            )
+        self._display_duration = display_start
         self.content_width = max(self.viewport().width() - 20,
                                  self._display_duration * self.pixels_per_second)
         scene_height = 175
@@ -1566,12 +1784,6 @@ class TimelineView(QGraphicsView):
                     f"{timecode(self.media.seconds_for_frame(end), self.media.duration)}")
             segment.setOpacity(1.0 if segment_enabled else .38)
             self.scene().addItem(segment)
-            header = QGraphicsRectItem(x, 35, width, 5)
-            header.setBrush(segment_colors[index - 1].lighter(118))
-            header.setPen(Qt.PenStyle.NoPen)
-            header.setOpacity(1.0 if segment_enabled else .38)
-            header.setZValue(2)
-            self.scene().addItem(header)
             if has_sequences and width >= 64:
                 label = self.scene().addSimpleText(f"{index:02d}")
                 label.setBrush(QColor("#cbd5e1"))
@@ -1623,7 +1835,7 @@ class TimelineView(QGraphicsView):
             face_colors = self._face_colors(face_events)
             face_thumbnails = self._face_thumbnails(face_events)
             for event, face_color in zip(face_events, face_colors):
-                start_x = self.x_for_frame(event.best_frame)
+                start_x = self.x_for_frame(face_event_source_frame(event))
                 left = start_x
                 right = start_x + 44
                 lane = next(
@@ -1683,7 +1895,7 @@ class TimelineView(QGraphicsView):
         if ((event.enabled and not self.show_saved_faces) or
                 (not event.enabled and not self.show_detected_faces)):
             return
-        start_x = self.x_for_frame(event.best_frame)
+        start_x = self.x_for_frame(face_event_source_frame(event))
         right = start_x + 44
         lane = next((
             index for index, occupied_right in
@@ -1744,17 +1956,22 @@ class TimelineView(QGraphicsView):
             if index not in removed]
         if not visible:
             return
-        display_total = sum(end - start for start, end, _index in visible)
+        # Live results can precede the project commit, so derive their ripple
+        # layout from the supplied cuts while keeping the same canonical media
+        # time mapping used by the committed timeline.
         display_starts = {}
-        offset = 0
+        display_total = 0.0
         for start, end, index in visible:
-            display_starts[index] = offset
-            offset += end - start
+            display_starts[index] = display_total
+            display_total += max(
+                0.0,
+                media.seconds_for_frame(end) - media.seconds_for_frame(start),
+            )
         frames = [(start + end) // 2 for start, end, _index in visible]
         thumbnails = self._clip_thumbnails(frames) if load_thumbnails else {}
         colors = self._segment_colors(len(boundaries) - 1)
         for start, end, index in visible:
-            x = (display_starts[index] / max(1, display_total) *
+            x = (display_starts[index] / max(0.001, display_total) *
                  self.content_width)
             chip = ClipPreviewChip(
                 start, end, index, x, self, None,
@@ -1805,44 +2022,89 @@ class TimelineView(QGraphicsView):
         self._clip_duration_timer.start(5000)
 
     def _draw_ruler(self):
-        candidates = (.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600)
+        # Labels stay on whole-second boundaries. Each labeled interval is
+        # split into quarters, with a stronger midpoint like professional NLEs.
+        candidates = (1, 2, 5, 10, 15, 30, 60, 120, 300, 600,
+                      900, 1200, 1800, 3600, 7200, 10800)
         duration = getattr(self, "_display_duration", self.media.duration)
         effective_pps = self.content_width / max(duration, 0.001)
-        step = next((value for value in candidates if value * effective_pps >= 72), candidates[-1])
+        label_spacing = 72.0
+        if timecode_has_hours(duration):
+            sample_width = QFontMetrics(QFont()).horizontalAdvance(
+                transport_timecode(duration, duration))
+            # The first and last labels are clamped inside the ruler rather
+            # than centered.  Extra room prevents their neighbours from
+            # overlapping them at wide, multi-hour zoom levels.
+            label_spacing = max(label_spacing, sample_width * 1.5 + 12.0)
+        step = next(
+            (value for value in candidates
+             if value * effective_pps >= label_spacing),
+            None,
+        )
+        if step is None:
+            step = candidates[-1]
+            while step * effective_pps < label_spacing:
+                step *= 2
         moment = 0.0
-        minor_step = step / 5
+        minor_step = step / 4
+        minor_index = 0
         minor = 0.0
         while minor <= duration + .001:
             x = minor / max(duration, .001) * self.content_width
-            tick = QGraphicsLineItem(x, 25, x, 31)
-            tick.setPen(QPen(QColor("#454b54"), 1))
-            self.scene().addItem(tick)
+            phase = minor_index % 4
+            if phase:
+                midpoint = phase == 2
+                tick = QGraphicsLineItem(
+                    x, 25 if midpoint else 28, x, 31)
+                tick.setPen(QPen(
+                    QColor("#59616c" if midpoint else "#3d424a"), 1))
+                self.scene().addItem(tick)
+            minor_index += 1
             minor += minor_step
         while moment <= duration + .001:
             x = moment / max(duration, .001) * self.content_width
-            tick = QGraphicsLineItem(x, 18, x, 31)
-            tick.setPen(QPen(QColor("#6b7280"), 1))
+            tick = QGraphicsLineItem(x, 22, x, 31)
+            tick.setPen(QPen(QColor("#7d8794"), 1.25))
             self.scene().addItem(tick)
             label = self.scene().addSimpleText(
                 transport_timecode(moment, duration))
             label.setBrush(QColor(TEXT_MUTED))
-            label.setPos(x + 4, 4)
+            label_width = label.boundingRect().width()
+            label_x = max(
+                2.0,
+                min(x - label_width / 2,
+                    max(2.0, self.content_width - label_width - 2.0)),
+            )
+            label.setPos(label_x, 4)
             moment += step
 
     def x_for_frame(self, frame):
         if not self.media or not getattr(self, "_visible_layout", None):
             return 0.0
         frame = max(0, min(int(frame), self.media.total_frames))
-        display_frame = 0
+        return self._x_for_source_seconds(self.media.seconds_for_frame(frame))
+
+    def _x_for_source_seconds(self, source_seconds):
+        if not self.media or not getattr(self, "_visible_layout", None):
+            return 0.0
+        source_seconds = max(
+            0.0, min(self.media.duration, float(source_seconds)))
+        display_seconds = 0.0
         for start, end, _index, display_start in self._visible_layout:
-            display_frame = display_start
-            if frame < start:
+            start_seconds = self.media.seconds_for_frame(start)
+            end_seconds = self.media.seconds_for_frame(end)
+            display_seconds = display_start
+            if source_seconds < start_seconds:
                 break
-            if frame <= end:
-                display_frame = display_start + frame - start
+            if source_seconds <= end_seconds:
+                display_seconds = display_start + max(
+                    0.0, source_seconds - start_seconds,
+                )
                 break
-            display_frame = display_start + end - start
-        return (display_frame / max(1, self._display_total_frames) *
+            display_seconds = display_start + max(
+                0.0, end_seconds - start_seconds,
+            )
+        return (display_seconds / max(.001, self._display_duration) *
                 self.content_width)
 
     def minimum_pixels_per_second(self):
@@ -1855,18 +2117,22 @@ class TimelineView(QGraphicsView):
     def x_for_seconds(self, seconds):
         if not self.media:
             return 0.0
-        return self.x_for_frame(self.media.frame_for_seconds(seconds))
+        return self._x_for_source_seconds(seconds)
 
     def seconds_for_x(self, x):
         if not self.media or not getattr(self, "_visible_layout", None):
             return 0.0
         ratio = max(0.0, min(1.0, float(x) / max(1.0, self.content_width)))
-        display_frame = ratio * self._display_total_frames
+        display_seconds = ratio * self._display_duration
         for start, end, _index, display_start in self._visible_layout:
-            length = end - start
-            if display_frame <= display_start + length:
-                return self.media.seconds_for_frame(
-                    start + display_frame - display_start)
+            start_seconds = self.media.seconds_for_frame(start)
+            end_seconds = self.media.seconds_for_frame(end)
+            length = max(0.0, end_seconds - start_seconds)
+            if display_seconds < display_start + length - 1e-9:
+                return min(
+                    end_seconds,
+                    start_seconds + display_seconds - display_start,
+                )
         return self.media.seconds_for_frame(self._visible_layout[-1][1])
 
     def frame_for_x(self, x):
@@ -1946,8 +2212,85 @@ class TimelineView(QGraphicsView):
             return
         self.cutSelected.emit(item.event if isinstance(item, FaceChip) else None)
 
+    def mouseMoveEvent(self, event):
+        # Let movable scene items update first.  While dragging the playhead,
+        # its clamped position is the canonical hover position (the mouse may
+        # have grabbed the wide hit target a few pixels away from the needle).
+        super().mouseMoveEvent(event)
+        if self.media and getattr(self, "_display_duration", 0) > 0:
+            scene_position = self.mapToScene(event.position().toPoint())
+            dragging_playhead = bool(self.playhead and self.playhead.dragging)
+            x = (float(self.playhead.x()) if dragging_playhead
+                 else scene_position.x())
+            if 0 <= x <= self.content_width:
+                if dragging_playhead:
+                    if self._hover_guide is not None:
+                        self._hover_guide.hide()
+                else:
+                    if self._hover_guide is None:
+                        self._hover_guide = QGraphicsLineItem()
+                        self._hover_guide.setPen(QPen(
+                            QColor(156, 163, 175, 105), 1,
+                            Qt.PenStyle.DashLine))
+                        self._hover_guide.setZValue(35)
+                        self._hover_guide.setAcceptedMouseButtons(
+                            Qt.MouseButton.NoButton)
+                        self.scene().addItem(self._hover_guide)
+                    self._hover_guide.setLine(
+                        x, 0, x, self.scene().sceneRect().height())
+                    self._hover_guide.show()
+
+                duration = self._display_duration
+                seconds = max(
+                    0.0, min(duration, x / max(1.0, self.content_width) * duration))
+                text = (player_timecode(seconds, duration)
+                        if self.show_milliseconds else
+                        transport_timecode(seconds, duration))
+                if self.show_milliseconds:
+                    main_text, millis_text = text[:-4], text[-4:]
+                    self._hover_time_bubble.setText(
+                        f"<span style='color:#e5e7eb'>{main_text}</span>"
+                        f"<span style='color:#7d8794'>{millis_text}</span>")
+                else:
+                    self._hover_time_bubble.setText(text)
+                text_width = self._hover_time_bubble.fontMetrics().horizontalAdvance(text)
+                self._hover_time_bubble.setFixedWidth(text_width + 18)
+                anchor_position = event.position().toPoint()
+                if dragging_playhead:
+                    anchor_position.setX(round(
+                        self.mapFromScene(QPointF(x, scene_position.y())).x()))
+                anchor = self.viewport().mapToGlobal(anchor_position)
+                self._hover_time_bubble.move(
+                    anchor.x() - self._hover_time_bubble.width() // 2,
+                    anchor.y() - self._hover_time_bubble.height() - 14)
+                self._hover_time_bubble.show()
+            else:
+                self._hide_hover_time()
+        else:
+            self._hide_hover_time()
+
+    def _hide_hover_time(self):
+        self._hover_time_bubble.hide()
+        if self._hover_guide is not None:
+            self._hover_guide.hide()
+
+    def leaveEvent(self, event):
+        self._hide_hover_time()
+        super().leaveEvent(event)
+
+    def hideEvent(self, event):
+        self._hide_hover_time()
+        super().hideEvent(event)
+
+    def _timeline_item_at(self, position):
+        """Return the real timeline item below visual-only hover overlays."""
+        return next((
+            item for item in self.items(position)
+            if item is not self._hover_guide
+        ), None)
+
     def mousePressEvent(self, event):
-        item = self.itemAt(event.position().toPoint())
+        item = self._timeline_item_at(event.position().toPoint())
         pressed_cut = (item.event if
                        event.button() == Qt.MouseButton.LeftButton and
                        isinstance(item, CutHandle) else None)
@@ -1967,7 +2310,7 @@ class TimelineView(QGraphicsView):
                 item.index)
 
     def contextMenuEvent(self, event):
-        item = self.itemAt(event.pos())
+        item = self._timeline_item_at(event.pos())
         if isinstance(item, CutHandle):
             local_point = item.mapFromScene(self.mapToScene(event.pos()))
             if QRectF(-7, -5, 14, 18).contains(local_point):
@@ -2070,19 +2413,38 @@ class TimelineView(QGraphicsView):
         super().contextMenuEvent(event)
 
     def wheelEvent(self, event):
-        if self.media and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            self.pixels_per_second = max(
-                self.minimum_pixels_per_second(),
-                min(500, self.pixels_per_second *
-                    (1.18 if event.angleDelta().y() > 0 else .85)))
-            self.rebuild()
+        if self.media and event.modifiers() & primary_modifier():
+            self.zoom_by_factor(
+                1.18 if event.angleDelta().y() > 0 else .85,
+                event.position().x())
+            event.accept()
             return
         super().wheelEvent(event)
+
+    def zoom_by_factor(self, factor, viewport_x=None):
+        if not self.media:
+            return
+        viewport_x = (self.viewport().width() / 2 if viewport_x is None
+                      else float(viewport_x))
+        scene_x = self.mapToScene(QPoint(round(viewport_x), 0)).x()
+        anchor_seconds = self.seconds_for_x(scene_x)
+        previous = self.pixels_per_second
+        self.pixels_per_second = max(
+            self.minimum_pixels_per_second(),
+            min(500.0, previous * float(factor)))
+        if abs(self.pixels_per_second - previous) < 1e-9:
+            return
+        self.rebuild()
+        anchor_x = self.x_for_seconds(anchor_seconds)
+        self.horizontalScrollBar().setValue(round(anchor_x - viewport_x))
 
 
 class ScenespyApp(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.settings = QSettings("Scenespy", "Scenespy")
+        self.show_milliseconds = self.settings.value(
+            "view/show_milliseconds", True, type=bool)
         self.project = ScenespyProject()
         self.current_media: MediaItem | None = None
         self.selected_cut = None
@@ -2113,7 +2475,7 @@ class ScenespyApp(QMainWindow):
         self.available_inference_accel = detect_available_inference_accel()
         self.available_accel = (self.available_encoder_accel |
                                 self.available_inference_accel)
-        self.setWindowTitle("Scenespy")
+        self.setWindowTitle(f"Scenespy {__version__}")
         icon = Path(__file__).parent / "assets" / "images" / "x.png"
         if icon.exists():
             self.setWindowIcon(QIcon(str(icon)))
@@ -2129,6 +2491,7 @@ class ScenespyApp(QMainWindow):
         self._frame_decoder = None
         self._ensure_frame_decoder()
         self._build_actions()
+        self._set_milliseconds_visible(self.show_milliseconds)
         QApplication.instance().installEventFilter(self)
         self._apply_theme()
         self.mode.currentIndexChanged.connect(self._mode_changed)
@@ -2137,6 +2500,43 @@ class ScenespyApp(QMainWindow):
 
     def eventFilter(self, watched, event):
         """Provide Premiere-style unmodified arrow-key frame stepping."""
+        if hasattr(self, "github_button") and watched is self.github_button:
+            if event.type() == QEvent.Type.Enter:
+                button_position = self.github_button.mapTo(
+                    self.menuBar(), QPoint(0, 0))
+                label_size = self.github_label.sizeHint()
+                self.github_label.setGeometry(
+                    button_position.x() - label_size.width() - 5,
+                    button_position.y() +
+                    (self.github_button.height() - label_size.height()) // 2,
+                    label_size.width(), label_size.height())
+                self.github_label.show()
+                self.github_label.raise_()
+            elif event.type() == QEvent.Type.Leave:
+                self.github_label.hide()
+        if (hasattr(self, "volume_menu") and
+                self.volume_menu.isVisible() and
+                event.type() == QEvent.Type.MouseButtonPress and
+                event.button() == Qt.MouseButton.LeftButton):
+            global_position = event.globalPosition().toPoint()
+            button_position = self.volume_button.mapFromGlobal(global_position)
+            if self.volume_button.rect().contains(button_position):
+                self.volume_menu.hide()
+                self.toggle_mute()
+                event.accept()
+                return True
+        if (hasattr(self, "volume_button") and
+                watched is self.volume_button and
+                event.type() == QEvent.Type.Enter):
+            self._volume_hover_timer.start()
+        elif (hasattr(self, "volume_button") and
+              watched is self.volume_button and
+              event.type() == QEvent.Type.Leave):
+            self._volume_hover_timer.stop()
+        elif (hasattr(self, "volume_button") and
+              watched is self.volume_button and
+              event.type() == QEvent.Type.MouseButtonPress):
+            self._volume_hover_timer.stop()
         if (event.type() == QEvent.Type.KeyPress and
                 event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right) and
                 event.modifiers() == Qt.KeyboardModifier.NoModifier and
@@ -2150,9 +2550,32 @@ class ScenespyApp(QMainWindow):
                 return True
         return super().eventFilter(watched, event)
 
+    def _show_volume_menu(self):
+        if self.volume_menu.isVisible():
+            return
+        self.volume_menu.ensurePolished()
+        menu_size = self.volume_menu.sizeHint()
+        position = self.volume_button.mapToGlobal(QPoint(
+            (self.volume_button.width() - menu_size.width()) // 2,
+            -menu_size.height() - 4,
+        ))
+        self.volume_menu.popup(position)
+
+    def _set_volume(self, value):
+        volume = max(0, min(100, int(value))) / 100
+        self.audio.setVolume(volume)
+        if volume > 0 and self.audio.isMuted():
+            self.audio.setMuted(False)
+
+    def _sync_volume_slider(self, volume):
+        value = round(max(0.0, min(1.0, float(volume))) * 100)
+        if self.volume_slider.value() != value:
+            self.volume_slider.setValue(value)
+
     def _build_player(self):
         self.audio = QAudioOutput(self)
-        self.audio.setVolume(.8)
+        self.audio.setVolume(.5)
+        self.audio.setMuted(False)
         self.player = QMediaPlayer(self)
         self.player.setAudioOutput(self.audio)
         self.video = FaceMarkerVideoWidget()
@@ -2217,6 +2640,7 @@ class ScenespyApp(QMainWindow):
         self.media_list.currentRowChanged.connect(self._select_media)
         layout.addWidget(self.media_list)
         media_footer = QHBoxLayout()
+        media_footer.setContentsMargins(1, 1, 1, 1)
         media_footer.setSpacing(6)
         self.import_button = QPushButton("Input")
         self.import_button.setObjectName("mediaFooterButton")
@@ -2233,8 +2657,11 @@ class ScenespyApp(QMainWindow):
         root.addWidget(left)
 
         center = QSplitter(Qt.Orientation.Vertical)
+        center.setChildrenCollapsible(False)
         self.workspace_splitter = center
         viewer = QFrame(objectName="viewer")
+        viewer.setMinimumHeight(350)
+        self.viewer_panel = viewer
         view_layout = QVBoxLayout(viewer)
         self.media_info = QLabel(self.menuBar())
         self.media_info.setObjectName("mediaInfo")
@@ -2296,6 +2723,24 @@ class ScenespyApp(QMainWindow):
         self.play_button.setFixedSize(44, 34)
         self.play_button.setIconSize(QSize(15, 15))
         self.volume_button.setIconSize(QSize(15, 15))
+        self.volume_menu = QMenu(self)
+        self.volume_menu.setObjectName("volumeMenu")
+        self._volume_hover_timer = QTimer(self)
+        self._volume_hover_timer.setSingleShot(True)
+        self._volume_hover_timer.setInterval(600)
+        self._volume_hover_timer.timeout.connect(self._show_volume_menu)
+        self.volume_slider = QSlider(Qt.Orientation.Vertical)
+        self.volume_slider.setObjectName("volumeSlider")
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setPageStep(10)
+        self.volume_slider.setValue(round(self.audio.volume() * 100))
+        self.volume_slider.setFixedSize(32, 130)
+        self.volume_slider.setToolTip("Volume")
+        self.volume_slider.valueChanged.connect(self._set_volume)
+        self.audio.volumeChanged.connect(self._sync_volume_slider)
+        volume_action = QWidgetAction(self.volume_menu)
+        volume_action.setDefaultWidget(self.volume_slider)
+        self.volume_menu.addAction(volume_action)
         back.clicked.connect(lambda: self.relative_seek(-5000))
         previous.clicked.connect(lambda: self.jump_event(-1))
         self.play_button.clicked.connect(self.toggle_playback)
@@ -2307,19 +2752,21 @@ class ScenespyApp(QMainWindow):
         self.seek.setObjectName("mediaScrubber")
         self.seek.setMinimumHeight(26)
         self.seek.sliderMoved.connect(self.seek_timeline_ms)
-        self.clock = QLineEdit("00:00")
+        self.clock = MillisecondTimeEdit("00:00.000")
         self.clock.setObjectName("editableTimecode")
-        self.clock.setFixedWidth(72)
+        self.clock.setFixedWidth(92)
         self.clock.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.clock.editingFinished.connect(self.seek_from_timecode)
+        self.clock.timeStepped.connect(self._step_from_timecode)
         self.time_separator = QLabel("/")
         self.time_separator.setObjectName("timeSeparator")
         self.time_separator.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.duration_clock = QLineEdit("00:00")
+        self.duration_clock = MillisecondTimeEdit("00:00.000")
         self.duration_clock.setObjectName("timecode")
-        self.duration_clock.setFixedWidth(72)
+        self.duration_clock.setFixedWidth(92)
         self.duration_clock.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.duration_clock.setReadOnly(True)
+        self.duration_clock.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.transport_group = QFrame()
         self.transport_group.setObjectName("transportGroup")
         transport_layout = QHBoxLayout(self.transport_group)
@@ -2336,6 +2783,7 @@ class ScenespyApp(QMainWindow):
         view_layout.addWidget(self.transport_group)
         center.addWidget(viewer)
         self.timeline = TimelineView()
+        self.timeline.show_milliseconds = self.show_milliseconds
         self.timeline.seekRequested.connect(self._request_timeline_seek)
         self.timeline.scrubStarted.connect(self._begin_timeline_scrub)
         self.timeline.scrubFinished.connect(self._finish_timeline_scrub)
@@ -2350,6 +2798,7 @@ class ScenespyApp(QMainWindow):
         self.timeline.cutRemoveRequested.connect(self.remove_cut_marker)
         center.addWidget(self.timeline)
         center.setSizes([650, 210])
+        QTimer.singleShot(0, self._restore_workspace_splitter)
         root.addWidget(center)
 
         right = QFrame(objectName="analysisPanel")
@@ -2399,7 +2848,7 @@ class ScenespyApp(QMainWindow):
         self.selection_preview.setFixedHeight(150)
         self.selection_preview.hide()
         selection_actions = QHBoxLayout()
-        selection_actions.setContentsMargins(0, 0, 0, 0)
+        selection_actions.setContentsMargins(1, 1, 1, 1)
         selection_actions.setSpacing(6)
         self.face_previous_button = QToolButton()
         self.face_previous_button.setIcon(themed_icon("fa6s.chevron-left"))
@@ -2425,7 +2874,7 @@ class ScenespyApp(QMainWindow):
         self.face_cancel_button.hide()
         self.face_save_button = QToolButton()
         self.face_save_button.setIcon(themed_icon("fa6s.floppy-disk"))
-        self.face_save_button.setToolTip("Save selected face as…")
+        self.face_save_button.setToolTip("Save selected face as")
         self.face_save_button.clicked.connect(self.save_selected_face)
         self.face_save_button.hide()
         self.face_detected_filter_button = QToolButton()
@@ -2465,7 +2914,7 @@ class ScenespyApp(QMainWindow):
         self.preanalysis_actions = QWidget()
         self.preanalysis_actions.setObjectName("selectionActions")
         preanalysis_layout = QHBoxLayout(self.preanalysis_actions)
-        preanalysis_layout.setContentsMargins(0, 0, 0, 0)
+        preanalysis_layout.setContentsMargins(1, 1, 1, 1)
         preanalysis_layout.setSpacing(6)
         self.preanalysis_cut_button = QToolButton()
         self.preanalysis_cut_button.setObjectName("selectionAction")
@@ -2582,40 +3031,63 @@ class ScenespyApp(QMainWindow):
             left, 0, max(0, self.video_backdrop.width()), menu_bar.height())
         self.media_info.raise_()
 
+    def _restore_workspace_splitter(self):
+        saved_sizes = self.settings.value(
+            "layout/workspace_splitter_sizes", [], type=list)
+        try:
+            sizes = [int(value) for value in saved_sizes]
+        except (TypeError, ValueError):
+            return
+        if len(sizes) == 2 and all(value > 0 for value in sizes):
+            self.workspace_splitter.setSizes(sizes)
+
+    def _save_workspace_splitter(self):
+        sizes = self.workspace_splitter.sizes()
+        if len(sizes) == 2 and all(value > 0 for value in sizes):
+            self.settings.setValue(
+                "layout/workspace_splitter_sizes", sizes)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         QTimer.singleShot(0, self._position_media_info)
 
     def _analysis_fields(self):
         self.mode = FramedComboBox()
-        self.mode.addItem("Scene detection", "scene")
-        self.mode.addItem("Every seconds", "interval")
-        self.mode.addItem("Detect faces", "faces")
+        self.mode.setObjectName("analysisField")
+        self.mode.setProperty("protectLeftBorder", True)
+        self.mode.addItem("Scene Detection", "scene")
+        self.mode.addItem("Every Seconds", "interval")
+        self.mode.addItem("Detect Faces", "faces")
         for index in range(self.mode.count()):
             description = MODE_TOOLTIPS.get(self.mode.itemData(index), "")
             self.mode.setItemData(
                 index, description, Qt.ItemDataRole.ToolTipRole)
         self.sensitivity = FramedComboBox()
+        self.sensitivity.setObjectName("analysisField")
+        self.sensitivity.setProperty("protectLeftBorder", True)
         self.sensitivity.addItems(PROFILES.keys())
         self.sensitivity.setCurrentText("Normal")
-        self.interval = QSpinBox()
+        self.interval = IntervalSpinBox()
+        self.interval.setObjectName("analysisField")
         self.interval.setRange(1, 18000)
         self.interval.setValue(10)
-        self.interval.setSuffix(" seconds")
+        self.interval.setKeyboardTracking(False)
         self.accel = FramedComboBox()
+        self.accel.setObjectName("analysisField")
+        self.accel.setProperty("protectLeftBorder", True)
         for value in ACCEL_OPTIONS:
             if value in self.available_accel: self.accel.addItem(value.upper(), value)
         return (("Mode", self.mode), ("Sensitivity", self.sensitivity),
                 ("Interval", self.interval), ("Acceleration", self.accel))
 
     def _build_actions(self):
-        self.import_action = QAction("Import Video…", self)
+        self.import_action = QAction("Import Video", self)
         self.import_action.setShortcut(QKeySequence.StandardKey.Open)
         self.import_action.triggered.connect(self.import_videos)
-        save_action = QAction("Save Project…", self)
+        save_action = QAction("Save Project", self)
         save_action.setShortcut(QKeySequence.StandardKey.Save)
         save_action.triggered.connect(self.save_project)
-        self.load_action = QAction("Open Project…", self)
+        self.load_action = QAction("Open Project", self)
         self.load_action.setShortcut(primary_shortcut(Qt.Key.Key_O, shift=True))
         self.load_action.triggered.connect(self.open_project)
         self.add_cut_action = QAction("Add Cut at Playhead", self)
@@ -2637,18 +3109,90 @@ class ScenespyApp(QMainWindow):
         reset_layout_action = QAction("Reset Layout", self)
         reset_layout_action.setShortcut(primary_shortcut(Qt.Key.Key_R, shift=True))
         reset_layout_action.triggered.connect(self.reset_layout)
-        self.menuBar().addMenu("&File").addActions(
-            [self.import_action, self.load_action, save_action])
-        edit_menu = self.menuBar().addMenu("&Edit")
+        zoom_modifier = "⌘" if sys.platform == "darwin" else "Ctrl"
+        zoom_in_action = QAction(
+            f"Zoom In\t{zoom_modifier}+Scroll Up", self)
+        zoom_in_action.triggered.connect(
+            lambda: self.timeline.zoom_by_factor(1.18))
+        zoom_out_action = QAction(
+            f"Zoom Out\t{zoom_modifier}+Scroll Down", self)
+        zoom_out_action.triggered.connect(
+            lambda: self.timeline.zoom_by_factor(.85))
+        file_menu = ShortcutMenu("&File", self)
+        self.menuBar().addMenu(file_menu)
+        file_menu.addActions([self.import_action, self.load_action, save_action])
+        edit_menu = ShortcutMenu("&Edit", self)
+        self.menuBar().addMenu(edit_menu)
         edit_menu.addAction(playback_action)
         edit_menu.addActions([previous_frame_action, next_frame_action])
         edit_menu.addSeparator()
         edit_menu.addAction(self.add_cut_action)
-        edit_menu.addSeparator()
-        edit_menu.addActions(
-            [self.import_action, self.load_action, save_action])
-        self.menuBar().addMenu("&View").addAction(reset_layout_action)
+        view_menu = ShortcutMenu("&View", self)
+        self.menuBar().addMenu(view_menu)
+        view_menu.addAction(reset_layout_action)
+        view_menu.addActions([zoom_in_action, zoom_out_action])
+        self.milliseconds_menu_item = CompactMenuItem(
+            themed_icon(
+                "fa6s.toggle-on" if self.show_milliseconds else "fa6s.toggle-off",
+                ACCENT, scale_factor=.85),
+            "Show Milliseconds", view_menu, hover_color=ACCENT)
+        milliseconds_action = QWidgetAction(view_menu)
+        milliseconds_action.setDefaultWidget(self.milliseconds_menu_item)
+        view_menu.addAction(milliseconds_action)
+
+        def toggle_milliseconds():
+            self._set_milliseconds_visible(not self.show_milliseconds)
+            view_menu.close()
+
+        self.milliseconds_menu_item.activated.connect(toggle_milliseconds)
+        self.github_label = QLabel("guilhermejaques", self.menuBar())
+        self.github_label.setObjectName("githubUsername")
+        self.github_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.github_label.hide()
+        self.github_button = QToolButton(self.menuBar())
+        self.github_button.setObjectName("githubLink")
+        self.github_button.setIcon(qta.icon(
+            "fa6b.github", color="#aeb4bd", color_active="#ffffff"))
+        self.github_button.setIconSize(QSize(14, 14))
+        self.github_button.setFixedSize(22, 22)
+        self.github_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.github_button.setToolTip("Scenespy on GitHub")
+        self.github_button.installEventFilter(self)
+        self.github_button.clicked.connect(lambda: QDesktopServices.openUrl(
+            QUrl("https://github.com/guilhermejaques/scenespy")))
+        self.menuBar().setCornerWidget(
+            self.github_button, Qt.Corner.TopRightCorner)
         self.addAction(playback_action)
+
+    def _set_milliseconds_visible(self, visible):
+        self.show_milliseconds = bool(visible)
+        self.settings.setValue(
+            "view/show_milliseconds", self.show_milliseconds)
+        self.timeline.show_milliseconds = self.show_milliseconds
+        self.timeline._hover_time_bubble.hide()
+        if hasattr(self, "milliseconds_menu_item"):
+            self.milliseconds_menu_item.setIcon(themed_icon(
+                "fa6s.toggle-on" if self.show_milliseconds else "fa6s.toggle-off",
+                ACCENT, scale_factor=.85))
+
+        duration = self._timeline_duration()
+        minimum_width = 92 if self.show_milliseconds else 72
+        duration_text = self._player_timecode(duration, duration)
+        width = max(
+            minimum_width,
+            self.clock.fontMetrics().horizontalAdvance(duration_text) + 24)
+        self.clock.setFixedWidth(width)
+        self.duration_clock.setFixedWidth(width)
+        if self.current_media:
+            if self._processing_preview_selected():
+                self._sync_processing_position(self.timeline.current_seconds)
+            else:
+                self._refresh_transport_timeline()
+        else:
+            zero = self._player_timecode(0, 0)
+            self.clock.setText(zero)
+            self.duration_clock.setText(zero)
 
     def reset_layout(self):
         self.showMaximized()
@@ -2666,6 +3210,7 @@ class ScenespyApp(QMainWindow):
         timeline_height = max(205, round(height * .245))
         preview_height = max(280, height - timeline_height)
         self.workspace_splitter.setSizes([preview_height, timeline_height])
+        self._save_workspace_splitter()
         self.timeline.fit_to_view()
         self._position_media_info()
         self.statusBar().showMessage("Default layout restored", 3000)
@@ -2723,6 +3268,7 @@ class ScenespyApp(QMainWindow):
         QScrollArea#analysisScroll QScrollBar::sub-line:vertical {{ background:transparent; border:0; height:0; }}
         QScrollArea#analysisScroll::corner {{ background:#292b2f; border:0; }}
         QComboBox, QSpinBox {{ min-height:20px; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #292c31, stop:1 #202226); color:#e5e7eb; border:1px solid #4a4e55; border-radius:7px; padding:6px 9px; selection-background-color:{ACCENT}; }}
+        QComboBox#analysisField, QSpinBox#analysisField {{ margin-left:1px; }}
         QComboBox:hover, QSpinBox:hover {{ border-color:#69717c; background:#2d3136; }}
         QComboBox:focus, QSpinBox:focus {{ border-color:#ffffff; }}
         QComboBox::drop-down {{ width:25px; border:0; border-left:1px solid #444950; }}
@@ -2733,6 +3279,7 @@ class ScenespyApp(QMainWindow):
         QSpinBox::up-button:hover, QSpinBox::down-button:hover {{ background:transparent; border:0; }}
         QSpinBox::up-arrow {{ image:url("{spin_up}"); width:8px; height:5px; }}
         QSpinBox::down-arrow {{ image:url("{spin_down}"); width:8px; height:5px; }}
+        QSpinBox QLabel#intervalMinutesHint {{ color:#9ca3af; background:transparent; border:0; padding:0; }}
         QPushButton {{ min-height:20px; color:#dbe1e8; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #464a50, stop:1 #303339); border:1px solid #555a62; border-radius:8px; padding:7px 12px; font-weight:700; }}
         QPushButton:hover {{ color:white; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #59606a, stop:1 #3c4148); border-color:#737b87; }}
         QPushButton:pressed {{ background:#25282c; border-color:#ffffff; padding-top:9px; padding-bottom:5px; }}
@@ -2744,9 +3291,11 @@ class ScenespyApp(QMainWindow):
         QPushButton#danger:hover {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #d25a65, stop:1 #97343e); border-color:#ef8991; }}
         QMessageBox QPushButton#confirmRemoveAll:hover {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #d25a65, stop:1 #97343e); border-color:#ef8991; color:white; }}
         QMessageBox QPushButton#confirmRemoveAll:pressed {{ background:#7f2932; border-color:#d26a73; color:white; }}
-        QMessageBox QDialogButtonBox {{ padding-top:3px; }}
+        QMessageBox QLabel#qt_msgbox_informativelabel {{ color:#9ca3af; font-size:9px; }}
+        QMessageBox QDialogButtonBox {{ padding:5px 4px 4px 4px; }}
+        QMessageBox QDialogButtonBox QPushButton {{ margin:1px; }}
         QPushButton#secondary {{ color:#cbd5e1; }}
-        QPushButton#mediaFooterButton {{ min-height:0; color:#cbd5e1; padding:6px 12px; }}
+        QPushButton#mediaFooterButton {{ min-height:0; color:#cbd5e1; margin:1px; padding:6px 12px; }}
         QPushButton#mediaFooterButton:pressed {{ padding:8px 12px 4px 12px; }}
         QCheckBox#batchSwitch {{ color:#d1d5db; spacing:7px; font-size:9px; padding:4px 8px; border:1px solid #4a4e55; border-radius:7px; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #292c31, stop:1 #202226); }}
         QCheckBox#batchSwitch:hover {{ color:white; border-color:#69717c; background:#2d3136; }}
@@ -2759,7 +3308,7 @@ class ScenespyApp(QMainWindow):
         QToolButton#mediaListMenu {{ background:transparent; border:0; border-radius:5px; padding:0; }}
         QToolButton#mediaListMenu:hover {{ background:#41454b; }}
         QToolButton#mediaListMenu:pressed {{ background:#25282c; }}
-        QToolButton#selectionAction {{ background:#303339; border:1px solid #555a62; border-radius:7px; padding:5px; }}
+        QToolButton#selectionAction {{ background:#303339; border:1px solid #555a62; border-radius:7px; margin:1px; padding:5px; }}
         QToolButton#selectionAction:hover {{ background:#464a50; border-color:#737b87; }}
         QToolButton#selectionAction:pressed {{ background:#25282c; border-color:#ffffff; }}
         QToolButton#selectionClose {{ background:transparent; border:0; padding:0; }}
@@ -2783,7 +3332,7 @@ class ScenespyApp(QMainWindow):
         QSlider:disabled::add-page:horizontal {{ background:#35383d; }}
         QSlider:disabled::handle:horizontal {{ background:#626770; border-color:#44484e; }}
         QFrame#transportGroup {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #35383d, stop:1 #25272b); border:1px solid #484c53; border-radius:10px; }}
-        QFrame#transportGroup QToolButton {{ color:#d1d5db; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #464a50, stop:1 #303339); border:1px solid #555a62; border-radius:7px; padding:0; font-weight:700; }}
+        QFrame#transportGroup QToolButton {{ color:#d1d5db; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #464a50, stop:1 #303339); border:1px solid #555a62; border-radius:7px; margin:1px; padding:0; font-weight:700; }}
         QFrame#transportGroup QToolButton:hover {{ color:white; background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #59606a, stop:1 #3c4148); border-color:#737b87; }}
         QFrame#transportGroup QToolButton:pressed {{ background:#24272b; border-color:#ffffff; padding-top:2px; }}
         QFrame#transportGroup QToolButton#transportSkip {{ color:#9ca3af; }}
@@ -2796,6 +3345,15 @@ class ScenespyApp(QMainWindow):
         QSlider#mediaScrubber::add-page:horizontal {{ background:#565b63; border:0; border-radius:1px; }}
         QSlider#mediaScrubber::handle:horizontal {{ background:#e5edf6; border:0; width:14px; height:14px; margin:-5px 0; border-radius:7px; }}
         QSlider#mediaScrubber::handle:horizontal:hover {{ background:white; border:0; }}
+        QMenu#volumeMenu {{ padding:8px 6px; }}
+        QMenu#volumeMenu::item {{ margin:0; padding:0; background:transparent; }}
+        QMenu#volumeMenu::item:selected {{ background:transparent; }}
+        QSlider#volumeSlider {{ background:transparent; border:0; padding:5px 0; }}
+        QSlider#volumeSlider::groove:vertical {{ width:4px; background:#565b63; border:0; border-radius:2px; }}
+        QSlider#volumeSlider::sub-page:vertical {{ background:#565b63; border:0; border-radius:2px; }}
+        QSlider#volumeSlider::add-page:vertical {{ background:#d25a65; border:0; border-radius:2px; }}
+        QSlider#volumeSlider::handle:vertical {{ background:#e5edf6; border:0; width:14px; height:14px; margin:0 -5px; border-radius:7px; }}
+        QSlider#volumeSlider::handle:vertical:hover {{ background:white; border:0; }}
         QFrame#transportGroup QLineEdit#editableTimecode, QFrame#transportGroup QLineEdit#timecode {{ background:transparent; color:#f3f4f6; border:0; border-radius:0; padding:5px 4px; font-weight:700; }}
         QFrame#transportGroup QLineEdit#editableTimecode:hover, QFrame#transportGroup QLineEdit#editableTimecode:focus {{ background:#2d3136; color:white; border:1px solid #69717c; border-radius:7px; padding:4px 8px; }}
         QFrame#transportGroup QLabel#timeSeparator {{ background:transparent; color:#737b87; border:0; min-width:16px; max-width:16px; padding:5px 0; font-weight:700; }}
@@ -2804,8 +3362,12 @@ class ScenespyApp(QMainWindow):
         QMenuBar {{ background:#2b2d31; color:#d1d5db; border-bottom:1px solid #45484e; padding:2px; }}
         QMenuBar::item {{ padding:5px 9px; border-radius:5px; }}
         QMenuBar::item:selected {{ background:#41454b; color:white; }}
+        QMenuBar QToolButton#githubLink {{ color:#aeb4bd; background:transparent; border:0; border-radius:10px; margin:1px; padding:2px; }}
+        QMenuBar QToolButton#githubLink:hover {{ color:white; background:#41454b; border-radius:10px; }}
+        QMenuBar QToolButton#githubLink:pressed {{ background:#24272b; border-radius:10px; }}
+        QMenuBar QLabel#githubUsername {{ color:#9ca3af; background:transparent; border:0; padding:0; font-weight:400; }}
         QMenu {{ background:#292c30; color:#e5e7eb; border:1px solid #50545b; padding:5px; }}
-        QMenu::item {{ padding:7px 28px 7px 12px; border-radius:5px; }}
+        QMenu::item {{ padding:7px 28px 7px 12px; border-radius:0; }}
         QMenu::item:selected {{ background:#286da9; color:white; }}
         QMenu#mediaContextMenu {{ padding:2px; }}
         QStatusBar {{ background:#2b2d31; color:{TEXT_MUTED}; border-top:1px solid #45484e; }}
@@ -2874,7 +3436,7 @@ class ScenespyApp(QMainWindow):
         menu.addAction(folder_action)
         save_item = CompactMenuItem(
             themed_icon("fa6s.floppy-disk", scale_factor=.85),
-            "Save Project…", menu, hover_color=ACCENT)
+            "Save Project", menu, hover_color=ACCENT)
         save_action = QWidgetAction(menu)
         save_action.setDefaultWidget(save_item)
         menu.addAction(save_action)
@@ -2941,8 +3503,9 @@ class ScenespyApp(QMainWindow):
             self.timeline.set_media(None)
             self.show_cut(None)
             self.seek.setRange(0, 0)
-            self.clock.setText("00:00")
-            self.duration_clock.setText("00:00")
+            zero = self._player_timecode(0, 0)
+            self.clock.setText(zero)
+            self.duration_clock.setText(zero)
             self.media_info.clear()
             self.media_info.hide()
             self._restore_selected_media_progress()
@@ -2980,8 +3543,9 @@ class ScenespyApp(QMainWindow):
         self.timeline.set_media(None)
         self.show_cut(None)
         self.seek.setRange(0, 0)
-        self.clock.setText("00:00")
-        self.duration_clock.setText("00:00")
+        zero = self._player_timecode(0, 0)
+        self.clock.setText(zero)
+        self.duration_clock.setText(zero)
         self.media_info.clear()
         self.media_info.hide()
         self._restore_selected_media_progress()
@@ -3200,7 +3764,7 @@ class ScenespyApp(QMainWindow):
             self._playback_proxy_finished(m, t))
         task.start()
         self.statusBar().showMessage(
-            "Preparing a lightweight playback proxy in the background…", 5000)
+            "Preparing a lightweight playback proxy in the background", 5000)
 
     def _playback_proxy_finished(self, media, task):
         if self._playback_proxy_tasks.get(media.media_id) is task:
@@ -3322,9 +3886,9 @@ class ScenespyApp(QMainWindow):
         self._refresh_action_button()
         self._update_media_info_text()
         timeline_duration = self._timeline_duration()
-        duration_text = transport_timecode(timeline_duration, timeline_duration)
+        duration_text = self._player_timecode(timeline_duration, timeline_duration)
         time_width = max(
-            72, self.clock.fontMetrics().horizontalAdvance(duration_text) + 24)
+            92, self.clock.fontMetrics().horizontalAdvance(duration_text) + 24)
         self.clock.setFixedWidth(time_width)
         self.duration_clock.setFixedWidth(time_width)
         self.media_info.setToolTip(self.current_media.path)
@@ -3341,7 +3905,7 @@ class ScenespyApp(QMainWindow):
         media = self.current_media
         if self._current_media_is_processing():
             value, label = getattr(self.task, "media_progress", {}).get(
-                media.media_id, (0, "Processing..."))
+                media.media_id, (0, "Processing"))
         elif media and media.exported:
             value, label = 1000, "Complete"
         elif media and media.analyzed:
@@ -3490,7 +4054,7 @@ class ScenespyApp(QMainWindow):
         self.timeline.set_position(seconds)
         duration = self._timeline_duration()
         if not self.clock.hasFocus():
-            self.clock.setText(transport_timecode(timeline_seconds, duration))
+            self.clock.setText(self._player_timecode(timeline_seconds, duration))
         self._ensure_frame_decoder()
         self._frame_decoder.request(
             media.media_id, self._playback_source(media), frame, media.fps)
@@ -3572,34 +4136,47 @@ class ScenespyApp(QMainWindow):
         media = media or self.current_media
         if not media:
             return 0.0
-        return sum(end - start for start, end in self._timeline_ranges(media)) / max(
-            media.fps, .001)
+        return sum(
+            max(0.0,
+                media.seconds_for_frame(end) - media.seconds_for_frame(start))
+            for start, end in self._timeline_ranges(media))
+
+    def _player_timecode(self, seconds, duration=None):
+        formatter = player_timecode if self.show_milliseconds else transport_timecode
+        return formatter(seconds, duration)
 
     def _source_to_timeline_seconds(self, seconds, media=None):
         media = media or self.current_media
         if not media:
             return max(0.0, float(seconds))
-        source_frame = max(0.0, min(media.total_frames, float(seconds) * media.fps))
+        source_seconds = max(0.0, min(media.duration, float(seconds)))
         cursor = 0.0
         for start, end in self._timeline_ranges(media):
-            if source_frame < start:
-                return cursor / max(media.fps, .001)
-            if source_frame <= end:
-                return (cursor + source_frame - start) / max(media.fps, .001)
-            cursor += end - start
-        return cursor / max(media.fps, .001)
+            start_seconds = media.seconds_for_frame(start)
+            end_seconds = media.seconds_for_frame(end)
+            if source_seconds < start_seconds:
+                return cursor
+            if source_seconds <= end_seconds:
+                return cursor + source_seconds - start_seconds
+            cursor += max(0.0, end_seconds - start_seconds)
+        return cursor
 
     def _timeline_to_source_seconds(self, seconds, media=None):
         media = media or self.current_media
         if not media:
             return max(0.0, float(seconds))
-        timeline_frame = max(0.0, float(seconds) * media.fps)
+        timeline_seconds = max(0.0, min(
+            self._timeline_duration(media), float(seconds)))
         ranges = self._timeline_ranges(media)
         cursor = 0.0
         for start, end in ranges:
-            length = end - start
-            if timeline_frame <= cursor + length:
-                return media.seconds_for_frame(start + timeline_frame - cursor)
+            start_seconds = media.seconds_for_frame(start)
+            end_seconds = media.seconds_for_frame(end)
+            length = max(0.0, end_seconds - start_seconds)
+            if timeline_seconds < cursor + length - 1e-9:
+                return min(
+                    end_seconds,
+                    start_seconds + timeline_seconds - cursor)
             cursor += length
         return media.seconds_for_frame(ranges[-1][1]) if ranges else 0.0
 
@@ -3612,8 +4189,8 @@ class ScenespyApp(QMainWindow):
         if not self.seek.isSliderDown():
             self.seek.setValue(round(position * 1000))
         if not self.clock.hasFocus():
-            self.clock.setText(transport_timecode(position, duration))
-        self.duration_clock.setText(transport_timecode(duration, duration))
+            self.clock.setText(self._player_timecode(position, duration))
+        self.duration_clock.setText(self._player_timecode(duration, duration))
 
     def _timeline_content_changed(self):
         self._mark_current_unexported()
@@ -3855,8 +4432,9 @@ class ScenespyApp(QMainWindow):
         self.player.setPosition(start_ms)
         QTimer.singleShot(80, self._ensure_segment_preview_started)
         self.statusBar().showMessage(
-            f"Previewing clip · {timecode(start_seconds, self.current_media.duration)} – "
-            f"{timecode(end_seconds, self.current_media.duration)}")
+            f"Previewing clip · "
+            f"{transport_timecode(start_seconds, self.current_media.duration)} – "
+            f"{transport_timecode(end_seconds, self.current_media.duration)}")
 
     def _ensure_segment_preview_started(self):
         if self.preview_end_ms is None or self.preview_start_ms is None or self.preview_armed:
@@ -3932,9 +4510,9 @@ class ScenespyApp(QMainWindow):
             self.seek.setValue(round(timeline_seconds * 1000))
         self.timeline.set_position(source_seconds)
         if not self.clock.hasFocus():
-            self.clock.setText(transport_timecode(
+            self.clock.setText(self._player_timecode(
                 timeline_seconds, timeline_duration))
-        self.duration_clock.setText(transport_timecode(
+        self.duration_clock.setText(self._player_timecode(
             timeline_duration, timeline_duration))
         if (self.preview_armed and self.preview_end_ms is not None and
                 value >= self.preview_end_ms - 10):
@@ -3956,15 +4534,15 @@ class ScenespyApp(QMainWindow):
             if same_source and abs(self.current_media.duration - actual_duration) >= .001:
                 self.current_media.duration = actual_duration
                 self.timeline.rebuild()
-                duration_text = transport_timecode(actual_duration, actual_duration)
+                duration_text = self._player_timecode(actual_duration, actual_duration)
                 self._update_media_info_text()
                 time_width = max(
-                    72, self.clock.fontMetrics().horizontalAdvance(duration_text) + 24)
+                    92, self.clock.fontMetrics().horizontalAdvance(duration_text) + 24)
                 self.clock.setFixedWidth(time_width)
                 self.duration_clock.setFixedWidth(time_width)
         duration = self._timeline_duration() if self.current_media else value / 1000
         self.seek.setRange(0, max(0, round(duration * 1000)))
-        self.duration_clock.setText(transport_timecode(duration, duration))
+        self.duration_clock.setText(self._player_timecode(duration, duration))
 
     def _media_status_changed(self, status):
         visible_statuses = {
@@ -3995,13 +4573,13 @@ class ScenespyApp(QMainWindow):
         self._processing_preview_started_at = time.monotonic()
         self._processing_preview_first_frame_at = None
         self.processing_preview.clear_source()
-        self.processing_preview.setText("Preparing preview…")
+        self.processing_preview.setText("Preparing preview")
         self.processing_preview.setStyleSheet(
             "background:#000000; color:#8b949e; border:0; font-size:12px;")
         if self.task:
             self.task.preview_paused = False
             self.task.media_progress.setdefault(
-                media.media_id, (0, "Processing..."))
+                media.media_id, (0, "Processing"))
         if self._processing_preview_selected():
             self.player.pause()
             self.viewer_stack.setCurrentWidget(self.processing_preview)
@@ -4076,8 +4654,8 @@ class ScenespyApp(QMainWindow):
         if not self.seek.isSliderDown():
             self.seek.setValue(round(timeline_seconds * 1000))
         self.timeline.set_position(seconds)
-        self.clock.setText(transport_timecode(timeline_seconds, timeline_duration))
-        self.duration_clock.setText(transport_timecode(
+        self.clock.setText(self._player_timecode(timeline_seconds, timeline_duration))
+        self.duration_clock.setText(self._player_timecode(
             timeline_duration, timeline_duration))
 
     def _animate_processing_position(self, seconds):
@@ -4128,8 +4706,14 @@ class ScenespyApp(QMainWindow):
             duration = self._timeline_duration()
             position = self._source_to_timeline_seconds(
                 self.player.position() / 1000)
-            self.clock.setText(transport_timecode(position, duration))
+            self.clock.setText(self._player_timecode(position, duration))
             return
+        self.seek_timeline_ms(round(seconds * 1000))
+
+    def _step_from_timecode(self, seconds):
+        duration = self._timeline_duration()
+        seconds = max(0.0, min(duration, float(seconds)))
+        self.clock.setText(self._player_timecode(seconds, duration))
         self.seek_timeline_ms(round(seconds * 1000))
 
     def add_cut(self):
@@ -4206,7 +4790,7 @@ class ScenespyApp(QMainWindow):
 
         save_item = CompactMenuItem(
             themed_icon("fa6s.floppy-disk", scale_factor=.85),
-            "Save Frame…", menu, hover_color=ACCENT)
+            "Save Frame", menu, hover_color=ACCENT)
         save_action = QWidgetAction(menu)
         save_action.setDefaultWidget(save_item)
         menu.addAction(save_action)
@@ -5043,7 +5627,7 @@ class ScenespyApp(QMainWindow):
                         pass
         self.start_task(
             work, lambda result, target=media: self.analysis_finished(target, result),
-            "Analyzing video…", preview_media=media,
+            "Analyzing video", preview_media=media,
             done_label="Video analyzed")
 
     def _process_batch_item(self, task, media, edit_plan, output, mode,
@@ -5343,12 +5927,12 @@ class ScenespyApp(QMainWindow):
                         saved += 1
                         task.metrics.emit(len(available_faces), saved)
                         task.progress.emit(
-                            saved / total_faces, "Exporting faces...")
+                            saved / total_faces, "Exporting faces")
                 finally:
                     if preview_cap is not None:
                         preview_cap.release()
                 if not export_faces:
-                    task.progress.emit(1.0, "Exporting faces...")
+                    task.progress.emit(1.0, "Exporting faces")
                 with open(os.path.join(destination, "faces.json"), "w", encoding="utf-8") as handle:
                     json.dump({"source": media.path,
                                "faces": [vars(event) for event in available_faces],
@@ -5375,7 +5959,7 @@ class ScenespyApp(QMainWindow):
             return engine._cut_output_dir
         self.start_task(
             work, lambda output, target=media: self.export_finished(target, output),
-            "Exporting…", preview_media=media, minimum_preview_ms=800)
+            "Exporting", preview_media=media, minimum_preview_ms=800)
 
     def export_finished(self, media, output):
         media.exported = True
@@ -5384,8 +5968,51 @@ class ScenespyApp(QMainWindow):
         self._refresh_media_item_states()
         self._refresh_action_button()
         self._update_analysis_controls_access()
-        QMessageBox.information(
-            self, "Export complete", f"Files were exported to:\n{output}")
+        confirmation = QMessageBox(self)
+        complete_icon = qta.icon(
+            "fa6s.circle-check", color="#38c982", scale_factor=.92)
+        confirmation.setIconPixmap(complete_icon.pixmap(QSize(38, 38)))
+        confirmation.setWindowTitle("Export complete")
+        confirmation.setText("Files were exported successfully.")
+        output_path = os.path.abspath(output)
+        display_path = output_path.replace("\\", "\\\u200b").replace("/", "/\u200b")
+        confirmation.setInformativeText(display_path)
+        path_label = confirmation.findChild(
+            QLabel, "qt_msgbox_informativelabel")
+        if path_label is not None:
+            path_label.setWordWrap(True)
+            path_label.setMaximumWidth(520)
+            path_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse)
+        confirmation.setStandardButtons(QMessageBox.StandardButton.Ok)
+        ok_button = confirmation.button(QMessageBox.StandardButton.Ok)
+        ok_button.setStyleSheet("""
+            QPushButton {
+                color:white;
+                background:qlineargradient(
+                    x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #38c982, stop:1 #188a51);
+                border:1px solid #52d99a;
+                border-radius:8px;
+            }
+            QPushButton:hover {
+                background:qlineargradient(
+                    x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #4dda95, stop:1 #20a463);
+                border-color:#7be8b5;
+            }
+            QPushButton:pressed {
+                background:#147344;
+                border-color:#38c982;
+            }
+        """)
+        show_button = confirmation.addButton(
+            "Show in Folder", QMessageBox.ButtonRole.ActionRole)
+        confirmation.setDefaultButton(QMessageBox.StandardButton.Ok)
+        confirmation.exec()
+        if confirmation.clickedButton() is show_button:
+            QDesktopServices.openUrl(
+                QUrl.fromLocalFile(output_path))
 
     def start_task(self, work, callback, label, preview_media=None,
                    done_label="Complete", minimum_preview_ms=0):
@@ -5430,14 +6057,44 @@ class ScenespyApp(QMainWindow):
         if not task or not task.isRunning():
             return True
         if confirm:
-            answer = QMessageBox.question(
-                self, "Stop current process",
-                "Stop the current analysis/export? Partial results will be discarded.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            confirmation = QMessageBox(self)
+            stop_icon = qta.icon(
+                "fa6s.circle-xmark", color="#d25a65", scale_factor=.92)
+            confirmation.setIconPixmap(stop_icon.pixmap(QSize(38, 38)))
+            confirmation.setWindowTitle("Stop current process")
+            confirmation.setText(
+                "Stop the current analysis/export?\n"
+                "Partial results will be discarded.")
+            confirmation.setStandardButtons(
+                QMessageBox.StandardButton.Yes |
                 QMessageBox.StandardButton.No)
-            if answer != QMessageBox.StandardButton.Yes:
+            confirmation.setDefaultButton(QMessageBox.StandardButton.No)
+            yes_button = confirmation.button(QMessageBox.StandardButton.Yes)
+            yes_button.setObjectName("danger")
+            yes_button.setStyleSheet("""
+                QPushButton {
+                    color:white;
+                    background:qlineargradient(
+                        x1:0,y1:0,x2:0,y2:1,
+                        stop:0 #b84b55, stop:1 #7f2932);
+                    border:1px solid #d26a73;
+                    border-radius:8px;
+                }
+                QPushButton:hover {
+                    background:qlineargradient(
+                        x1:0,y1:0,x2:0,y2:1,
+                        stop:0 #d25a65, stop:1 #97343e);
+                    border-color:#ef8991;
+                }
+                QPushButton:pressed {
+                    background:#7f2932;
+                    border-color:#d26a73;
+                }
+            """)
+            confirmation.exec()
+            if confirmation.clickedButton() is not yes_button:
                 return False
-        self.progress_label.setText("Stopping…")
+        self.progress_label.setText("Stopping")
         self._refresh_progress_state_icon()
         self.action_button.setEnabled(False)
         task.cancel()
@@ -5557,7 +6214,7 @@ class ScenespyApp(QMainWindow):
         media = self.processing_media
         if media and self.task:
             previous_value, previous_label = self.task.media_progress.get(
-                media.media_id, (0, "Processing..."))
+                media.media_id, (0, "Processing"))
             stored_value = (round(value * 1000) if value >= 0 else
                             previous_value)
             self.task.media_progress[media.media_id] = (
@@ -5762,7 +6419,7 @@ class ScenespyApp(QMainWindow):
             self.task.live_segments.setdefault(
                 media.media_id, (None, None, False))
         if self.task:
-            self.task.media_progress[media.media_id] = (0, "Processing...")
+            self.task.media_progress[media.media_id] = (0, "Processing")
         try:
             self._queue_completed = self._queue_media_ids.index(media.media_id) + 1
         except ValueError:
@@ -6050,6 +6707,7 @@ class ScenespyApp(QMainWindow):
         self._release_frame_decoder()
         self.player.stop()
         terminate_all_child_processes(grace_seconds=.2)
+        self._save_workspace_splitter()
         event.accept()
 
 

@@ -283,7 +283,7 @@ class SceneEngine:
     def _analysis_eta_text(self, ratio=None):
         step = getattr(self, "_analysis_status_step", 0)
         self._analysis_status_step = step + 1
-        return "..."
+        return ""
 
     def _write_analysis_status(self, label, progress=None):
         if progress is not None:
@@ -444,7 +444,7 @@ class SceneEngine:
         fps = self._get_video_fps()
 
         if self.progress:
-            self.progress.after(0, lambda: self.progress.set_status("Analyzing video..."))
+            self.progress.after(0, lambda: self.progress.set_status("Analyzing video"))
         if self.log:
             self.log.after(0, lambda: self.log.write_status(
                 detected=self.detected, cut=0, eta=self._analysis_eta_text()))
@@ -616,9 +616,9 @@ class SceneEngine:
                 fixed = self.video.rsplit(".", 1)[0] + "_fixed.mp4"
                 remove_temp_file(fixed)
                 self.add_temp_file(fixed)
-                print(f"Video has corrupted frames - re-encoding with ffmpeg...")
+                print("Video has corrupted frames - re-encoding with ffmpeg")
                 if self.progress:
-                    self.progress.after(0, lambda: self.progress.set_status("Fixing corrupted video..."))
+                    self.progress.after(0, lambda: self.progress.set_status("Fixing corrupted video"))
                 if self.log:
                     self.log.after(0, lambda: self.log.write_status(
                         detected=self.detected, cut=0, eta="--:--"))
@@ -638,7 +638,7 @@ class SceneEngine:
                 if os.path.exists(fixed):
                     print(f"Using fixed video: {fixed}")
                     if not is_valid_video_file(fixed, stop_cb=lambda: self._stop):
-                        print(f"Fixed file is corrupted, re-encoding again...")
+                        print("Fixed file is corrupted, re-encoding again")
                         remove_temp_file(fixed)
                         self._run_ffmpeg_tracked(
                             ["ffmpeg", "-y", "-err_detect", "ignore_err",
@@ -682,7 +682,7 @@ class SceneEngine:
                                 self.log.after(0, lambda: self.log.write_status(
                                     detected=self.detected, cut=0, eta="--:--"))
                             return []
-                    print(f"Video opened successfully, starting detection...")
+                    print("Video opened successfully, starting detection")
                     scene_manager = SceneManager(StatsManager())
                     scene_manager.auto_downscale = False
                     scene_manager.downscale = 2
@@ -1096,7 +1096,7 @@ class SceneEngine:
         self._cut_lock = threading.Lock()
         self._last_cut_ui_update = 0.0
         if self.progress:
-            label = "Cutting scenes..." if self.scene_mode else "Cutting segments..."
+            label = "Cutting scenes" if self.scene_mode else "Cutting segments"
             self.progress.after(0, self.progress.reset)
             self.progress.after(0, lambda text=label: self.progress.set_status(text))
 

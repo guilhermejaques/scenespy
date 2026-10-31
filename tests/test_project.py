@@ -2,28 +2,47 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PySide6.QtCore import Qt
+
 from scenespy.project import CutEvent, FaceEvent, MediaItem, ScenespyProject
-from scenespy.qt_app import (final_face_crop_box, parse_timecode, scrub_timecode,
-                             timecode, transport_timecode)
+from scenespy.qt_app import (final_face_crop_box, parse_timecode, player_timecode,
+                             primary_modifier, scrub_timecode, timecode,
+                             transport_timecode)
 
 
 class ProjectModelTests(unittest.TestCase):
+    def test_primary_modifier_matches_operating_system_conventions(self):
+        self.assertEqual(
+            primary_modifier("darwin"), Qt.KeyboardModifier.MetaModifier)
+        self.assertEqual(
+            primary_modifier("win32"), Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(
+            primary_modifier("linux"), Qt.KeyboardModifier.ControlModifier)
+
     def test_editor_timecodes_are_parseable(self):
         self.assertEqual(parse_timecode("01:02:03.500"), 3723.5)
         self.assertEqual(parse_timecode("02:10"), 130.0)
         self.assertIsNone(parse_timecode("not-a-time"))
         self.assertEqual(transport_timecode(3723.987), "01:02:03")
 
+    def test_player_timecode_preserves_millisecond_position(self):
+        displayed = player_timecode(65.9874, 120)
+        self.assertEqual(displayed, "01:05.987")
+        self.assertAlmostEqual(parse_timecode(displayed), 65.987, places=3)
+        self.assertEqual(player_timecode(3723.004, 4000), "01:02:03.004")
+        self.assertAlmostEqual(parse_timecode("01:05,250"), 65.25, places=3)
+
     def test_editor_timecodes_hide_unused_hours_consistently(self):
         self.assertEqual(transport_timecode(65, 3599), "01:05")
+        self.assertEqual(transport_timecode(59.9999, 120), "00:59")
         self.assertEqual(timecode(65.25, 3599), "01:05.250")
         self.assertEqual(transport_timecode(65, 3600), "00:01:05")
         self.assertEqual(timecode(3599.999, 3599.999), "59:59.999")
         self.assertEqual(timecode(3599.9996, 3599.9996), "01:00:00.000")
 
     def test_scrub_timecodes_cover_very_short_and_long_media(self):
-        self.assertEqual(scrub_timecode(.125, .8), "00:00.125")
-        self.assertEqual(scrub_timecode(5, 30), "00:05.000")
+        self.assertEqual(scrub_timecode(.125, .8), "00:00")
+        self.assertEqual(scrub_timecode(5, 30), "00:05")
         self.assertEqual(scrub_timecode(3661, 360_000), "01:01:01")
         self.assertEqual(scrub_timecode(360_000, 360_000), "100:00:00")
 
