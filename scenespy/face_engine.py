@@ -2,6 +2,16 @@ from .shared import *
 from . import shared as shared
 
 
+def draw_face_marker(frame, box, color=(0, 255, 0)):
+    """Draw a cheap high-contrast face marker: black keyline + color."""
+    if frame is None or len(box or ()) != 4:
+        return
+    x1, y1, x2, y2 = (int(value) for value in box)
+    cv2.rectangle(frame, (x1 + 1, y1 + 1), (x2 + 1, y2 + 1),
+                  (0, 0, 0), 2)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+
 class FaceDetectionEngine:
     """Detects and saves representative face crops from a video. Pipeline Face Detection!"""
     def __init__(self, video, output, logbox=None, progressbar=None,
@@ -528,7 +538,7 @@ class FaceDetectionEngine:
                             draw = frame.copy()
                             for t in tracks:
                                 x1, y1, x2, y2 = t["box"]
-                                cv2.rectangle(draw, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                                draw_face_marker(draw, (x1, y1, x2, y2))
                             img = resize_for_preview(
                                 Image.fromarray(cv2.cvtColor(draw, cv2.COLOR_BGR2RGB)))
                             if img and self._ui_alive:
@@ -657,7 +667,7 @@ class FaceDetectionEngine:
                         draw = frame.copy()
                         for t in tracks:
                             x1, y1, x2, y2 = t["box"]
-                            cv2.rectangle(draw, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                            draw_face_marker(draw, (x1, y1, x2, y2))
                         img = resize_for_preview(
                             Image.fromarray(cv2.cvtColor(draw, cv2.COLOR_BGR2RGB)))
                         if img and self._ui_alive:

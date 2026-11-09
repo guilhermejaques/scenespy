@@ -2,8 +2,10 @@ import unittest
 from types import SimpleNamespace
 
 from scenespy.frame_map import FrameMap
-from scenespy.project import CutEvent, MediaItem
-from scenespy.qt_app import ScenespyApp, face_event_source_frame
+from scenespy.project import CutEvent, FaceEvent, MediaItem
+from scenespy.qt_app import (ScenespyApp, TimelineView, clip_preview_candidates,
+                             clip_preview_frame,
+                             face_event_source_frame)
 
 
 class TimelineMappingTests(unittest.TestCase):
@@ -53,16 +55,167 @@ class TimelineMappingTests(unittest.TestCase):
             host, timeline_seconds)
         self.assertAlmostEqual(restored, source_seconds, places=9)
 
+    def test_event_navigation_uses_visible_clip_starts_and_exact_face_frames(self):
+        media = MediaItem(
+            "video.mp4", duration=10.0, fps=30.0, total_frames=300,
+            mode="scene", cuts=[CutEvent(100), CutEvent(200)],
+            removed_segments=[2])
+        host = self._timeline_host(media)
+        host.timeline = SimpleNamespace(
+            show_saved_faces=True, show_detected_faces=True)
+        self.assertEqual(
+            ScenespyApp._navigation_event_frames(host), [200])
+
+        media.mode = "faces"
+        media.removed_segments = []
+        media.faces = [
+            FaceEvent(140, 160, 151, enabled=True),
+            FaceEvent(240, 260, 251, enabled=False),
+        ]
+        host.timeline.show_detected_faces = False
+        self.assertEqual(
+            ScenespyApp._navigation_event_frames(host), [100, 150, 200])
+        host.timeline.show_detected_faces = True
+        self.assertEqual(
+            ScenespyApp._navigation_event_frames(host), [100, 150, 200, 250])
+
+    def test_next_event_does_not_skip_an_adjacent_frame(self):
+        media = MediaItem(
+            "video.mp4", duration=10.0, fps=30.0, total_frames=300)
+        sought = []
+        host = SimpleNamespace(
+            current_media=media,
+            player=SimpleNamespace(
+                position=lambda: round(media.seconds_for_frame(99) * 1000)),
+            _navigation_event_frames=lambda: [100, 101],
+            seek_player_ms=sought.append,
+        )
+
+        ScenespyApp.jump_event(host, 1)
+
+        self.assertEqual(
+            sought, [round(media.seconds_for_frame(100) * 1000)])
+
+    def test_playback_face_boxes_use_short_cached_candidate_windows(self):
+        face = FaceEvent(
+            90, 110, 101, box=[10, 20, 50, 70],
+            review_frames=[{
+                "frame": 101, "box": [10, 20, 50, 70],
+                "crop_box": [5, 10, 55, 80],
+            }])
+        media = MediaItem(
+            "video.mp4", duration=10.0, fps=30.0, total_frames=300,
+            mode="faces", faces=[face])
+        host = SimpleNamespace(
+            current_media=media,
+            timeline=SimpleNamespace(
+                show_saved_faces=True, show_detected_faces=True))
+
+        index = ScenespyApp._build_playback_face_index(host)
+
+        self.assertEqual(index[100][1], 100)
+        self.assertEqual(index[100][2], [10, 20, 50, 70])
+        self.assertIn(97, index)
+        self.assertIn(103, index)
+        self.assertNotIn(96, index)
+        self.assertNotIn(104, index)
+
     def test_interval_preview_boundaries_match_frame_rounding(self):
         self.assertEqual(
             ScenespyApp._interval_analysis_boundaries(301, 30.0, 3),
             [90, 180, 270])
+
+    def test_clip_selection_requires_at_least_one_cut(self):
+        media = MediaItem(
+            "video.mp4", duration=10.0, fps=30.0, total_frames=300)
+        host = SimpleNamespace(media=media)
+        self.assertFalse(TimelineView.clip_selection_available(host))
+        media.cuts.append(CutEvent(150))
+        self.assertTrue(TimelineView.clip_selection_available(host))
+
+    def test_cut_uses_the_exact_displayed_source_frame_and_reindexes_segments(self):
+        media = MediaItem(
+            "video.mp4", duration=10.2, fps=29.97, total_frames=300,
+            cuts=[CutEvent(100), CutEvent(200)],
+            excluded_segments=[2], removed_segments=[3])
+        timeline = SimpleNamespace(rebuild=lambda: None)
+        host = SimpleNamespace(
+            current_media=media,
+            selected_segment=None,
+            timeline=timeline,
+            _current_media_is_processing=lambda: False,
+            _mark_current_unexported=lambda: None,
+            _refresh_media_metrics=lambda: None,
+            _refresh_action_button=lambda: None,
+            _refresh_cut_action_state=lambda: None,
+        )
+        host._can_add_cut_at = lambda seconds: ScenespyApp._can_add_cut_at(
+            host, seconds)
+
+        displayed_seconds = media.seconds_for_frame(150)
+        self.assertFalse(host._can_add_cut_at(media.seconds_for_frame(100)))
+        self.assertTrue(host._can_add_cut_at(displayed_seconds))
+        ScenespyApp.add_cut_at(host, displayed_seconds)
+        self.assertFalse(host._can_add_cut_at(displayed_seconds))
+
+        self.assertEqual([cut.frame for cut in media.cuts], [100, 150, 200])
+        self.assertEqual(media.excluded_segments, [2, 3])
+        self.assertEqual(media.removed_segments, [4])
+        self.assertAlmostEqual(
+            media.seconds_for_frame(media.frame_for_seconds(displayed_seconds)),
+            displayed_seconds, places=9)
+
+    def test_segment_frame_buttons_use_exact_first_and_last_frames(self):
+        media = MediaItem(
+            "video.mp4", duration=10.2, fps=29.97, total_frames=300)
+        shown = []
+        host = SimpleNamespace(
+            current_media=media,
+            selected_segment=(1, media.seconds_for_frame(100),
+                              media.seconds_for_frame(200)),
+            _show_segment_still=shown.append,
+        )
+
+        ScenespyApp.step_face_frame(host, -1)
+        ScenespyApp.step_face_frame(host, 1)
+
+        self.assertEqual(shown, [100, 199])
+
+    def test_selection_preview_reuses_timeline_thumbnail_source_frame(self):
+        media = MediaItem(
+            "video.mp4", duration=10.2, fps=29.97, total_frames=300)
+        requested = []
+        shown = []
+        timeline = SimpleNamespace(
+            clip_thumbnail_source_frame=lambda start, end: (
+                requested.append((start, end)) or 102))
+        preview = SimpleNamespace(
+            clear_source=lambda: None, hide=lambda: None)
+        host = SimpleNamespace(
+            current_media=media, timeline=timeline,
+            selection_preview=preview, _show_segment_still=shown.append)
+
+        ScenespyApp._show_segment_thumbnail(
+            host, media.seconds_for_frame(100), media.seconds_for_frame(200))
+
+        self.assertEqual(requested, [(100, 200)])
+        self.assertEqual(shown, [102])
 
     def test_face_indicator_uses_zero_based_media_frame(self):
         event = SimpleNamespace(best_frame=1)
         self.assertEqual(face_event_source_frame(event), 0)
         event.best_frame = 105
         self.assertEqual(face_event_source_frame(event), 104)
+
+    def test_clip_indicator_uses_the_same_first_frame_as_selection(self):
+        self.assertEqual(clip_preview_frame(0, 90), 0)
+        self.assertEqual(clip_preview_frame(150, 275), 150)
+        self.assertEqual(list(clip_preview_candidates(150, 154)),
+                         [150, 151, 152, 153])
+        candidates = list(clip_preview_candidates(150, 500))
+        self.assertEqual(candidates[0], 150)
+        self.assertEqual(candidates[-1], 179)
+        self.assertNotIn(500, candidates)
 
     def test_rejected_face_candidate_is_mapped_as_disabled(self):
         engine = SimpleNamespace(
