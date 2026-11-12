@@ -1103,8 +1103,8 @@ class SceneEngine:
         keyframes = self._get_keyframes() or [0.0]
         tasks = []
         for i, (start_frame, end_frame) in enumerate(scenes):
-            start_time = start_frame / fps
-            end_time = end_frame / fps
+            start_time = self._time_for_frame(start_frame, fps)
+            end_time = self._time_for_frame(end_frame, fps)
             output_file = os.path.join(outdir, f"scene_{i:03d}.mp4")
             aligned_start = self._nearest_keyframe_before(start_time, keyframes)
             aligned_end = self._nearest_keyframe_after(end_time, keyframes)
@@ -1484,8 +1484,8 @@ class SceneEngine:
         encoder = self.cfg.get("ENCODER", "cpu")
         bitrate = self._get_video_bitrate()
         fps = self._get_video_fps()
-        start_time = start_frame / fps
-        end_time = end_frame / fps
+        start_time = self._time_for_frame(start_frame, fps)
+        end_time = self._time_for_frame(end_frame, fps)
         local_start_frame = max(0, int(round((start_time - aligned_start) * fps)))
         local_end_frame = max(local_start_frame + 1, int(round((end_time - aligned_start) * fps)))
         local_audio_start = max(0.0, start_time - aligned_start)
@@ -1510,7 +1510,11 @@ class SceneEngine:
         if bitrate and encoder == "cpu":
             rate_opts = ["-maxrate", str(bitrate), "-bufsize", str(bitrate * 2)]
 
-        vf = f"trim=start_frame={local_start_frame}:end_frame={local_end_frame},setpts=PTS-STARTPTS"
+        if self.cfg.get("FRAME_TIMES"):
+            vf = (f"trim=start={local_audio_start:.9f}:"
+                  f"end={local_audio_end:.9f},setpts=PTS-STARTPTS")
+        else:
+            vf = f"trim=start_frame={local_start_frame}:end_frame={local_end_frame},setpts=PTS-STARTPTS"
         if self._has_audio_stream():
             filter_complex = (
                 f"[0:v]{vf}[v];"
@@ -1558,6 +1562,15 @@ class SceneEngine:
     def _nearest_keyframe_before(self, t, keyframes):
         idx = bisect.bisect_right(keyframes, t)
         return keyframes[idx - 1] if idx > 0 else 0.0
+
+    def _time_for_frame(self, frame, fps=None):
+        times = self.cfg.get("FRAME_TIMES") or ()
+        frame = max(0, int(frame))
+        if times:
+            if frame >= len(times):
+                return self._get_video_duration()
+            return max(0.0, float(times[frame]))
+        return frame / max(float(fps or self._get_video_fps()), 0.001)
 
     def _nearest_keyframe_after(self, t, keyframes):
         if not keyframes:

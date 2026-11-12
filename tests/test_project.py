@@ -68,6 +68,31 @@ class ProjectModelTests(unittest.TestCase):
         self.assertEqual(media.frame_for_seconds(999), 300)
         self.assertEqual(media.seconds_for_frame(300), 10.2)
 
+    def test_variable_frame_rate_uses_real_frame_timestamps(self):
+        times = [0.0, 0.033, 0.071, 0.100, 0.151]
+        media = MediaItem(
+            "phone.mp4", .2, 25.0, len(times),
+            variable_frame_rate=True, frame_times=times)
+
+        self.assertEqual(media.seconds_for_frame(2), .071)
+        self.assertEqual(media.frame_for_seconds(.068), 2)
+        self.assertEqual(media.frame_for_seconds(.123), 3)
+        self.assertEqual(media.seconds_for_frame(len(times)), .2)
+
+    def test_project_round_trip_preserves_variable_frame_timing(self):
+        media = MediaItem(
+            "phone.mp4", .16, 30.0, 4,
+            variable_frame_rate=True,
+            frame_times=[0.0, .031, .070, .109])
+        with tempfile.TemporaryDirectory() as folder:
+            path = ScenespyProject(media=[media]).save(
+                Path(folder, "vfr.scenespy"))
+            loaded = ScenespyProject.load(path).media[0]
+
+        self.assertTrue(loaded.variable_frame_rate)
+        self.assertEqual(loaded.frame_times, media.frame_times)
+        self.assertEqual(loaded.frame_for_seconds(.071), 2)
+
     def test_project_round_trip_preserves_editor_events(self):
         project = ScenespyProject(media=[MediaItem(
             "video.mp4", 5, 24, 120,

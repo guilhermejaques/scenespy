@@ -9,6 +9,44 @@ from scenespy.qt_app import (ScenespyApp, TimelineView, clip_preview_candidates,
 
 
 class TimelineMappingTests(unittest.TestCase):
+    def test_stopping_clip_preview_clears_activity_state_and_status(self):
+        class Status:
+            def __init__(self):
+                self.message = "Previewing clip · 00:01.000 / 00:03.000 · 50%"
+                self.timeout = None
+
+            def currentMessage(self):
+                return self.message
+
+            def showMessage(self, message, timeout=0):
+                self.message, self.timeout = message, timeout
+
+            def clearMessage(self):
+                self.message = ""
+
+        status = Status()
+        cleared = []
+        host = SimpleNamespace(
+            preview_end_ms=3000,
+            preview_start_ms=1000,
+            preview_armed=True,
+            _segment_preview_status_active=True,
+            _segment_preview_last_status_ms=2000,
+            timeline=SimpleNamespace(
+                clear_clip_duration=lambda: cleared.append(True)),
+            statusBar=lambda: status,
+        )
+
+        ScenespyApp._stop_segment_preview(host, "Clip preview stopped")
+
+        self.assertIsNone(host.preview_end_ms)
+        self.assertIsNone(host.preview_start_ms)
+        self.assertFalse(host.preview_armed)
+        self.assertFalse(host._segment_preview_status_active)
+        self.assertEqual(status.message, "Clip preview stopped")
+        self.assertEqual(status.timeout, 3000)
+        self.assertEqual(cleared, [True])
+
     @staticmethod
     def _timeline_host(media):
         host = SimpleNamespace(current_media=media)
@@ -138,7 +176,8 @@ class TimelineMappingTests(unittest.TestCase):
             "video.mp4", duration=10.2, fps=29.97, total_frames=300,
             cuts=[CutEvent(100), CutEvent(200)],
             excluded_segments=[2], removed_segments=[3])
-        timeline = SimpleNamespace(rebuild=lambda: None)
+        timeline = SimpleNamespace(
+            rebuild=lambda: None, set_position=lambda _seconds: None)
         host = SimpleNamespace(
             current_media=media,
             selected_segment=None,
@@ -164,6 +203,41 @@ class TimelineMappingTests(unittest.TestCase):
         self.assertAlmostEqual(
             media.seconds_for_frame(media.frame_for_seconds(displayed_seconds)),
             displayed_seconds, places=9)
+
+    def test_cut_uses_playhead_frame_while_player_seek_is_still_behind(self):
+        media = MediaItem(
+            "video.mp4", duration=10.0, fps=30.0, total_frames=300)
+        playhead = SimpleNamespace(x=lambda: 1500.0)
+        rebuilt_at = []
+        positioned_at = []
+        timeline = SimpleNamespace(
+            playhead=playhead,
+            frame_for_x=lambda _x: 150,
+            current_seconds=149.6 / 30.0,
+            rebuild=lambda: rebuilt_at.append(timeline.current_seconds),
+            set_position=positioned_at.append,
+        )
+        host = SimpleNamespace(
+            current_media=media,
+            selected_segment=None,
+            timeline=timeline,
+            player=SimpleNamespace(position=lambda: 4967),
+            _current_media_is_processing=lambda: False,
+            _mark_current_unexported=lambda: None,
+            _refresh_media_metrics=lambda: None,
+            _refresh_action_button=lambda: None,
+            _refresh_cut_action_state=lambda: None,
+        )
+        host._playhead_cut_frame = lambda: ScenespyApp._playhead_cut_frame(host)
+        host._can_add_cut_frame = lambda frame: ScenespyApp._can_add_cut_frame(
+            host, frame)
+        host._add_cut_frame = lambda frame: ScenespyApp._add_cut_frame(host, frame)
+
+        ScenespyApp.add_cut(host)
+
+        self.assertEqual([cut.frame for cut in media.cuts], [150])
+        self.assertEqual(rebuilt_at, [media.seconds_for_frame(150)])
+        self.assertEqual(positioned_at, [media.seconds_for_frame(150)])
 
     def test_segment_frame_buttons_use_exact_first_and_last_frames(self):
         media = MediaItem(

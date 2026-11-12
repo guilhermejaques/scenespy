@@ -4,6 +4,14 @@ from scenespy.scene_engine import SceneEngine
 
 
 class ScenePreviewTests(unittest.TestCase):
+    def test_export_frame_time_prefers_vfr_timestamp_map(self):
+        engine = SceneEngine.__new__(SceneEngine)
+        engine.cfg = {"FRAME_TIMES": [0.0, .031, .071, .106]}
+        engine._get_video_duration = lambda: .15
+
+        self.assertEqual(engine._time_for_frame(2, 30.0), .071)
+        self.assertEqual(engine._time_for_frame(4, 30.0), .15)
+
     def test_scene_preview_ratio_matches_the_displayed_analysis_progress(self):
         engine = SceneEngine("video.mp4", "output", {})
 

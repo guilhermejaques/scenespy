@@ -1158,6 +1158,7 @@ class PlayheadItem(QGraphicsItem):
         self._last_scrub_emit = 0.0
         self.setZValue(40)
         self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self.setAcceptHoverEvents(True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
 
@@ -1188,6 +1189,24 @@ class PlayheadItem(QGraphicsItem):
         painter.setPen(QPen(QColor("#bfdbfe"), 1))
         painter.setBrush(color)
         painter.drawPolygon(QPolygonF([QPointF(-8, 0), QPointF(8, 0), QPointF(0, 13)]))
+
+    def _update_hover_cursor(self, position):
+        cursor = (Qt.CursorShape.ArrowCursor
+                  if position.y() <= 13
+                  else Qt.CursorShape.SizeHorCursor)
+        self.setCursor(cursor)
+
+    def hoverEnterEvent(self, event):
+        self._update_hover_cursor(event.pos())
+        super().hoverEnterEvent(event)
+
+    def hoverMoveEvent(self, event):
+        self._update_hover_cursor(event.pos())
+        super().hoverMoveEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        self.setCursor(Qt.CursorShape.SizeHorCursor)
+        super().hoverLeaveEvent(event)
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene():
@@ -2705,6 +2724,8 @@ class ScenespyApp(QMainWindow):
         self.preview_end_ms = None
         self.preview_start_ms = None
         self.preview_armed = False
+        self._segment_preview_status_active = False
+        self._segment_preview_last_status_ms = None
         self._pending_interactive_seek_ms = None
         self._interactive_seek_inflight_ms = None
         self._frame_step_target = None
@@ -2887,7 +2908,7 @@ class ScenespyApp(QMainWindow):
         layout.addLayout(media_header)
         self.media_list = QListWidget()
         self.media_list.setObjectName("mediaList")
-        self.media_list.setIconSize(QSize(13, 13))
+        self.media_list.setIconSize(QSize(18, 18))
         self.media_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.media_list.customContextMenuRequested.connect(self._show_media_context_menu)
         self.media_list.currentRowChanged.connect(self._select_media)
@@ -3269,18 +3290,26 @@ class ScenespyApp(QMainWindow):
             face_metrics_layout.addLayout(row)
         self.face_metrics.hide()
         self.progress_label = QLabel("Ready", objectName="muted")
+        self.progress_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.progress_percent = QLabel("", objectName="muted")
         self.progress_percent.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.progress_percent.hide()
         self.progress_state_icon = QLabel()
-        self.progress_state_icon.setFixedSize(13, 13)
+        # Keep transparent breathing room around circular glyphs. A pixmap
+        # touching an equally-sized QLabel loses its antialiased top edge on
+        # some Qt/Windows scale factors.
+        self.progress_state_icon.setFixedSize(19, 19)
+        self.progress_state_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.progress_state_icon.hide()
         progress_status_row = QHBoxLayout()
         progress_status_row.setContentsMargins(0, 0, 0, 0)
         progress_status_row.setSpacing(5)
-        progress_status_row.addWidget(self.progress_state_icon)
-        progress_status_row.addWidget(self.progress_label, 1)
+        progress_status_row.addWidget(
+            self.progress_state_icon, 0, Qt.AlignmentFlag.AlignVCenter)
+        progress_status_row.addWidget(
+            self.progress_label, 1, Qt.AlignmentFlag.AlignVCenter)
         progress_status_row.addWidget(self.progress_percent)
         self.action_button = QPushButton("Start", objectName="primary")
         self.action_button.clicked.connect(self.toggle_primary_action)
@@ -4154,9 +4183,7 @@ class ScenespyApp(QMainWindow):
         acceleration_index = self.accel.findData(acceleration)
         if acceleration_index >= 0:
             self.accel.setCurrentIndex(acceleration_index)
-        self.preview_end_ms = None
-        self.preview_start_ms = None
-        self.preview_armed = False
+        self._stop_segment_preview()
         self.timeline.show_detected_faces = self.current_media.show_detected_faces
         self.timeline.show_saved_faces = self.current_media.show_saved_faces
         for button, checked in (
@@ -4289,6 +4316,9 @@ class ScenespyApp(QMainWindow):
         if not playing:
             self._face_overlay_timer.stop()
             self._poll_playback_face_overlay()
+            if (self._segment_preview_status_active and
+                    self.preview_armed and self.preview_end_ms is not None):
+                self._stop_segment_preview("Clip preview stopped")
         self.play_button.setIcon(self._pause_icon if playing else self._play_icon)
 
     def _poll_playback_face_overlay(self):
@@ -4352,9 +4382,7 @@ class ScenespyApp(QMainWindow):
         self._pending_interactive_seek_ms = None
         self._interactive_seek_inflight_ms = None
         self._reset_frame_step_target()
-        self.preview_end_ms = None
-        self.preview_start_ms = None
-        self.preview_armed = False
+        self._stop_segment_preview()
         if self.current_media:
             self._request_edit_preview(self.player.position() / 1000)
 
@@ -4642,10 +4670,7 @@ class ScenespyApp(QMainWindow):
         self._pending_interactive_seek_ms = None
         self._interactive_seek_inflight_ms = None
         self._reset_frame_step_target()
-        self.preview_end_ms = None
-        self.preview_start_ms = None
-        self.preview_armed = False
-        self.timeline.clear_clip_duration()
+        self._stop_segment_preview()
 
     def seek_timeline_ms(self, value):
         duration = self._timeline_duration()
@@ -4662,10 +4687,7 @@ class ScenespyApp(QMainWindow):
             self._interactive_seek_inflight_ms = None
         if self.viewer_stack.currentWidget() is self.face_review_preview:
             self.show_cut(None)
-        self.timeline.clear_clip_duration()
-        self.preview_end_ms = None
-        self.preview_start_ms = None
-        self.preview_armed = False
+        self._stop_segment_preview()
         self.player.setPosition(max(0, min(self.player.duration(), int(value))))
 
     def _set_selection_available(self, available):
@@ -4877,12 +4899,55 @@ class ScenespyApp(QMainWindow):
         self.preview_start_ms = start_ms
         self.preview_end_ms = end_ms
         self.preview_armed = False
+        self._segment_preview_status_active = True
+        self._segment_preview_last_status_ms = None
         self.player.setPosition(start_ms)
         QTimer.singleShot(80, self._ensure_segment_preview_started)
         self.statusBar().showMessage(
             f"Previewing clip · "
-            f"{self._player_timecode(start_seconds, self.current_media.duration)} – "
-            f"{self._player_timecode(end_seconds, self.current_media.duration)}")
+            f"{self._player_timecode(start_seconds, self.current_media.duration)} / "
+            f"{self._player_timecode(end_seconds, self.current_media.duration)} · 0%")
+
+    def _update_segment_preview_status(self, position_ms, force=False):
+        if (not self._segment_preview_status_active or
+                self.preview_start_ms is None or self.preview_end_ms is None or
+                not self.current_media):
+            return
+        position_ms = max(self.preview_start_ms,
+                          min(int(position_ms), self.preview_end_ms))
+        if (not force and self._segment_preview_last_status_ms is not None and
+                abs(position_ms - self._segment_preview_last_status_ms) < 100):
+            return
+        current = self.statusBar().currentMessage()
+        if current and not current.startswith("Previewing clip"):
+            self._segment_preview_status_active = False
+            return
+        self._segment_preview_last_status_ms = position_ms
+        elapsed = max(0, position_ms - self.preview_start_ms)
+        total = max(1, self.preview_end_ms - self.preview_start_ms)
+        percent = min(100, round(elapsed / total * 100))
+        self.statusBar().showMessage(
+            "Previewing clip · "
+            f"{self._player_timecode(position_ms / 1000, self.current_media.duration)} "
+            f"/ {self._player_timecode(self.preview_end_ms / 1000, self.current_media.duration)} "
+            f"· {percent}%")
+
+    def _stop_segment_preview(self, message=None):
+        owned_status = (self._segment_preview_status_active or
+                        self.statusBar().currentMessage().startswith(
+                            "Previewing clip"))
+        self.preview_end_ms = None
+        self.preview_start_ms = None
+        self.preview_armed = False
+        self._segment_preview_status_active = False
+        self._segment_preview_last_status_ms = None
+        self.timeline.clear_clip_duration()
+        if not owned_status:
+            return
+        if message:
+            self.statusBar().showMessage(message, 3000)
+        else:
+            self.statusBar().clearMessage()
 
     def _ensure_segment_preview_started(self):
         if self.preview_end_ms is None or self.preview_start_ms is None or self.preview_armed:
@@ -4922,6 +4987,7 @@ class ScenespyApp(QMainWindow):
         return sorted(set(frames))
 
     def _position_changed(self, value):
+        exact_edit_seconds = None
         if self._interactive_seek_inflight_ms is not None:
             fps = self.current_media.fps if self.current_media else 30.0
             tolerance = max(20, round(1000 / max(.001, fps)))
@@ -4938,12 +5004,20 @@ class ScenespyApp(QMainWindow):
             tolerance = max(
                 20, round(1000 / max(.001, self.current_media.fps)))
             if abs(int(value) - target_ms) <= tolerance:
+                # QMediaPlayer reports integer milliseconds, while project
+                # edits use exact frame timestamps (especially important for
+                # fractional rates such as 29.97).  Keep this confirmation on
+                # the requested frame instead of moving the timeline back to
+                # the backend's rounded millisecond.
+                exact_edit_seconds = self.current_media.seconds_for_frame(
+                    self._edit_preview_frame)
                 play_after_sync = self._play_after_edit_sync
                 self._play_after_edit_sync = False
                 self._end_edit_preview()
                 if play_after_sync:
                     QTimer.singleShot(0, self.player.play)
-        source_seconds = value / 1000
+        source_seconds = (exact_edit_seconds if exact_edit_seconds is not None
+                          else value / 1000)
         if self.current_media and self.current_media.removed_segments:
             ranges = self._timeline_ranges()
             source_frame = self.current_media.frame_for_seconds(source_seconds)
@@ -4983,13 +5057,11 @@ class ScenespyApp(QMainWindow):
         if (self.preview_armed and self.preview_end_ms is not None and
                 value >= self.preview_end_ms - 10):
             end = self.preview_end_ms
-            self.preview_end_ms = None
-            self.preview_start_ms = None
-            self.preview_armed = False
+            self._stop_segment_preview("Clip preview complete")
             self.player.pause()
             self.player.setPosition(end)
-            self.timeline.clear_clip_duration()
-            self.statusBar().showMessage("Clip preview complete", 3000)
+        elif self.preview_armed and self.preview_end_ms is not None:
+            self._update_segment_preview_status(value)
         self._refresh_cut_action_state()
 
     def _playback_face_candidate(self, source_frame):
@@ -5265,22 +5337,35 @@ class ScenespyApp(QMainWindow):
     def add_cut(self):
         if self._current_media_is_processing():
             return
-        self.add_cut_at(self.player.position() / 1000)
+        self._add_cut_frame(self._playhead_cut_frame())
 
-    def _can_add_cut_at(self, seconds):
+    def _playhead_cut_frame(self):
+        """Return the source frame drawn under the timeline playhead."""
+        if not self.current_media:
+            return 0
+        playhead = getattr(self.timeline, "playhead", None)
+        if playhead is not None:
+            return self.timeline.frame_for_x(playhead.x())
+        return self.current_media.frame_for_seconds(
+            self.player.position() / 1000)
+
+    def _can_add_cut_frame(self, frame):
         if not self.current_media or self._current_media_is_processing():
             return False
-        frame = self.current_media.frame_for_seconds(seconds)
+        frame = int(frame)
         return (0 < frame < self.current_media.total_frames and
                 all(cut.frame != frame for cut in self.current_media.cuts))
+
+    def _can_add_cut_at(self, seconds):
+        frame = (self.current_media.frame_for_seconds(seconds)
+                 if self.current_media else 0)
+        return ScenespyApp._can_add_cut_frame(self, frame)
 
     def _refresh_cut_action_state(self):
         if not hasattr(self, "preanalysis_cut_button"):
             return
-        seconds = self.player.position() / 1000 if self.current_media else 0.0
-        enabled = self._can_add_cut_at(seconds)
-        frame = (self.current_media.frame_for_seconds(seconds)
-                 if self.current_media else 0)
+        frame = self._playhead_cut_frame()
+        enabled = self._can_add_cut_frame(frame)
         duplicate = bool(self.current_media and any(
             cut.frame == frame for cut in self.current_media.cuts))
         tooltip = ("A cut already exists at the playhead" if duplicate else
@@ -5294,10 +5379,21 @@ class ScenespyApp(QMainWindow):
             self.add_cut_action.setEnabled(enabled)
 
     def add_cut_at(self, seconds):
-        if not self._can_add_cut_at(seconds):
+        frame = (self.current_media.frame_for_seconds(seconds)
+                 if self.current_media else 0)
+        ScenespyApp._add_cut_frame(self, frame)
+
+    def _add_cut_frame(self, frame):
+        frame = int(frame)
+        if not ScenespyApp._can_add_cut_frame(self, frame):
             return
-        frame = self.current_media.frame_for_seconds(seconds)
         if 0 < frame < self.current_media.total_frames:
+            # A playhead may sit between two frame boundaries at high zoom.
+            # Cuts are frame-based, so keep the rebuilt playhead on the exact
+            # same boundary as the new marker instead of restoring the former
+            # fractional timestamp on either side of it.
+            cut_seconds = self.current_media.seconds_for_frame(frame)
+            self.timeline.current_seconds = cut_seconds
             existing = sorted(cut.frame for cut in self.current_media.cuts)
             split_index = 1 + sum(cut_frame < frame for cut_frame in existing)
 
@@ -5323,6 +5419,11 @@ class ScenespyApp(QMainWindow):
             if self.selected_segment is not None:
                 self.clear_selection()
             self.timeline.rebuild()
+            self.timeline.set_position(cut_seconds)
+            if hasattr(self, "_request_edit_preview"):
+                self._request_edit_preview(cut_seconds)
+            if hasattr(self, "_flush_interactive_seek"):
+                self._flush_interactive_seek(round(cut_seconds * 1000))
             self._refresh_media_metrics()
             self._refresh_action_button()
             self._refresh_cut_action_state()
@@ -6293,6 +6394,8 @@ class ScenespyApp(QMainWindow):
                 zip(boundaries, boundaries[1:]), 1)
                 if segment_index not in unavailable]
             task.media_analyzed.emit(media)
+            if media.frame_times:
+                cfg["FRAME_TIMES"] = media.frame_times
             exporter = SceneEngine(
                 media.path, output, cfg, LogAdapter(task), ProgressAdapter(task),
                 preview_enabled=False)
@@ -6528,6 +6631,8 @@ class ScenespyApp(QMainWindow):
                 return destination
             cfg = PROFILES[media.sensitivity].copy()
             cfg.update(ENCODER=accel, INFERENCE="cpu", DEBUG=False)
+            if media.frame_times:
+                cfg["FRAME_TIMES"] = media.frame_times
             engine = SceneEngine(
                 media.path, folder, cfg, LogAdapter(task), ProgressAdapter(task),
                 previewer=PreviewAdapter(task), preview_enabled=True,
@@ -7090,20 +7195,20 @@ class ScenespyApp(QMainWindow):
                     item_media.media_id not in self._batch_analyzed_media):
                 item.setIcon(qta.icon(
                     "fa6s.circle-arrow-right", color="#ffffff",
-                    scale_factor=.9))
+                    scale_factor=.72))
                 item.setToolTip(f"Processing now\n{item_media.path}")
                 item.setForeground(QColor("#ffffff"))
             elif item_media.exported or item_media.media_id in self._batch_completed_media:
                 item.setIcon(qta.icon(
                     "fa6s.circle-check", color="#38c982",
-                    scale_factor=.9))
+                    scale_factor=.72))
                 item.setToolTip(f"Exported\n{item_media.path}")
                 item.setForeground(QColor("#b8e8cf"))
             elif (item_media.analyzed or
                   item_media.media_id in self._batch_analyzed_media):
                 item.setIcon(qta.icon(
                     "fa6s.circle-info", color="#f2c94c",
-                    scale_factor=.9))
+                    scale_factor=.72))
                 item.setToolTip(f"Analyzed · ready to export\n{item_media.path}")
                 item.setForeground(QColor("#eadb91"))
             else:
@@ -7117,26 +7222,30 @@ class ScenespyApp(QMainWindow):
             return
         media = self.current_media
         status = self.progress_label.text()
-        if (media and media.exported and status == "Complete" and
-                not self._current_media_is_processing()):
-            icon = qta.icon(
-                "fa6s.circle-check", color="#38c982", scale_factor=.9)
-            self.progress_state_icon.setPixmap(icon.pixmap(QSize(13, 13)))
-            self.progress_state_icon.setToolTip(f"Exported\n{media.path}")
-            self.progress_state_icon.show()
+        spec = None
+        if status == "Failed":
+            spec = ("fa6s.circle-xmark", "#d25a65", "Process failed")
+        elif status == "Stopping":
+            spec = ("fa6s.circle-stop", "#f2c94c", "Stopping process")
+        elif media and self._current_media_is_processing():
+            spec = ("fa6s.circle-arrow-right", "#ffffff", "Processing now")
+        elif media and media.exported and status == "Complete":
+            spec = ("fa6s.circle-check", "#38c982", "Exported")
         elif (media and media.analyzed and not media.exported and
-              status == "Video analyzed" and
-              not self._current_media_is_processing()):
-            icon = qta.icon(
-                "fa6s.circle-info", color="#f2c94c", scale_factor=.9)
-            self.progress_state_icon.setPixmap(icon.pixmap(QSize(13, 13)))
-            self.progress_state_icon.setToolTip(
-                f"Analyzed · ready to export\n{media.path}")
-            self.progress_state_icon.show()
-        else:
+              status == "Video analyzed"):
+            spec = ("fa6s.circle-info", "#f2c94c",
+                    "Analyzed · ready to export")
+        if spec is None:
             self.progress_state_icon.clear()
             self.progress_state_icon.setToolTip("")
             self.progress_state_icon.hide()
+            return
+        name, color, tooltip = spec
+        icon = qta.icon(name, color=color, scale_factor=.72)
+        self.progress_state_icon.setPixmap(icon.pixmap(QSize(18, 18)))
+        self.progress_state_icon.setToolTip(
+            f"{tooltip}\n{media.path}" if media else tooltip)
+        self.progress_state_icon.show()
 
     def task_done(self, task, callback, result):
         def finish():

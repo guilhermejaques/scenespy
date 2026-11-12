@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from bisect import bisect_left
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -61,12 +62,18 @@ class MediaItem:
     removed_segments: list[int] = field(default_factory=list)
     show_detected_faces: bool = True
     show_saved_faces: bool = True
+    variable_frame_rate: bool = False
+    frame_times: list[float] = field(default_factory=list, repr=False)
     media_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def seconds_for_frame(self, frame: int | float) -> float:
         """Map a frame onto the player's canonical media duration."""
         if float(frame) >= self.total_frames:
             return max(0.0, self.duration)
+        if self.frame_times:
+            index = max(0, min(int(round(float(frame))),
+                               len(self.frame_times) - 1))
+            return max(0.0, min(self.duration, self.frame_times[index]))
         return max(0.0, min(self.duration, float(frame) / max(self.fps, 0.001)))
 
     def frame_for_seconds(self, seconds: int | float) -> int:
@@ -74,6 +81,14 @@ class MediaItem:
         if self.duration <= 0 or self.fps <= 0:
             return 0
         seconds = max(0.0, min(self.duration, float(seconds)))
+        if self.frame_times:
+            index = bisect_left(self.frame_times, seconds)
+            if index <= 0:
+                return 0
+            if index >= len(self.frame_times):
+                return min(self.total_frames, len(self.frame_times))
+            before, after = self.frame_times[index - 1:index + 1]
+            return index - 1 if seconds - before < after - seconds else index
         return max(0, min(self.total_frames, round(seconds * self.fps)))
 
     def normalize_cuts(self) -> None:
