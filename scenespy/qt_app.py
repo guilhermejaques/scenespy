@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import copy
 import os
+import shutil
 import sys
 import threading
 import time
@@ -43,7 +44,8 @@ from .face_engine import FaceDetectionEngine, draw_face_marker
 from .frame_map import FrameMap, create_analysis_proxy, create_playback_proxy
 from .scene_engine import SceneEngine
 from .shared import (ACCEL_OPTIONS, ACCENT, ALLOWED_VIDEO_EXTENSIONS, BG_CARD, BG_MAIN,
-                     BG_PANEL, BORDER_SOFT2, DANGER, MODE_ACCEL_COMPAT, PROFILES, SUCCESS,
+                     BG_PANEL, BORDER_SOFT2, CACHE_PROFILE, DANGER, MODE_ACCEL_COMPAT,
+                     PROFILES, SUCCESS,
                      TEXT_MAIN, TEXT_MUTED,
                      USER_DATA_DIR, detect_available_encoder_accel, detect_available_inference_accel,
                      status_labels, terminate_all_child_processes)
@@ -127,6 +129,56 @@ def scrub_timecode(seconds, duration):
     return transport_timecode(seconds, duration)
 
 
+def format_file_size(byte_count):
+    """Format an exact byte count using a bounded, correctly scaled unit."""
+    try:
+        size = max(0, int(byte_count))
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    units = ("B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB")
+    value = float(size)
+    unit_index = 0
+    while value >= 1024 and unit_index < len(units) - 1:
+        value /= 1024
+        unit_index += 1
+    if unit_index == 0:
+        return f"{size} B"
+    decimals = 0 if value >= 100 else 1 if value >= 10 else 2
+    if (round(value, decimals) >= 1024 and
+            unit_index < len(units) - 1):
+        value /= 1024
+        unit_index += 1
+        decimals = 0 if value >= 100 else 1 if value >= 10 else 2
+    number = f"{value:.{decimals}f}"
+    if "." in number:
+        number = number.rstrip("0").rstrip(".")
+    return f"{number} {units[unit_index]}"
+
+
+def exported_path_size(path):
+    """Return bytes actually stored by one exported file or directory."""
+    if not path:
+        return 0
+    try:
+        if os.path.isfile(path):
+            return max(0, int(os.path.getsize(path)))
+    except OSError:
+        return 0
+    total = 0
+    try:
+        for root, _directories, files in os.walk(path, followlinks=False):
+            for filename in files:
+                candidate = os.path.join(root, filename)
+                try:
+                    if not os.path.islink(candidate):
+                        total += max(0, int(os.path.getsize(candidate)))
+                except OSError:
+                    continue
+    except OSError:
+        return total
+    return total
+
+
 def final_face_crop_box(box, frame_width, frame_height):
     """Return the exact expanded box used by the saved face crop."""
     if len(box or ()) != 4 or frame_width <= 0 or frame_height <= 0:
@@ -200,6 +252,49 @@ def themed_icon(name, color="#cbd5e1", scale_factor=1.0):
         color_disabled="#565b63",
         scale_factor=scale_factor,
     )
+
+
+STATUS_ICON_SIZE = QSize(20, 20)
+STATUS_ICON_SCALE = .648  # Same glyph size as .72 in an 18 px canvas.
+STATUS_PROCESS_COLOR = "#ffffff"
+STATUS_PENDING_COLOR = "#f2c94c"
+STATUS_SUCCESS_COLOR = "#38c982"
+STATUS_ERROR_COLOR = "#d25a65"
+
+
+def status_indicator_icon(name, color):
+    """Return a status glyph optically centered beside its text label."""
+    # Font Awesome's circular glyphs sit slightly low in their square canvas.
+    # QtAwesome applies this offset while painting the vector glyph, retaining
+    # its native antialiasing and its colors in every QIcon state.
+    return qta.icon(
+        name,
+        color=color,
+        scale_factor=STATUS_ICON_SCALE,
+        offset=(0, -1 / STATUS_ICON_SIZE.height()),
+    )
+
+
+def remove_owned_directory(path, parent):
+    """Remove a generated directory only when it is below its expected root."""
+    if not path or not parent:
+        return False
+    root = os.path.abspath(parent)
+    target = os.path.abspath(path)
+    try:
+        contained = os.path.commonpath((root, target)) == root
+    except ValueError:
+        contained = False
+    if not contained or target == root:
+        return False
+    for _attempt in range(5):
+        if not os.path.exists(target):
+            return True
+        try:
+            shutil.rmtree(target)
+        except OSError:
+            time.sleep(.05)
+    return not os.path.exists(target)
 
 
 class ScrubSlider(QSlider):
@@ -884,11 +979,25 @@ class Task(QThread):
         self.media_progress = {}
         self.live_faces = {}
         self.live_segments = {}
+        self._cleanup_callbacks = []
 
     def register_cancel(self, callback):
         self.cancel_callback = callback
         if self.isInterruptionRequested() and callback:
             callback()
+
+    def register_cleanup(self, callback):
+        """Register idempotent cleanup that runs on every worker exit path."""
+        if callback:
+            self._cleanup_callbacks.append(callback)
+
+    def run_cleanups(self):
+        callbacks, self._cleanup_callbacks = self._cleanup_callbacks, []
+        for callback in reversed(callbacks):
+            try:
+                callback()
+            except Exception:
+                pass
 
     def cancel(self):
         self.requestInterruption()
@@ -899,17 +1008,28 @@ class Task(QThread):
                 pass
 
     def run(self):
+        outcome = None
+        payload = None
         try:
-            result = self.work(self)
+            payload = self.work(self)
             if self.isInterruptionRequested():
-                self.cancelled.emit()
+                outcome = "cancelled"
             else:
-                self.result.emit(result)
+                outcome = "result"
         except Exception:
             if self.isInterruptionRequested():
-                self.cancelled.emit()
+                outcome = "cancelled"
             else:
-                self.failed.emit(traceback.format_exc())
+                outcome = "failed"
+                payload = traceback.format_exc()
+        finally:
+            self.run_cleanups()
+        if outcome == "result":
+            self.result.emit(payload)
+        elif outcome == "failed":
+            self.failed.emit(payload)
+        else:
+            self.cancelled.emit()
 
 
 class FramePreviewDecoder(QThread):
@@ -927,6 +1047,7 @@ class FramePreviewDecoder(QThread):
         self._container = None
         self._stream = None
         self._source = None
+        self._source_token = None
         self._decode_iter = None
         self._last_frame = None
 
@@ -947,8 +1068,16 @@ class FramePreviewDecoder(QThread):
         with self._condition:
             return not self._stopping and serial == self._serial
 
-    def _open(self, source):
-        if self._source == source and self._container is not None:
+    @staticmethod
+    def _file_token(source):
+        try:
+            stat = os.stat(source)
+            return str(source), int(stat.st_mtime_ns), int(stat.st_size)
+        except OSError:
+            return str(source), 0, 0
+
+    def _open(self, source, token):
+        if self._source_token == token and self._container is not None:
             return
         if self._container is not None:
             self._container.close()
@@ -956,6 +1085,7 @@ class FramePreviewDecoder(QThread):
         self._stream = self._container.streams.video[0]
         self._stream.thread_type = "AUTO"
         self._source = source
+        self._source_token = token
         self._decode_iter = None
         self._last_frame = None
 
@@ -978,12 +1108,13 @@ class FramePreviewDecoder(QThread):
             self._cache.popitem(last=False)
 
     def _decode(self, serial, source, target, fps):
-        key = (source, target)
+        token = self._file_token(source)
+        key = (*token, target)
         cached = self._cache.get(key)
         if cached is not None:
             self._cache.move_to_end(key)
             return cached
-        self._open(source)
+        self._open(source, token)
         can_continue = (self._decode_iter is not None and
                         self._last_frame is not None and
                         self._last_frame < target <= self._last_frame + 48)
@@ -1005,7 +1136,7 @@ class FramePreviewDecoder(QThread):
             if index < target:
                 continue
             image = self._image(decoded)
-            self._remember((source, index), image)
+            self._remember((*token, index), image)
             return image
         return None
 
@@ -1725,9 +1856,15 @@ class TimelineView(QGraphicsView):
         self._indicator_lefts = []
         self._active_indicator_items = set()
         self._selected_segment_index = None
-        self._clip_thumbnail_cache = {}
-        self._clip_thumbnail_source_frames = {}
-        self._face_thumbnail_cache = {}
+        self._clip_thumbnail_cache = OrderedDict()
+        self._clip_thumbnail_source_frames = OrderedDict()
+        self._face_thumbnail_cache = OrderedDict()
+        self._clip_thumbnail_attempted = set()
+        self._face_thumbnail_attempted = set()
+        self._clip_thumbnail_limit = CACHE_PROFILE["clip_thumbnail_cache"]
+        self._face_thumbnail_limit = CACHE_PROFILE["face_thumbnail_cache"]
+        self._thumbnail_batch_size = CACHE_PROFILE["thumbnail_batch"]
+        self._thumbnail_rebuild_pending = False
         self._live_face_media_id = None
         self._live_face_ids = set()
         self._live_face_lane_right_edges = []
@@ -1770,9 +1907,6 @@ class TimelineView(QGraphicsView):
         if changed:
             self.current_seconds = 0.0
             self._selected_segment_index = None
-            self._clip_thumbnail_cache.clear()
-            self._clip_thumbnail_source_frames.clear()
-            self._face_thumbnail_cache.clear()
         self.media = media
         if changed and media:
             self.fit_to_view()
@@ -1807,14 +1941,23 @@ class TimelineView(QGraphicsView):
         if not self.media or not frames:
             return {}
         path = os.path.abspath(self.media.path)
+        token = self._thumbnail_file_token(path)
+        keys = {int(frame): (*token, int(frame)) for frame in frames}
         missing = [int(frame) for frame in frames
-                   if (path, int(frame)) not in self._clip_thumbnail_cache]
+                   if (keys[int(frame)] not in self._clip_thumbnail_cache and
+                       keys[int(frame)] not in self._clip_thumbnail_attempted)]
         if missing:
+            decode_now = missing[:self._thumbnail_batch_size]
+            if len(missing) > len(decode_now):
+                self._schedule_thumbnail_rebuild()
             frame_ends = frame_ends or {}
+            for frame in decode_now:
+                self._clip_thumbnail_attempted.add(keys[frame])
             cap = cv2.VideoCapture(path)
             try:
                 if cap.isOpened():
-                    for frame in missing:
+                    for frame in decode_now:
+                        key = keys[frame]
                         ok, image = False, None
                         end_frame = frame_ends.get(frame, frame + 1)
                         for candidate in clip_preview_candidates(frame, end_frame):
@@ -1823,10 +1966,9 @@ class TimelineView(QGraphicsView):
                             if ok and image is not None:
                                 break
                         if not ok or image is None:
-                            self._clip_thumbnail_cache[(path, frame)] = QPixmap()
-                            self._clip_thumbnail_source_frames[(path, frame)] = None
+                            self._remember_clip_thumbnail(
+                                key, QPixmap(), None)
                             continue
-                        self._clip_thumbnail_source_frames[(path, frame)] = candidate
                         height, width = image.shape[:2]
                         target_width = SCENE_THUMBNAIL_SIZE.width()
                         target_height = SCENE_THUMBNAIL_SIZE.height()
@@ -1846,11 +1988,52 @@ class TimelineView(QGraphicsView):
                         qimage = QImage(
                             image.data, target_width, target_height,
                             target_width * 3, QImage.Format.Format_RGB888).copy()
-                        self._clip_thumbnail_cache[(path, frame)] = QPixmap.fromImage(qimage)
+                        self._remember_clip_thumbnail(
+                            key, QPixmap.fromImage(qimage), candidate)
+                else:
+                    for frame in decode_now:
+                        self._remember_clip_thumbnail(
+                            keys[frame], QPixmap(), None)
             finally:
                 cap.release()
-        return {frame: self._clip_thumbnail_cache.get((path, int(frame)), QPixmap())
-                for frame in frames}
+        thumbnails = {}
+        for frame in frames:
+            key = keys[int(frame)]
+            pixmap = self._clip_thumbnail_cache.get(key, QPixmap())
+            if key in self._clip_thumbnail_cache:
+                self._clip_thumbnail_cache.move_to_end(key)
+                self._clip_thumbnail_source_frames.move_to_end(key)
+            thumbnails[frame] = pixmap
+        return thumbnails
+
+    @staticmethod
+    def _thumbnail_file_token(path):
+        try:
+            stat = os.stat(path)
+            return path, int(stat.st_mtime_ns), int(stat.st_size)
+        except OSError:
+            return path, 0, 0
+
+    def _remember_clip_thumbnail(self, key, pixmap, source_frame):
+        self._clip_thumbnail_cache[key] = pixmap
+        self._clip_thumbnail_source_frames[key] = source_frame
+        self._clip_thumbnail_cache.move_to_end(key)
+        self._clip_thumbnail_source_frames.move_to_end(key)
+        while len(self._clip_thumbnail_cache) > self._clip_thumbnail_limit:
+            old_key, _pixmap = self._clip_thumbnail_cache.popitem(last=False)
+            self._clip_thumbnail_source_frames.pop(old_key, None)
+
+    def _schedule_thumbnail_rebuild(self):
+        if self._thumbnail_rebuild_pending:
+            return
+        self._thumbnail_rebuild_pending = True
+
+        def rebuild_next_batch():
+            self._thumbnail_rebuild_pending = False
+            if self.media:
+                self.rebuild()
+
+        QTimer.singleShot(0, rebuild_next_batch)
 
     def clip_thumbnail_source_frame(self, start_frame, end_frame):
         """Return the cached source frame used by a clip indicator."""
@@ -1858,7 +2041,7 @@ class TimelineView(QGraphicsView):
             return None
         start = clip_preview_frame(start_frame, end_frame)
         path = os.path.abspath(self.media.path)
-        key = (path, start)
+        key = (*self._thumbnail_file_token(path), start)
         if key not in self._clip_thumbnail_cache:
             self._clip_thumbnails([start], {start: end_frame})
         pixmap = self._clip_thumbnail_cache.get(key, QPixmap())
@@ -1868,9 +2051,18 @@ class TimelineView(QGraphicsView):
 
     def _face_thumbnails(self, events):
         thumbnails = {}
+        pending = []
         for event in events:
             path = os.path.abspath(event.crop_file) if event.crop_file else ""
-            if path not in self._face_thumbnail_cache:
+            key = self._thumbnail_file_token(path)
+            if (key not in self._face_thumbnail_cache and
+                    key not in self._face_thumbnail_attempted):
+                pending.append((event, path, key))
+        if len(pending) > self._thumbnail_batch_size:
+            self._schedule_thumbnail_rebuild()
+        for _event, path, key in pending[:self._thumbnail_batch_size]:
+            self._face_thumbnail_attempted.add(key)
+            if key not in self._face_thumbnail_cache:
                 pixmap = load_fresh_pixmap(path)
                 if not pixmap.isNull():
                     scaled = pixmap.scaled(
@@ -1882,13 +2074,48 @@ class TimelineView(QGraphicsView):
                     pixmap = scaled.copy(
                         left, top, FACE_THUMBNAIL_SIZE.width(),
                         FACE_THUMBNAIL_SIZE.height())
-                self._face_thumbnail_cache[path] = pixmap
-            thumbnails[event.event_id] = self._face_thumbnail_cache[path]
+                self._face_thumbnail_cache[key] = pixmap
+                self._face_thumbnail_cache.move_to_end(key)
+                while len(self._face_thumbnail_cache) > self._face_thumbnail_limit:
+                    self._face_thumbnail_cache.popitem(last=False)
+        for event in events:
+            path = os.path.abspath(event.crop_file) if event.crop_file else ""
+            key = self._thumbnail_file_token(path)
+            pixmap = self._face_thumbnail_cache.get(key, QPixmap())
+            if key in self._face_thumbnail_cache:
+                self._face_thumbnail_cache.move_to_end(key)
+            thumbnails[event.event_id] = pixmap
         return thumbnails
 
     def invalidate_face_thumbnail(self, path):
         if path:
-            self._face_thumbnail_cache.pop(os.path.abspath(path), None)
+            absolute = os.path.abspath(path)
+            for key in [key for key in self._face_thumbnail_cache
+                        if key[0] == absolute]:
+                self._face_thumbnail_cache.pop(key, None)
+            self._face_thumbnail_attempted = {
+                key for key in self._face_thumbnail_attempted
+                if key[0] != absolute}
+
+    def discard_media_cache(self, media):
+        """Release in-memory thumbnails owned by a removed media item."""
+        video_path = os.path.abspath(media.path)
+        face_paths = {
+            os.path.abspath(event.crop_file)
+            for event in media.faces if event.crop_file}
+        for key in [key for key in self._clip_thumbnail_cache
+                    if key[0] == video_path]:
+            self._clip_thumbnail_cache.pop(key, None)
+            self._clip_thumbnail_source_frames.pop(key, None)
+        for key in [key for key in self._face_thumbnail_cache
+                    if key[0] in face_paths]:
+            self._face_thumbnail_cache.pop(key, None)
+        self._clip_thumbnail_attempted = {
+            key for key in self._clip_thumbnail_attempted
+            if key[0] != video_path}
+        self._face_thumbnail_attempted = {
+            key for key in self._face_thumbnail_attempted
+            if key[0] not in face_paths}
 
     def _segment_colors(self, count):
         """Return stable pseudo-random palette entries with no adjacent repeats."""
@@ -2020,7 +2247,15 @@ class TimelineView(QGraphicsView):
                 self._indicator_items.append((x, x + 40, chip))
         name = self.scene().addSimpleText(Path(self.media.path).name)
         name.setFont(QFont("JetBrains Mono", 8))
-        name.setBrush(QColor(TEXT_MUTED))
+        name_width = max(1.0, name.boundingRect().width())
+        name_fade = QLinearGradient(0, 0, name_width, 0)
+        name_color = QColor(TEXT_MUTED)
+        name_fade.setColorAt(0.0, name_color)
+        name_fade.setColorAt(0.5, name_color)
+        transparent_name = QColor(name_color)
+        transparent_name.setAlpha(0)
+        name_fade.setColorAt(1.0, transparent_name)
+        name.setBrush(QBrush(name_fade))
         name.setPos(12, 68)
         name.setZValue(2)
         drawn_handle_positions = set()
@@ -2237,7 +2472,11 @@ class TimelineView(QGraphicsView):
         label.setBrush(QColor(TEXT_MUTED))
         indicator_center = self.x_for_frame(start_frame) + 20
         label_width = label.boundingRect().width()
-        label_x = indicator_center - label_width / 2
+        label_x = max(
+            2.0,
+            min(indicator_center - label_width / 2,
+                max(2.0, self.scene().sceneRect().right() - label_width - 2.0)),
+        )
         label.setPos(label_x, 130)
         label.setToolTip(f"Clip {int(index):02d} exact duration")
         label.setZValue(24)
@@ -2720,6 +2959,7 @@ class ScenespyApp(QMainWindow):
         self._batch_analyzed_media = set()
         self._batch_completed_media = set()
         self._batch_failed_media = set()
+        self._queue_saved_bytes = 0
         self._manual_face_draft = None
         self.preview_end_ms = None
         self.preview_start_ms = None
@@ -2731,6 +2971,7 @@ class ScenespyApp(QMainWindow):
         self._frame_step_target = None
         self._frame_step_media_id = None
         self._playback_proxy_tasks = {}
+        self._shutdown_started = False
         self._pending_proxy_path = None
         self._pending_proxy_restore = None
         self._edit_preview_active = False
@@ -2774,6 +3015,16 @@ class ScenespyApp(QMainWindow):
 
     def eventFilter(self, watched, event):
         """Provide Premiere-style unmodified arrow-key frame stepping."""
+        if (hasattr(self, "video_backdrop") and
+                watched in (self.video_backdrop, self.viewer_panel,
+                            self.main_splitter, self.menuBar()) and
+                event.type() in (
+                    QEvent.Type.Move, QEvent.Type.Resize,
+                    QEvent.Type.LayoutRequest, QEvent.Type.Show)):
+            if (watched is self.video_backdrop and
+                    event.type() in (QEvent.Type.Move, QEvent.Type.Resize)):
+                self._position_media_info()
+            self._schedule_media_info_position()
         if hasattr(self, "github_button") and watched is self.github_button:
             if event.type() == QEvent.Type.Enter:
                 button_position = self.github_button.mapTo(
@@ -2908,7 +3159,7 @@ class ScenespyApp(QMainWindow):
         layout.addLayout(media_header)
         self.media_list = QListWidget()
         self.media_list.setObjectName("mediaList")
-        self.media_list.setIconSize(QSize(18, 18))
+        self.media_list.setIconSize(STATUS_ICON_SIZE)
         self.media_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.media_list.customContextMenuRequested.connect(self._show_media_context_menu)
         self.media_list.currentRowChanged.connect(self._select_media)
@@ -2942,8 +3193,20 @@ class ScenespyApp(QMainWindow):
         self.media_info.setTextFormat(Qt.TextFormat.RichText)
         self.media_info.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.media_info.setContentsMargins(0, 0, 0, 0)
+        self.media_info.setIndent(0)
         self.media_info.hide()
+        self._media_info_position_timer = QTimer(self)
+        self._media_info_position_timer.setSingleShot(True)
+        # Wait one short UI frame so nested splitters/layouts have all settled.
+        self._media_info_position_timer.setInterval(12)
+        self._media_info_position_timer.timeout.connect(
+            self._position_media_info)
         self.video_backdrop = VideoBackdrop()
+        self.video_backdrop.installEventFilter(self)
+        self.viewer_panel.installEventFilter(self)
+        self.main_splitter.installEventFilter(self)
+        self.menuBar().installEventFilter(self)
         backdrop_layout = QStackedLayout(self.video_backdrop)
         backdrop_layout.setContentsMargins(0, 0, 0, 0)
         backdrop_layout.addWidget(self.video)
@@ -3265,6 +3528,8 @@ class ScenespyApp(QMainWindow):
             QEasingCurve.Type.InOutCubic)
         self.processing_position_animation.valueChanged.connect(
             lambda value: self._sync_processing_position(float(value)))
+        self.saved_data_summary = QLabel(objectName="muted")
+        self.saved_data_summary.hide()
         self.queue_metrics = QLabel(objectName="muted")
         self.queue_metrics.hide()
         self.progress_metrics = QLabel(objectName="muted")
@@ -3300,7 +3565,9 @@ class ScenespyApp(QMainWindow):
         # Keep transparent breathing room around circular glyphs. A pixmap
         # touching an equally-sized QLabel loses its antialiased top edge on
         # some Qt/Windows scale factors.
-        self.progress_state_icon.setFixedSize(19, 19)
+        # The 20 px canvas leaves transparent breathing room around the
+        # standard-size glyph, independently of the adjacent text margins.
+        self.progress_state_icon.setFixedSize(STATUS_ICON_SIZE)
         self.progress_state_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.progress_state_icon.hide()
         progress_status_row = QHBoxLayout()
@@ -3313,6 +3580,7 @@ class ScenespyApp(QMainWindow):
         progress_status_row.addWidget(self.progress_percent)
         self.action_button = QPushButton("Start", objectName="primary")
         self.action_button.clicked.connect(self.toggle_primary_action)
+        layout.addWidget(self.saved_data_summary)
         layout.addWidget(self.queue_metrics)
         layout.addWidget(self.progress_metrics)
         layout.addWidget(self.face_metrics)
@@ -3332,19 +3600,34 @@ class ScenespyApp(QMainWindow):
         analysis_scroll.setMinimumWidth(220)
         root.addWidget(analysis_scroll)
         root.setSizes([225, 950, 275])
-        root.splitterMoved.connect(lambda _position, _index: self._position_media_info())
+        root.splitterMoved.connect(
+            lambda _position, _index: self._schedule_media_info_position())
         self.setStatusBar(QStatusBar())
         self._set_progress_metrics(stage=None)
-        QTimer.singleShot(0, self._position_media_info)
+        self._schedule_media_info_position()
+
+    def _schedule_media_info_position(self):
+        timer = getattr(self, "_media_info_position_timer", None)
+        if timer is not None:
+            # Restarting makes this a true debounce: position from the final
+            # layout event, never from an intermediate splitter geometry.
+            timer.start()
 
     def _position_media_info(self):
         if not hasattr(self, "media_info") or not hasattr(self, "video_backdrop"):
             return
         menu_bar = self.menuBar()
-        left = self.video_backdrop.mapTo(
+        player_left = self.video_backdrop.mapTo(
             menu_bar, self.video_backdrop.rect().topLeft()).x()
+        left = player_left
+        right = player_left + self.video_backdrop.width()
+        corner = menu_bar.cornerWidget(Qt.Corner.TopRightCorner)
+        if corner is not None and corner.isVisible():
+            right = min(right, corner.geometry().left() - 6)
+        left = max(0, min(left, menu_bar.width()))
+        right = max(left, min(right, menu_bar.width()))
         self.media_info.setGeometry(
-            left, 0, max(0, self.video_backdrop.width()), menu_bar.height())
+            left, 0, max(0, right - left), menu_bar.height())
         self.media_info.raise_()
 
     def _restore_workspace_splitter(self):
@@ -3365,7 +3648,7 @@ class ScenespyApp(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        QTimer.singleShot(0, self._position_media_info)
+        self._schedule_media_info_position()
 
     def _analysis_fields(self):
         self.mode = FramedComboBox()
@@ -3817,6 +4100,12 @@ class ScenespyApp(QMainWindow):
         removed_name = Path(removed_media.path).name
         removed_current = removed_media is self.current_media
 
+        if removed_current:
+            self.player.stop()
+            self.player.setSource(QUrl())
+            self._release_frame_decoder()
+        self._discard_media_runtime(removed_media)
+
         self.media_list.blockSignals(True)
         self.media_list.takeItem(row)
         self.project.media.pop(row)
@@ -3834,8 +4123,6 @@ class ScenespyApp(QMainWindow):
                 self._select_media(self.media_list.currentRow())
         else:
             self.current_media = None
-            self.player.stop()
-            self.player.setSource(QUrl())
             self.video.hide()
             self.timeline.set_media(None)
             self.show_cut(None)
@@ -3845,6 +4132,7 @@ class ScenespyApp(QMainWindow):
             self.duration_clock.setText(zero)
             self.media_info.clear()
             self.media_info.hide()
+            self._set_saved_data_summary()
             self._restore_selected_media_progress()
 
         self._update_batch_availability()
@@ -3873,7 +4161,10 @@ class ScenespyApp(QMainWindow):
 
         self.player.stop()
         self.player.setSource(QUrl())
+        self._release_frame_decoder()
         self.video.hide()
+        for media in list(self.project.media):
+            self._discard_media_runtime(media)
         self.project.media.clear()
         self.current_media = None
         self.media_list.clear()
@@ -3885,11 +4176,52 @@ class ScenespyApp(QMainWindow):
         self.duration_clock.setText(zero)
         self.media_info.clear()
         self.media_info.hide()
+        self._set_saved_data_summary()
         self._restore_selected_media_progress()
         self._update_batch_availability()
         self._refresh_action_button()
         self.statusBar().showMessage(
             f"Removed {count} videos from the list · original files were not deleted", 5000)
+
+    @staticmethod
+    def _media_cache_path(media):
+        return os.path.join(USER_DATA_DIR, "cache", str(media.media_id))
+
+    @staticmethod
+    def _remove_media_cache(media):
+        """Remove only the private cache owned by one media item."""
+        cache_root = os.path.abspath(os.path.join(USER_DATA_DIR, "cache"))
+        return remove_owned_directory(
+            ScenespyApp._media_cache_path(media), cache_root)
+
+    def _discard_media_runtime(self, media):
+        """Drop background work, transient state, and cache for removed media."""
+        media_id = media.media_id
+        self.timeline.discard_media_cache(media)
+        cache_cleanup_deferred = False
+        proxy_task = self._playback_proxy_tasks.pop(media_id, None)
+        if proxy_task and proxy_task.isRunning():
+            proxy_task.cancel()
+            if not proxy_task.wait(3000):
+                # Its cancel-aware FFmpeg loop will finish asynchronously; do
+                # the disk cleanup only after it can no longer recreate files.
+                proxy_task.finished.connect(
+                    lambda m=media: self._remove_media_cache(m))
+                cache_cleanup_deferred = True
+        self._batch_analyzed_media.discard(media_id)
+        self._batch_completed_media.discard(media_id)
+        self._batch_failed_media.discard(media_id)
+        if hasattr(self, "_queue_media_ids"):
+            self._queue_media_ids = [
+                queued for queued in self._queue_media_ids
+                if queued != media_id]
+        if self._pending_proxy_path and self._pending_proxy_path[0] == media_id:
+            self._pending_proxy_path = None
+        if (self._pending_proxy_restore and
+                self._pending_proxy_restore[0] == media_id):
+            self._pending_proxy_restore = None
+        if not cache_cleanup_deferred:
+            self._remove_media_cache(media)
 
     def _show_media_list_menu(self):
         if self.task:
@@ -4104,6 +4436,11 @@ class ScenespyApp(QMainWindow):
             "Preparing a lightweight playback proxy in the background", 5000)
 
     def _playback_proxy_finished(self, media, task):
+        if task.isRunning():
+            task.finished.connect(
+                lambda m=media, t=task:
+                self._playback_proxy_finished(m, t))
+            return
         if self._playback_proxy_tasks.get(media.media_id) is task:
             self._playback_proxy_tasks.pop(media.media_id, None)
         task.deleteLater()
@@ -4261,10 +4598,16 @@ class ScenespyApp(QMainWindow):
             return
         fps_text = f"{self.current_media.fps:.2f}".rstrip("0").rstrip(".")
         extension = Path(self.current_media.path).suffix.lstrip(".").upper()
+        try:
+            size_text = format_file_size(os.path.getsize(self.current_media.path))
+        except OSError:
+            size_text = ""
         details = (
             f"{self.current_media.width} × {self.current_media.height} · "
             f"{fps_text} fps · "
             f"{self._player_timecode(self.current_media.duration, self.current_media.duration)}")
+        if size_text:
+            details += f" · {size_text}"
         if extension:
             details += f" · {extension}"
         if self._processing_preview_selected():
@@ -4416,18 +4759,28 @@ class ScenespyApp(QMainWindow):
     def _ensure_frame_decoder(self):
         if self._frame_decoder is not None:
             return
-        self._frame_decoder = FramePreviewDecoder(self)
+        self._frame_decoder = FramePreviewDecoder(
+            self, cache_size=CACHE_PROFILE["frame_cache"])
         self._frame_decoder.frameReady.connect(self._show_edit_preview_frame)
         self._frame_decoder.start()
 
-    def _release_frame_decoder(self):
+    def _release_frame_decoder(self, force=False):
         decoder = self._frame_decoder
         if decoder is None:
-            return
+            return True
         self._frame_decoder = None
         decoder.stop()
-        decoder.wait(3000)
-        decoder.deleteLater()
+        stopped = decoder.wait(3000)
+        if not stopped and force:
+            decoder.terminate()
+            stopped = decoder.wait(1000)
+        if stopped:
+            decoder.deleteLater()
+        else:
+            # Never destroy a running QThread.  It owns a bounded cache and
+            # will delete itself as soon as the current decoder call returns.
+            decoder.finished.connect(decoder.deleteLater)
+        return stopped
 
     def _show_edit_preview_frame(self, media_id, frame, image):
         if (not self._edit_preview_active or not self.current_media or
@@ -4906,7 +5259,7 @@ class ScenespyApp(QMainWindow):
         self.statusBar().showMessage(
             f"Previewing clip · "
             f"{self._player_timecode(start_seconds, self.current_media.duration)} / "
-            f"{self._player_timecode(end_seconds, self.current_media.duration)} · 0%")
+            f"{self._player_timecode(end_seconds, self.current_media.duration)}")
 
     def _update_segment_preview_status(self, position_ms, force=False):
         if (not self._segment_preview_status_active or
@@ -4923,14 +5276,10 @@ class ScenespyApp(QMainWindow):
             self._segment_preview_status_active = False
             return
         self._segment_preview_last_status_ms = position_ms
-        elapsed = max(0, position_ms - self.preview_start_ms)
-        total = max(1, self.preview_end_ms - self.preview_start_ms)
-        percent = min(100, round(elapsed / total * 100))
         self.statusBar().showMessage(
             "Previewing clip · "
             f"{self._player_timecode(position_ms / 1000, self.current_media.duration)} "
-            f"/ {self._player_timecode(self.preview_end_ms / 1000, self.current_media.duration)} "
-            f"· {percent}%")
+            f"/ {self._player_timecode(self.preview_end_ms / 1000, self.current_media.duration)}")
 
     def _stop_segment_preview(self, message=None):
         owned_status = (self._segment_preview_status_active or
@@ -4941,7 +5290,6 @@ class ScenespyApp(QMainWindow):
         self.preview_armed = False
         self._segment_preview_status_active = False
         self._segment_preview_last_status_ms = None
-        self.timeline.clear_clip_duration()
         if not owned_status:
             return
         if message:
@@ -5181,6 +5529,9 @@ class ScenespyApp(QMainWindow):
     def _begin_processing_preview(self, media):
         if not media:
             return
+        # Starting a new attempt replaces any previous error state for this
+        # media with the white in-progress state.
+        self._batch_failed_media.discard(media.media_id)
         self._processing_preview_media = media
         self.processing_media = media
         self._refresh_media_item_states()
@@ -6273,11 +6624,20 @@ class ScenespyApp(QMainWindow):
                             media, self._mapped_face_event(
                                 face, frame_map, cache, engine._output_dir)))
                     task.register_cancel(engine.stop)
-                    if not engine.run():
-                        raise RuntimeError("Face analysis stopped before producing results")
-                    events = self._mapped_face_events(engine, frame_map, cache)
-                    cuts, excluded, removed = final_timeline(frame_map.join_frames)
-                    return ("faces", events, cuts, excluded, removed)
+                    face_complete = False
+                    try:
+                        if not engine.run():
+                            raise RuntimeError(
+                                "Face analysis stopped before producing results")
+                        events = self._mapped_face_events(
+                            engine, frame_map, cache)
+                        cuts, excluded, removed = final_timeline(
+                            frame_map.join_frames)
+                        face_complete = True
+                        return ("faces", events, cuts, excluded, removed)
+                    finally:
+                        if not face_complete:
+                            remove_owned_directory(engine._output_dir, cache)
                 cfg = PROFILES[media.sensitivity].copy()
                 cfg.update(ENCODER=accel, INFERENCE="cpu", DEBUG=False)
                 if mode == "interval": cfg["FIXED_INTERVAL"] = interval
@@ -6345,14 +6705,23 @@ class ScenespyApp(QMainWindow):
                         media, self._mapped_face_event(
                             face, mapping, output, engine._output_dir)))
                 task.register_cancel(engine.stop)
-                if not engine.run():
-                    raise RuntimeError("Face processing did not finish")
-                events = self._mapped_face_events(engine, mapping, output)
-                cuts, excluded, removed = self._mapped_timeline(
-                    mapping, mapping.join_frames, mode,
-                    excluded_ranges, removed_ranges)
-                task.media_analyzed.emit(media)
-                return media, "faces", events, cuts, excluded, removed
+                face_complete = False
+                try:
+                    if not engine.run():
+                        raise RuntimeError("Face processing did not finish")
+                    if task.isInterruptionRequested():
+                        raise RuntimeError("Face processing was cancelled")
+                    events = self._mapped_face_events(engine, mapping, output)
+                    cuts, excluded, removed = self._mapped_timeline(
+                        mapping, mapping.join_frames, mode,
+                        excluded_ranges, removed_ranges)
+                    task.media_analyzed.emit(media)
+                    face_complete = True
+                    return (media, "faces", events, cuts, excluded, removed,
+                            exported_path_size(engine._output_dir))
+                finally:
+                    if not face_complete:
+                        remove_owned_directory(engine._output_dir, output)
 
             cfg = PROFILES[sensitivity].copy()
             cfg.update(ENCODER=accel, INFERENCE="cpu", DEBUG=False)
@@ -6402,10 +6771,17 @@ class ScenespyApp(QMainWindow):
             exporter.scene_mode = mode == "scene"
             exporter._start_time = time.time()
             task.register_cancel(exporter.stop)
-            exporter._cut_scenes(export_segments)
-            if task.isInterruptionRequested():
-                raise RuntimeError("Video processing was cancelled")
-            return media, "cuts", cuts, cuts, excluded, removed
+            export_complete = False
+            try:
+                exporter._cut_scenes(export_segments)
+                if task.isInterruptionRequested():
+                    raise RuntimeError("Video processing was cancelled")
+                export_complete = True
+            finally:
+                if not export_complete:
+                    remove_owned_directory(exporter._cut_output_dir, output)
+            return (media, "cuts", cuts, cuts, excluded, removed,
+                    exported_path_size(exporter._cut_output_dir))
         finally:
             if analysis_path == proxy_path:
                 try:
@@ -6453,6 +6829,8 @@ class ScenespyApp(QMainWindow):
         self._batch_analyzed_media.clear()
         self._batch_completed_media.clear()
         self._batch_failed_media.clear()
+        self._queue_saved_bytes = 0
+        self._set_saved_data_summary()
         self._queue_total = len(media_queue)
         self._queue_media_ids = [media.media_id for media in media_queue]
         self._queue_completed = 1
@@ -6499,7 +6877,7 @@ class ScenespyApp(QMainWindow):
 
     def batch_finished(self, result):
         completed, failures = result
-        for media, kind, events, cuts, excluded, removed in completed:
+        for media, kind, events, cuts, excluded, removed, _saved_bytes in completed:
             media.analyzed = True
             media.exported = True
             media.cuts = cuts
@@ -6516,6 +6894,9 @@ class ScenespyApp(QMainWindow):
         self._refresh_media_item_states()
         self._refresh_action_button()
         self._update_analysis_controls_access()
+        saved_bytes = sum(max(0, int(result[-1])) for result in completed)
+        self._queue_saved_bytes = saved_bytes
+        self._set_saved_data_summary(saved_bytes)
         attempted = len(completed) + len(failures)
         summary = f"Queue complete · {len(completed)}/{attempted} videos processed"
         self.statusBar().showMessage(summary, 10000)
@@ -6574,7 +6955,13 @@ class ScenespyApp(QMainWindow):
         def work(task):
             if media.mode == "faces":
                 destination = os.path.join(folder, f"{Path(media.path).stem}_faces_reviewed")
-                os.makedirs(destination, exist_ok=True)
+                staging = os.path.join(
+                    folder,
+                    f".{Path(media.path).stem}_faces_reviewed.{uuid.uuid4().hex}.part")
+                os.makedirs(staging, exist_ok=False)
+                task.register_cleanup(
+                    lambda path=staging, root=folder:
+                    remove_owned_directory(path, root))
                 saved = 0
                 available_faces = [event for event in media.faces
                                    if face_event_is_included(media, event)]
@@ -6613,8 +7000,8 @@ class ScenespyApp(QMainWindow):
                             except Exception:
                                 pass
                         target = os.path.join(
-                            destination, f"face_{saved + 1:04d}.png")
-                        __import__("shutil").copy2(event.crop_file, target)
+                            staging, f"face_{saved + 1:04d}.png")
+                        shutil.copy2(event.crop_file, target)
                         saved += 1
                         task.metrics.emit(len(available_faces), saved)
                         task.progress.emit(
@@ -6624,11 +7011,28 @@ class ScenespyApp(QMainWindow):
                         preview_cap.release()
                 if not export_faces:
                     task.progress.emit(1.0, "Exporting faces")
-                with open(os.path.join(destination, "faces.json"), "w", encoding="utf-8") as handle:
-                    json.dump({"source": media.path,
-                               "faces": [vars(event) for event in available_faces],
-                               "faces_exported": saved}, handle, indent=2)
-                return destination
+                try:
+                    if task.isInterruptionRequested():
+                        return None
+                    with open(os.path.join(staging, "faces.json"), "w", encoding="utf-8") as handle:
+                        json.dump({"source": media.path,
+                                   "faces": [vars(event) for event in available_faces],
+                                   "faces_exported": saved}, handle, indent=2)
+                    backup = None
+                    if os.path.exists(destination):
+                        backup = f"{destination}.{uuid.uuid4().hex}.backup"
+                        os.replace(destination, backup)
+                    try:
+                        os.replace(staging, destination)
+                    except Exception:
+                        if backup and os.path.exists(backup):
+                            os.replace(backup, destination)
+                        raise
+                    if backup:
+                        remove_owned_directory(backup, folder)
+                    return destination, exported_path_size(destination)
+                finally:
+                    remove_owned_directory(staging, folder)
             cfg = PROFILES[media.sensitivity].copy()
             cfg.update(ENCODER=accel, INFERENCE="cpu", DEBUG=False)
             if media.frame_times:
@@ -6644,18 +7048,29 @@ class ScenespyApp(QMainWindow):
             engine.scene_mode = media.mode == "scene"
             engine.detected, engine._start_time = len(segments), time.time()
             engine.start_preview()
+            export_complete = False
             try:
                 engine._cut_scenes(segments)
+                if task.isInterruptionRequested():
+                    return None
+                export_complete = True
+                return (engine._cut_output_dir,
+                        exported_path_size(engine._cut_output_dir))
             finally:
                 engine.finish_preview(
                     show_final=not task.isInterruptionRequested())
-            return engine._cut_output_dir
+                if not export_complete:
+                    remove_owned_directory(engine._cut_output_dir, folder)
         self.start_task(
             work, lambda output, target=media: self.export_finished(target, output),
             "Exporting", preview_media=media, minimum_preview_ms=800)
 
     def export_finished(self, media, output):
+        saved_bytes = None
+        if isinstance(output, tuple):
+            output, saved_bytes = output
         media.exported = True
+        self._set_saved_data_summary(saved_bytes)
         if self.current_media is media:
             self._refresh_media_metrics()
         self._refresh_media_item_states()
@@ -6714,6 +7129,7 @@ class ScenespyApp(QMainWindow):
         self._end_edit_preview()
         self._release_frame_decoder()
         self._set_working_ui(True)
+        self._set_saved_data_summary()
         self._set_progress_value(0, immediate=True)
         self.progress_label.setText(label)
         self._refresh_progress_state_icon()
@@ -6959,6 +7375,17 @@ class ScenespyApp(QMainWindow):
             self.face_saved_metric.clear()
         self._sync_progress_metrics_visibility()
 
+    def _set_saved_data_summary(self, byte_count=None):
+        if not hasattr(self, "saved_data_summary"):
+            return
+        if byte_count is None:
+            self.saved_data_summary.clear()
+            self.saved_data_summary.hide()
+            return
+        self.saved_data_summary.setText(
+            f"Saved: {format_file_size(max(0, int(byte_count)))}")
+        self.saved_data_summary.show()
+
     def _sync_progress_metrics_visibility(self):
         if not hasattr(self, "progress_metrics"):
             return
@@ -7136,7 +7563,7 @@ class ScenespyApp(QMainWindow):
 
     def batch_media_finished(self, media, succeeded, result=None):
         if succeeded and result:
-            _media, kind, events, cuts, excluded, removed = result
+            _media, kind, events, cuts, excluded, removed, saved_bytes = result
             media.analyzed = True
             media.exported = True
             media.cuts = list(cuts)
@@ -7149,9 +7576,11 @@ class ScenespyApp(QMainWindow):
             self._batch_analyzed_media.discard(media.media_id)
             self._batch_failed_media.discard(media.media_id)
             self._batch_completed_media.add(media.media_id)
+            self._queue_saved_bytes += max(0, int(saved_bytes))
+            self._set_saved_data_summary(self._queue_saved_bytes)
         else:
-            # Preserve whether the item stopped before (white) or after
-            # analysis (yellow); failures must never enter the green set.
+            # A failed queue item always owns the red error state, regardless
+            # of how far it progressed before the failure.
             self._batch_failed_media.add(media.media_id)
             self._batch_completed_media.discard(media.media_id)
         if not succeeded:
@@ -7189,26 +7618,27 @@ class ScenespyApp(QMainWindow):
                 continue
             name = Path(item_media.path).name
             item.setText(name)
-            if ((item_media is self.processing_media or
-                 item_media.media_id in self._batch_failed_media) and
-                    not item_media.analyzed and
-                    item_media.media_id not in self._batch_analyzed_media):
-                item.setIcon(qta.icon(
-                    "fa6s.circle-arrow-right", color="#ffffff",
-                    scale_factor=.72))
-                item.setToolTip(f"Processing now\n{item_media.path}")
-                item.setForeground(QColor("#ffffff"))
+            if item_media.media_id in self._batch_failed_media:
+                item.setIcon(status_indicator_icon(
+                    "fa6s.circle-xmark", STATUS_ERROR_COLOR))
+                item.setToolTip(f"Process failed\n{item_media.path}")
+                item.setForeground(QColor("#f2a4aa"))
             elif item_media.exported or item_media.media_id in self._batch_completed_media:
-                item.setIcon(qta.icon(
-                    "fa6s.circle-check", color="#38c982",
-                    scale_factor=.72))
+                item.setIcon(status_indicator_icon(
+                    "fa6s.circle-check", STATUS_SUCCESS_COLOR))
                 item.setToolTip(f"Exported\n{item_media.path}")
                 item.setForeground(QColor("#b8e8cf"))
+            elif item_media is self.processing_media:
+                # Queue analysis and export are one continuous process.  Keep
+                # the active item white even after its analysis checkpoint.
+                item.setIcon(status_indicator_icon(
+                    "fa6s.circle-arrow-right", STATUS_PROCESS_COLOR))
+                item.setToolTip(f"Processing now\n{item_media.path}")
+                item.setForeground(QColor("#ffffff"))
             elif (item_media.analyzed or
                   item_media.media_id in self._batch_analyzed_media):
-                item.setIcon(qta.icon(
-                    "fa6s.circle-info", color="#f2c94c",
-                    scale_factor=.72))
+                item.setIcon(status_indicator_icon(
+                    "fa6s.circle-info", STATUS_PENDING_COLOR))
                 item.setToolTip(f"Analyzed · ready to export\n{item_media.path}")
                 item.setForeground(QColor("#eadb91"))
             else:
@@ -7224,16 +7654,16 @@ class ScenespyApp(QMainWindow):
         status = self.progress_label.text()
         spec = None
         if status == "Failed":
-            spec = ("fa6s.circle-xmark", "#d25a65", "Process failed")
+            spec = ("fa6s.circle-xmark", STATUS_ERROR_COLOR, "Process failed")
         elif status == "Stopping":
-            spec = ("fa6s.circle-stop", "#f2c94c", "Stopping process")
+            spec = ("fa6s.circle-stop", STATUS_PROCESS_COLOR, "Stopping process")
         elif media and self._current_media_is_processing():
-            spec = ("fa6s.circle-arrow-right", "#ffffff", "Processing now")
+            spec = ("fa6s.circle-arrow-right", STATUS_PROCESS_COLOR, "Processing now")
         elif media and media.exported and status == "Complete":
-            spec = ("fa6s.circle-check", "#38c982", "Exported")
+            spec = ("fa6s.circle-check", STATUS_SUCCESS_COLOR, "Exported")
         elif (media and media.analyzed and not media.exported and
               status == "Video analyzed"):
-            spec = ("fa6s.circle-info", "#f2c94c",
+            spec = ("fa6s.circle-info", STATUS_PENDING_COLOR,
                     "Analyzed · ready to export")
         if spec is None:
             self.progress_state_icon.clear()
@@ -7241,13 +7671,19 @@ class ScenespyApp(QMainWindow):
             self.progress_state_icon.hide()
             return
         name, color, tooltip = spec
-        icon = qta.icon(name, color=color, scale_factor=.72)
-        self.progress_state_icon.setPixmap(icon.pixmap(QSize(18, 18)))
+        icon = status_indicator_icon(name, color)
+        self.progress_state_icon.setPixmap(icon.pixmap(STATUS_ICON_SIZE))
         self.progress_state_icon.setToolTip(
             f"{tooltip}\n{media.path}" if media else tooltip)
         self.progress_state_icon.show()
 
     def task_done(self, task, callback, result):
+        if task.isRunning():
+            task.finished.connect(
+                lambda t=task, cb=callback, value=result:
+                self.task_done(t, cb, value))
+            return
+
         def finish():
             finished_media = self.processing_media
             self._finish_task_ui(task, task.done_label)
@@ -7269,9 +7705,18 @@ class ScenespyApp(QMainWindow):
             finish()
 
     def task_failed(self, task, message):
+        if task.isRunning():
+            task.finished.connect(
+                lambda t=task, detail=message:
+                self.task_failed(t, detail))
+            return
         self._batch_analyzed_media.clear()
         self._batch_completed_media.clear()
         failed_media = self.processing_media
+        if failed_media:
+            # Keep normal-mode failures visible in Media just like failures
+            # belonging to an automatic queue.
+            self._batch_failed_media.add(failed_media.media_id)
         self._finish_task_ui(task, "Failed")
         if self.current_media:
             self.timeline.rebuild()
@@ -7282,6 +7727,10 @@ class ScenespyApp(QMainWindow):
         task.deleteLater()
 
     def task_cancelled(self, task):
+        if task.isRunning():
+            task.finished.connect(
+                lambda t=task: self.task_cancelled(t))
+            return
         self._batch_analyzed_media.clear()
         self._batch_completed_media.clear()
         cancelled_media = self.processing_media
@@ -7376,6 +7825,9 @@ class ScenespyApp(QMainWindow):
             f"Project imported · {len(project.media)} media item(s)", 5000)
 
     def closeEvent(self, event):
+        if self._shutdown_started:
+            event.accept()
+            return
         if self.task and self.task.isRunning():
             answer = QMessageBox.question(
                 self, "Close Scenespy",
@@ -7385,6 +7837,7 @@ class ScenespyApp(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
+            self._shutdown_started = True
             task = self.task
             task.cancel()
             terminate_all_child_processes(grace_seconds=.5)
@@ -7394,6 +7847,9 @@ class ScenespyApp(QMainWindow):
                     # Final exit-only safeguard for a stuck third-party decoder.
                     task.terminate()
                     task.wait(1000)
+            task.run_cleanups()
+        else:
+            self._shutdown_started = True
         proxy_tasks = list(self._playback_proxy_tasks.values())
         for proxy_task in proxy_tasks:
             if proxy_task.isRunning():
@@ -7401,9 +7857,22 @@ class ScenespyApp(QMainWindow):
         if proxy_tasks:
             terminate_all_child_processes(grace_seconds=.2)
             for proxy_task in proxy_tasks:
-                proxy_task.wait(2000)
-        self._release_frame_decoder()
+                if not proxy_task.wait(3000):
+                    proxy_task.terminate()
+                    proxy_task.wait(1000)
+                proxy_task.run_cleanups()
+        self._playback_proxy_tasks.clear()
+        self._interactive_seek_timer.stop()
+        self.processing_position_animation.stop()
+        self._end_edit_preview()
+        self._end_processing_preview()
+        self._release_frame_decoder(force=True)
         self.player.stop()
+        self.player.setSource(QUrl())
+        self.processing_preview.clear_source()
+        self.selection_preview.clear_source()
+        self.face_review_preview.clear_source()
+        self.timeline.set_media(None)
         terminate_all_child_processes(grace_seconds=.2)
         self._save_workspace_splitter()
         event.accept()

@@ -5,12 +5,34 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 
 from scenespy.project import CutEvent, FaceEvent, MediaItem, ScenespyProject
-from scenespy.qt_app import (final_face_crop_box, parse_timecode, player_timecode,
+from scenespy.qt_app import (exported_path_size, final_face_crop_box,
+                             format_file_size, parse_timecode, player_timecode,
                              primary_modifier, scrub_timecode, timecode,
                              transport_timecode)
 
 
 class ProjectModelTests(unittest.TestCase):
+    def test_file_size_uses_the_correct_scaled_unit(self):
+        self.assertEqual(format_file_size(0), "0 B")
+        self.assertEqual(format_file_size(1023), "1023 B")
+        self.assertEqual(format_file_size(1024), "1 KB")
+        self.assertEqual(format_file_size(60 * 1024 ** 2), "60 MB")
+        self.assertEqual(format_file_size(1024 ** 3), "1 GB")
+        self.assertEqual(format_file_size(3 * 1024 ** 4), "3 TB")
+        self.assertEqual(format_file_size(2 * 1024 ** 8), "2 YB")
+        self.assertEqual(format_file_size(None), "")
+
+    def test_exported_path_size_sums_only_real_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "clips").mkdir()
+            (root / "scene_001.mp4").write_bytes(b"a" * 1024)
+            (root / "clips" / "scene_002.mp4").write_bytes(b"b" * 2048)
+            self.assertEqual(exported_path_size(root), 3072)
+            self.assertEqual(
+                exported_path_size(root / "scene_001.mp4"), 1024)
+            self.assertEqual(exported_path_size(root / "missing"), 0)
+
     def test_primary_modifier_matches_operating_system_conventions(self):
         self.assertEqual(
             primary_modifier("darwin"), Qt.KeyboardModifier.MetaModifier)

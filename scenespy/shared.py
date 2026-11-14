@@ -286,6 +286,65 @@ def save_settings(video="", output=""):
         pass
 
 
+def total_physical_memory():
+    """Best-effort physical RAM detection using only platform APIs."""
+    try:
+        if sys.platform == "win32":
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [
+                    ("length", ctypes.c_ulong),
+                    ("memory_load", ctypes.c_ulong),
+                    ("total_physical", ctypes.c_ulonglong),
+                    ("available_physical", ctypes.c_ulonglong),
+                    ("total_page_file", ctypes.c_ulonglong),
+                    ("available_page_file", ctypes.c_ulonglong),
+                    ("total_virtual", ctypes.c_ulonglong),
+                    ("available_virtual", ctypes.c_ulonglong),
+                    ("available_extended_virtual", ctypes.c_ulonglong),
+                ]
+
+            status = MemoryStatus()
+            status.length = ctypes.sizeof(status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.total_physical)
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+        pages = int(os.sysconf("SC_PHYS_PAGES"))
+        return page_size * pages
+    except (AttributeError, OSError, TypeError, ValueError):
+        return 0
+
+
+def adaptive_cache_profile(cpu_count=None, memory_bytes=None):
+    """Return bounded cache/work limits appropriate for the host machine."""
+    cpus = max(1, int(cpu_count or os.cpu_count() or 4))
+    memory = int(total_physical_memory() if memory_bytes is None else memory_bytes)
+    gib = memory / (1024 ** 3) if memory > 0 else 0
+
+    if cpus <= 4 or (gib and gib < 8):
+        tier = "compact"
+        limits = (8, 384, 192, 8, 1)
+    elif cpus >= 12 and gib >= 24:
+        tier = "expanded"
+        limits = (32, 2048, 1024, 48, 3)
+    else:
+        tier = "balanced"
+        limits = (16, 1024, 512, 20, 2)
+    frame_cache, clip_cache, face_cache, thumbnail_batch, cut_workers = limits
+    return {
+        "tier": tier,
+        "cpu_count": cpus,
+        "memory_bytes": memory,
+        "frame_cache": frame_cache,
+        "clip_thumbnail_cache": clip_cache,
+        "face_thumbnail_cache": face_cache,
+        "thumbnail_batch": thumbnail_batch,
+        "cut_workers": cut_workers,
+    }
+
+
+CACHE_PROFILE = adaptive_cache_profile()
+
+
 PROFILES = {
     "Low": {"label": "Low", "base_threshold": 42, "min_dur": 5.0, "dur_max_boost": 5.0},
     "Normal": {"label": "Normal", "base_threshold": 27, "min_dur": 2.0, "dur_max_boost": 4.0},
@@ -295,7 +354,7 @@ PROFILES = {
 
 # User-tunable defaults and runtime limits.
 ACCEL_OPTIONS = ["cpu", "nvidia", "amd", "intel", "apple"]
-MAX_CUT_WORKERS = 2
+MAX_CUT_WORKERS = CACHE_PROFILE["cut_workers"]
 ENABLE_PREVIEW_DEFAULT = True
 PREVIEW_INTERVAL = 0.2
 INSTANCE_SOCKET = None
@@ -907,11 +966,11 @@ def unregister_child_process(proc):
 
 def terminate_process(proc, grace_seconds=0.5):
     if not proc or proc.poll() is not None:
-        return
+        return True
     try:
         proc.terminate()
         proc.wait(timeout=grace_seconds)
-        return
+        return proc.poll() is not None
     except Exception:
         pass
     try:
@@ -920,15 +979,19 @@ def terminate_process(proc, grace_seconds=0.5):
             proc.wait(timeout=grace_seconds)
     except Exception:
         pass
+    return proc.poll() is not None
 
 
 def terminate_all_child_processes(grace_seconds=0.5):
     with _CHILD_PROCS_LOCK:
         procs = list(_CHILD_PROCS)
-    for proc in procs:
-        terminate_process(proc, grace_seconds=grace_seconds)
+    stopped = {
+        proc for proc in procs
+        if terminate_process(proc, grace_seconds=grace_seconds)
+    }
     with _CHILD_PROCS_LOCK:
-        _CHILD_PROCS.difference_update(procs)
+        # Keep resistant live processes registered so close/atexit can retry.
+        _CHILD_PROCS.difference_update(stopped)
 
 
 def run_hidden_cancelable(cmd, stop_cb=None, poll_interval=0.05,

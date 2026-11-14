@@ -9,10 +9,10 @@ from scenespy.qt_app import (ScenespyApp, TimelineView, clip_preview_candidates,
 
 
 class TimelineMappingTests(unittest.TestCase):
-    def test_stopping_clip_preview_clears_activity_state_and_status(self):
+    def test_stopping_clip_preview_preserves_timed_duration_label(self):
         class Status:
             def __init__(self):
-                self.message = "Previewing clip · 00:01.000 / 00:03.000 · 50%"
+                self.message = "Previewing clip · 00:01.000 / 00:03.000"
                 self.timeout = None
 
             def currentMessage(self):
@@ -45,7 +45,7 @@ class TimelineMappingTests(unittest.TestCase):
         self.assertFalse(host._segment_preview_status_active)
         self.assertEqual(status.message, "Clip preview stopped")
         self.assertEqual(status.timeout, 3000)
-        self.assertEqual(cleared, [True])
+        self.assertEqual(cleared, [])
 
     @staticmethod
     def _timeline_host(media):
