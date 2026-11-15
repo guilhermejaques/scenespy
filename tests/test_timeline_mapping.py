@@ -9,6 +9,144 @@ from scenespy.qt_app import (ScenespyApp, TimelineView, clip_preview_candidates,
 
 
 class TimelineMappingTests(unittest.TestCase):
+    def test_timeline_invalidates_playhead_before_scene_destroys_items(self):
+        observations = []
+        host = SimpleNamespace(playhead=object())
+        host.scene = lambda: SimpleNamespace(
+            clear=lambda: observations.append(host.playhead))
+
+        TimelineView._clear_scene_items(host)
+
+        self.assertEqual(observations, [None])
+        self.assertIsNone(host.playhead)
+
+    def test_processing_lock_visibly_dims_and_restores_timeline(self):
+        class Effect:
+            opacity = None
+
+            def setOpacity(self, value):
+                self.opacity = value
+
+        effect = Effect()
+        host = SimpleNamespace(timeline_lock_effect=effect)
+
+        ScenespyApp._set_timeline_locked_visual(host, True)
+        self.assertEqual(effect.opacity, .58)
+        ScenespyApp._set_timeline_locked_visual(host, False)
+        self.assertEqual(effect.opacity, 1.0)
+
+    def test_live_queue_segments_use_full_rebuild_without_committing(self):
+        original_cut = CutEvent(10)
+        media = MediaItem(
+            "video.mp4", duration=4, fps=25, total_frames=100,
+            cuts=[original_cut], excluded_segments=[1], removed_segments=[2],
+            analyzed=False)
+        live_cuts = [CutEvent(30), CutEvent(70)]
+        rendered = []
+        timeline = SimpleNamespace(media=media)
+
+        def rebuild():
+            rendered.append((
+                [cut.frame for cut in media.cuts],
+                list(media.removed_segments),
+                list(media.excluded_segments),
+                media.analyzed,
+            ))
+
+        timeline.rebuild = rebuild
+        TimelineView.show_live_segments(
+            timeline, media, live_cuts, [2], load_thumbnails=True)
+
+        self.assertEqual(rendered, [([30, 70], [2], [], True)])
+        self.assertEqual(media.cuts, [original_cut])
+        self.assertEqual(media.excluded_segments, [1])
+        self.assertEqual(media.removed_segments, [2])
+        self.assertFalse(media.analyzed)
+        self.assertEqual(timeline._live_segment_media_id, media.media_id)
+
+    def test_final_live_queue_segments_enable_indicators_and_thumbnails(self):
+        media = MediaItem(
+            "video.mp4", duration=4, fps=25, total_frames=100,
+            analyzed=False)
+        calls = []
+        task = SimpleNamespace(live_segments={})
+        host = SimpleNamespace(
+            task=task,
+            current_media=media,
+            timeline=SimpleNamespace(
+                show_live_segments=lambda *args, **kwargs:
+                calls.append((args, kwargs))))
+        cuts = [CutEvent(25), CutEvent(50)]
+
+        ScenespyApp._live_segments_found(
+            host, media, (cuts, [], True))
+
+        self.assertTrue(calls[0][1]["load_thumbnails"])
+        self.assertEqual(task.live_segments[media.media_id],
+                         (cuts, [], True))
+
+    def test_progressive_live_segments_defer_thumbnails(self):
+        media = MediaItem(
+            "video.mp4", duration=4, fps=25, total_frames=100,
+            analyzed=False)
+        calls = []
+        host = SimpleNamespace(
+            task=SimpleNamespace(live_segments={}),
+            current_media=media,
+            timeline=SimpleNamespace(
+                show_live_segments=lambda *args, **kwargs:
+                calls.append((args, kwargs))))
+
+        ScenespyApp._live_segments_found(
+            host, media, ([CutEvent(25)], [], False))
+
+        self.assertFalse(calls[0][1]["load_thumbnails"])
+
+    def test_queue_transport_uses_uncommitted_live_cut_layout(self):
+        media = MediaItem(
+            "video.mp4", duration=4, fps=25, total_frames=100,
+            cuts=[], analyzed=False)
+        live_cuts = [CutEvent(25), CutEvent(50), CutEvent(75)]
+        host = SimpleNamespace(
+            current_media=media,
+            processing_media=media,
+            task=SimpleNamespace(live_segments={
+                media.media_id: (live_cuts, [2], True)}))
+
+        ranges = ScenespyApp._timeline_ranges(host, media)
+
+        self.assertEqual(ranges, [(0, 25), (50, 75), (75, 100)])
+
+    def test_queue_cut_preview_rewinds_transport_before_export(self):
+        media = MediaItem(
+            "video.mp4", duration=4, fps=25, total_frames=100)
+        events = []
+        ready = SimpleNamespace(set=lambda: events.append("ready"))
+        task = SimpleNamespace(
+            cut_preview_ready=ready, media_progress={})
+        animation = SimpleNamespace(stop=lambda: events.append("stop"))
+        label = SimpleNamespace(
+            setText=lambda text: events.append(("label", text)))
+        host = SimpleNamespace(
+            task=task,
+            batch_active=True,
+            processing_media=media,
+            processing_position_animation=animation,
+            progress_label=label,
+            _processing_preview_selected=lambda: True,
+            _set_progress_value=lambda value, immediate=False:
+            events.append(("progress", value, immediate)),
+            _sync_processing_position=lambda value:
+            events.append(("position", value)))
+
+        ScenespyApp._prepare_queue_cut_preview(host, media)
+
+        self.assertIn(("position", 0.0), events)
+        self.assertIn(("progress", 0, True), events)
+        self.assertEqual(task.media_progress[media.media_id],
+                         (0, "Cutting clips"))
+        self.assertEqual(events[-1], "ready")
+
     def test_stopping_clip_preview_preserves_timed_duration_label(self):
         class Status:
             def __init__(self):

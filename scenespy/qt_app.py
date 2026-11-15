@@ -30,6 +30,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGraphicsItem, QGraphicsLineItem,
+    QGraphicsOpacityEffect,
     QGraphicsRectItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSlider,
     QScrollBar, QSizePolicy, QSpinBox, QSplitter, QStackedLayout, QStatusBar, QStyle,
@@ -75,6 +76,7 @@ SCENE_THUMBNAIL_SIZE = QSize(72, 42)
 FACE_THUMBNAIL_SIZE = QSize(80, 52)
 INDICATOR_PLAY_POINTS = (
     QPointF(-2.5, -4), QPointF(4, 0), QPointF(-2.5, 4))
+QUEUE_RESULT_PREVIEW_MIN_MS = 900
 
 
 def primary_modifier(platform=None):
@@ -965,6 +967,7 @@ class Task(QThread):
     media_started = Signal(object)
     media_analyzed = Signal(object)
     media_finished = Signal(object, bool, object)
+    cut_preview_started = Signal(object)
     result = Signal(object)
     failed = Signal(str)
     cancelled = Signal()
@@ -979,6 +982,11 @@ class Task(QThread):
         self.media_progress = {}
         self.live_faces = {}
         self.live_segments = {}
+        self.media_result_ready_at = {}
+        # Queue workers wait for the UI to select and prepare each video's
+        # preview before a very fast analysis (notably Every Seconds) starts.
+        self.preview_ready = threading.Event()
+        self.cut_preview_ready = threading.Event()
         self._cleanup_callbacks = []
 
     def register_cancel(self, callback):
@@ -1159,6 +1167,59 @@ class FramePreviewDecoder(QThread):
                 self._last_frame = None
         if self._container is not None:
             self._container.close()
+
+
+class ClipThumbnailDecodeTask(QThread):
+    """Decode one small timeline-thumbnail batch away from the Qt UI thread."""
+    def __init__(self, path, jobs, parent=None):
+        super().__init__(parent)
+        self.path = str(path)
+        self.jobs = list(jobs)
+        self.results = []
+
+    @staticmethod
+    def _thumbnail_image(image):
+        height, width = image.shape[:2]
+        target_width = SCENE_THUMBNAIL_SIZE.width()
+        target_height = SCENE_THUMBNAIL_SIZE.height()
+        target_ratio = target_width / target_height
+        if width / max(1, height) > target_ratio:
+            crop_width = max(1, round(height * target_ratio))
+            left = max(0, (width - crop_width) // 2)
+            image = image[:, left:left + crop_width]
+        else:
+            crop_height = max(1, round(width / target_ratio))
+            top = max(0, (height - crop_height) // 2)
+            image = image[top:top + crop_height, :]
+        image = cv2.resize(
+            image, (target_width, target_height),
+            interpolation=cv2.INTER_AREA)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        return QImage(
+            image.data, target_width, target_height,
+            target_width * 3, QImage.Format.Format_RGB888).copy()
+
+    def run(self):
+        cap = cv2.VideoCapture(self.path)
+        try:
+            for key, frame, end_frame in self.jobs:
+                if self.isInterruptionRequested():
+                    return
+                image, source_frame = None, None
+                if cap.isOpened():
+                    for candidate in clip_preview_candidates(frame, end_frame):
+                        if self.isInterruptionRequested():
+                            return
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, candidate)
+                        ok, decoded = cap.read()
+                        if ok and decoded is not None:
+                            image, source_frame = decoded, candidate
+                            break
+                qimage = (self._thumbnail_image(image)
+                          if image is not None else QImage())
+                self.results.append((key, qimage, source_frame))
+        finally:
+            cap.release()
 
 
 class ProgressAdapter:
@@ -1786,7 +1847,11 @@ class TimelineZoomScrollBar(QScrollBar):
             self.timeline.minimum_pixels_per_second(),
             min(500.0, self._start_pps * (2.0 ** exponent)))
         now = time.monotonic()
-        if now - self._last_zoom_rebuild < 1 / 30:
+        # Recreating a dense graphics scene faster than it can be painted only
+        # queues mouse events and makes the grip feel stuck. Sparse timelines
+        # retain the 30 Hz path; dense ones leave enough time for input/paint.
+        zoom_hz = 12 if len(self.timeline._indicator_items) > 60 else 30
+        if now - self._last_zoom_rebuild < 1 / zoom_hz:
             event.accept()
             return
         self._apply_zoom_frame()
@@ -1860,15 +1925,32 @@ class TimelineView(QGraphicsView):
         self._clip_thumbnail_source_frames = OrderedDict()
         self._face_thumbnail_cache = OrderedDict()
         self._clip_thumbnail_attempted = set()
+        self._clip_thumbnail_decoder = None
+        self._clip_thumbnail_pending = set()
         self._face_thumbnail_attempted = set()
         self._clip_thumbnail_limit = CACHE_PROFILE["clip_thumbnail_cache"]
         self._face_thumbnail_limit = CACHE_PROFILE["face_thumbnail_cache"]
-        self._thumbnail_batch_size = CACHE_PROFILE["thumbnail_batch"]
+        # Clip frames are decoded by ClipThumbnailDecodeTask, so use the
+        # machine profile to avoid rebuilding the entire graphics scene after
+        # every couple of thumbnails. Face crops still load on the UI thread
+        # and therefore retain deliberately small batches.
+        self._clip_thumbnail_batch_size = CACHE_PROFILE["thumbnail_batch"]
+        self._face_thumbnail_batch_size = min(
+            2, CACHE_PROFILE["thumbnail_batch"])
         self._thumbnail_rebuild_pending = False
+        self._wheel_zoom_factor = 1.0
+        self._wheel_zoom_x = None
+        self._wheel_zoom_timer = QTimer(self)
+        self._wheel_zoom_timer.setSingleShot(True)
+        self._wheel_zoom_timer.setInterval(50)
+        self._wheel_zoom_timer.timeout.connect(self._apply_wheel_zoom)
         self._live_face_media_id = None
         self._live_face_ids = set()
         self._live_face_lane_right_edges = []
         self._live_segment_media_id = None
+        self._live_segment_cuts = None
+        self._live_segment_removed = None
+        self._live_segment_load_thumbnails = False
         self._clip_duration_label = None
         self._hover_guide = None
         self._hover_time_bubble = QLabel(None, Qt.WindowType.ToolTip)
@@ -1945,57 +2027,21 @@ class TimelineView(QGraphicsView):
         keys = {int(frame): (*token, int(frame)) for frame in frames}
         missing = [int(frame) for frame in frames
                    if (keys[int(frame)] not in self._clip_thumbnail_cache and
-                       keys[int(frame)] not in self._clip_thumbnail_attempted)]
-        if missing:
-            decode_now = missing[:self._thumbnail_batch_size]
-            if len(missing) > len(decode_now):
-                self._schedule_thumbnail_rebuild()
+                       keys[int(frame)] not in self._clip_thumbnail_attempted and
+                       keys[int(frame)] not in self._clip_thumbnail_pending)]
+        if missing and self._clip_thumbnail_decoder is None:
+            decode_now = missing[:self._clip_thumbnail_batch_size]
             frame_ends = frame_ends or {}
-            for frame in decode_now:
-                self._clip_thumbnail_attempted.add(keys[frame])
-            cap = cv2.VideoCapture(path)
-            try:
-                if cap.isOpened():
-                    for frame in decode_now:
-                        key = keys[frame]
-                        ok, image = False, None
-                        end_frame = frame_ends.get(frame, frame + 1)
-                        for candidate in clip_preview_candidates(frame, end_frame):
-                            cap.set(cv2.CAP_PROP_POS_FRAMES, candidate)
-                            ok, image = cap.read()
-                            if ok and image is not None:
-                                break
-                        if not ok or image is None:
-                            self._remember_clip_thumbnail(
-                                key, QPixmap(), None)
-                            continue
-                        height, width = image.shape[:2]
-                        target_width = SCENE_THUMBNAIL_SIZE.width()
-                        target_height = SCENE_THUMBNAIL_SIZE.height()
-                        target_ratio = target_width / target_height
-                        if width / max(1, height) > target_ratio:
-                            crop_width = max(1, round(height * target_ratio))
-                            left = max(0, (width - crop_width) // 2)
-                            image = image[:, left:left + crop_width]
-                        else:
-                            crop_height = max(1, round(width / target_ratio))
-                            top = max(0, (height - crop_height) // 2)
-                            image = image[top:top + crop_height, :]
-                        image = cv2.resize(
-                            image, (target_width, target_height),
-                            interpolation=cv2.INTER_AREA)
-                        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                        qimage = QImage(
-                            image.data, target_width, target_height,
-                            target_width * 3, QImage.Format.Format_RGB888).copy()
-                        self._remember_clip_thumbnail(
-                            key, QPixmap.fromImage(qimage), candidate)
-                else:
-                    for frame in decode_now:
-                        self._remember_clip_thumbnail(
-                            keys[frame], QPixmap(), None)
-            finally:
-                cap.release()
+            jobs = [
+                (keys[frame], frame, frame_ends.get(frame, frame + 1))
+                for frame in decode_now]
+            self._clip_thumbnail_pending.update(key for key, _frame, _end in jobs)
+            decoder = ClipThumbnailDecodeTask(path, jobs, self)
+            self._clip_thumbnail_decoder = decoder
+            decoder.finished.connect(
+                lambda current=decoder:
+                self._clip_thumbnail_decode_finished(current))
+            decoder.start()
         thumbnails = {}
         for frame in frames:
             key = keys[int(frame)]
@@ -2005,6 +2051,34 @@ class TimelineView(QGraphicsView):
                 self._clip_thumbnail_source_frames.move_to_end(key)
             thumbnails[frame] = pixmap
         return thumbnails
+
+    def _clip_thumbnail_decode_finished(self, decoder):
+        if self._clip_thumbnail_decoder is decoder:
+            self._clip_thumbnail_decoder = None
+        interrupted = decoder.isInterruptionRequested()
+        for key, image, source_frame in decoder.results:
+            self._clip_thumbnail_pending.discard(key)
+            self._clip_thumbnail_attempted.add(key)
+            if not interrupted:
+                self._remember_clip_thumbnail(
+                    key,
+                    QPixmap.fromImage(image) if not image.isNull() else QPixmap(),
+                    source_frame)
+        for key, _frame, _end in decoder.jobs:
+            self._clip_thumbnail_pending.discard(key)
+        decoder.deleteLater()
+        if not interrupted and self.media:
+            self._schedule_thumbnail_rebuild()
+
+    def stop_thumbnail_decoder(self, timeout_ms=3000):
+        decoder = self._clip_thumbnail_decoder
+        if decoder is None:
+            return True
+        decoder.requestInterruption()
+        stopped = decoder.wait(max(0, int(timeout_ms)))
+        if stopped and self._clip_thumbnail_decoder is decoder:
+            self._clip_thumbnail_decoder = None
+        return stopped
 
     @staticmethod
     def _thumbnail_file_token(path):
@@ -2030,10 +2104,23 @@ class TimelineView(QGraphicsView):
 
         def rebuild_next_batch():
             self._thumbnail_rebuild_pending = False
+            scrollbar = self.horizontalScrollBar()
+            if (isinstance(scrollbar, TimelineZoomScrollBar) and
+                    scrollbar._zoom_edge is not None):
+                self._schedule_thumbnail_rebuild()
+                return
             if self.media:
-                self.rebuild()
+                if (self._live_segment_media_id == self.media.media_id and
+                        self._live_segment_cuts is not None and
+                        not self.media.analyzed):
+                    self.show_live_segments(
+                        self.media, self._live_segment_cuts,
+                        self._live_segment_removed or [],
+                        load_thumbnails=self._live_segment_load_thumbnails)
+                else:
+                    self.rebuild()
 
-        QTimer.singleShot(0, rebuild_next_batch)
+        QTimer.singleShot(16, rebuild_next_batch)
 
     def clip_thumbnail_source_frame(self, start_frame, end_frame):
         """Return the cached source frame used by a clip indicator."""
@@ -2058,9 +2145,9 @@ class TimelineView(QGraphicsView):
             if (key not in self._face_thumbnail_cache and
                     key not in self._face_thumbnail_attempted):
                 pending.append((event, path, key))
-        if len(pending) > self._thumbnail_batch_size:
+        if len(pending) > self._face_thumbnail_batch_size:
             self._schedule_thumbnail_rebuild()
-        for _event, path, key in pending[:self._thumbnail_batch_size]:
+        for _event, path, key in pending[:self._face_thumbnail_batch_size]:
             self._face_thumbnail_attempted.add(key)
             if key not in self._face_thumbnail_cache:
                 pixmap = load_fresh_pixmap(path)
@@ -2100,6 +2187,11 @@ class TimelineView(QGraphicsView):
     def discard_media_cache(self, media):
         """Release in-memory thumbnails owned by a removed media item."""
         video_path = os.path.abspath(media.path)
+        decoder = self._clip_thumbnail_decoder
+        if (decoder is not None and
+                os.path.normcase(os.path.abspath(decoder.path)) ==
+                os.path.normcase(video_path)):
+            decoder.requestInterruption()
         face_paths = {
             os.path.abspath(event.crop_file)
             for event in media.faces if event.crop_file}
@@ -2152,15 +2244,24 @@ class TimelineView(QGraphicsView):
             previous = palette_index
         return colors
 
+    def _clear_scene_items(self):
+        # scene.clear() destroys C++ graphics items synchronously.  Invalidate
+        # the reference first so re-entrant control updates remain safe.
+        self.playhead = None
+        self.scene().clear()
+
     def rebuild(self):
         self._live_face_media_id = None
         self._live_face_ids = set()
         self._live_face_lane_right_edges = []
         self._live_segment_media_id = None
+        self._live_segment_cuts = None
+        self._live_segment_removed = None
+        self._live_segment_load_thumbnails = False
         self._clip_duration_label = None
         self._hover_guide = None
         self._hover_time_bubble.hide()
-        self.scene().clear()
+        self._clear_scene_items()
         self._indicator_items = []
         self._indicator_lefts = []
         self._active_indicator_items = set()
@@ -2394,53 +2495,40 @@ class TimelineView(QGraphicsView):
             item for item in self._active_indicator_items
             if not isinstance(item, ClipPreviewChip)}
         self._live_segment_media_id = media.media_id
+        self._live_segment_cuts = None
+        self._live_segment_removed = None
+        self._live_segment_load_thumbnails = False
 
     def show_live_segments(self, media, cuts, removed, load_thumbnails=True):
-        """Draw finalized analysis clips once, reusing their cached thumbnails."""
+        """Render the complete transient cut timeline without committing it."""
         if media is not self.media:
             return
-        self.begin_live_segments(media)
-        boundaries = [0, *(cut.frame for cut in sorted(
-            cuts, key=lambda event: event.frame)), media.total_frames]
-        removed = set(removed)
-        visible = [
-            (start, end, index)
-            for index, (start, end) in enumerate(
-                zip(boundaries, boundaries[1:]), 1)
-            if index not in removed]
-        if not visible:
-            return
-        # Live results can precede the project commit, so derive their ripple
-        # layout from the supplied cuts while keeping the same canonical media
-        # time mapping used by the committed timeline.
-        display_starts = {}
-        display_total = 0.0
-        for start, end, index in visible:
-            display_starts[index] = display_total
-            display_total += max(
-                0.0,
-                media.seconds_for_frame(end) - media.seconds_for_frame(start),
-            )
-        frames = [clip_preview_frame(start, end)
-                  for start, end, _index in visible]
-        frame_ends = {clip_preview_frame(start, end): end
-                      for start, end, _index in visible}
-        thumbnails = (self._clip_thumbnails(frames, frame_ends)
-                      if load_thumbnails else {})
-        colors = self._segment_colors(len(boundaries) - 1)
-        for start, end, index in visible:
-            x = (display_starts[index] / max(0.001, display_total) *
-                 self.content_width)
-            chip = ClipPreviewChip(
-                start, end, index, x, self, None,
-                thumbnails.get(clip_preview_frame(start, end)), True,
-                colors[index - 1], live_preview=True)
-            self.scene().addItem(chip)
-            self._indicator_items.append((x, x + 40, chip))
-        self._indicator_items.sort(key=lambda entry: entry[0])
-        self._indicator_lefts = [entry[0] for entry in self._indicator_items]
-        if self.playhead:
-            self._update_playhead_indicators(self.playhead.x())
+        # Reuse the exact normal-mode renderer so segment blocks, cut handles,
+        # ripple positions, labels, playhead mapping, and final thumbnails are
+        # identical.  Restore the model immediately: live queue results remain
+        # visual-only until that item actually completes successfully.
+        saved = (
+            media.cuts,
+            media.removed_segments,
+            media.excluded_segments,
+            media.analyzed,
+        )
+        try:
+            media.cuts = list(cuts)
+            media.removed_segments = list(removed)
+            media.excluded_segments = []
+            # Progressive layouts draw precise colored segments without doing
+            # repeated thumbnail I/O.  The finalized layout uses the same
+            # full-quality thumbnails as normal mode.
+            media.analyzed = bool(load_thumbnails)
+            self.rebuild()
+        finally:
+            (media.cuts, media.removed_segments,
+             media.excluded_segments, media.analyzed) = saved
+        self._live_segment_media_id = media.media_id
+        self._live_segment_cuts = list(cuts)
+        self._live_segment_removed = list(removed)
+        self._live_segment_load_thumbnails = bool(load_thumbnails)
 
     def clear_clip_duration(self):
         self._clip_duration_timer.stop()
@@ -2917,12 +3005,22 @@ class TimelineView(QGraphicsView):
 
     def wheelEvent(self, event):
         if self.media and event.modifiers() & primary_modifier():
-            self.zoom_by_factor(
-                1.18 if event.angleDelta().y() > 0 else .85,
-                event.position().x())
+            self._wheel_zoom_factor *= (
+                1.18 if event.angleDelta().y() > 0 else .85)
+            self._wheel_zoom_x = float(event.position().x())
+            if not self._wheel_zoom_timer.isActive():
+                self._wheel_zoom_timer.start()
             event.accept()
             return
         super().wheelEvent(event)
+
+    def _apply_wheel_zoom(self):
+        factor = self._wheel_zoom_factor
+        viewport_x = self._wheel_zoom_x
+        self._wheel_zoom_factor = 1.0
+        self._wheel_zoom_x = None
+        if self.media and abs(factor - 1.0) > 1e-9:
+            self.zoom_by_factor(factor, viewport_x)
 
     def zoom_by_factor(self, factor, viewport_x=None):
         if not self.media:
@@ -3136,7 +3234,7 @@ class ScenespyApp(QMainWindow):
             Qt.AlignmentFlag.AlignTop,
         )
         media_header.addStretch()
-        self.auto_process = QCheckBox("Auto process")
+        self.auto_process = QCheckBox("Auto process queue")
         self.auto_process.setObjectName("batchSwitch")
         self.auto_process.setToolTip(
             "Processes two or more media items sequentially and saves each result in the selected output folder.")
@@ -3188,7 +3286,10 @@ class ScenespyApp(QMainWindow):
         viewer.setMinimumHeight(350)
         self.viewer_panel = viewer
         view_layout = QVBoxLayout(viewer)
-        self.media_info = QLabel(self.menuBar())
+        # Keep this overlay in the window's coordinate system.  A child of the
+        # menu bar inherits its style/content offsets, which makes its apparent
+        # left edge drift away from the player as the window is resized.
+        self.media_info = QLabel(self)
         self.media_info.setObjectName("mediaInfo")
         self.media_info.setTextFormat(Qt.TextFormat.RichText)
         self.media_info.setAlignment(
@@ -3321,6 +3422,11 @@ class ScenespyApp(QMainWindow):
         view_layout.addWidget(self.transport_group)
         center.addWidget(viewer)
         self.timeline = TimelineView()
+        self.timeline_lock_effect = QGraphicsOpacityEffect(
+            self.timeline.viewport())
+        self.timeline_lock_effect.setOpacity(1.0)
+        self.timeline.viewport().setGraphicsEffect(
+            self.timeline_lock_effect)
         self.timeline.show_milliseconds = self.show_milliseconds
         self.seek.show_milliseconds = self.show_milliseconds
         self.timeline.seekRequested.connect(self._request_timeline_seek)
@@ -3617,17 +3723,20 @@ class ScenespyApp(QMainWindow):
         if not hasattr(self, "media_info") or not hasattr(self, "video_backdrop"):
             return
         menu_bar = self.menuBar()
-        player_left = self.video_backdrop.mapTo(
-            menu_bar, self.video_backdrop.rect().topLeft()).x()
-        left = player_left
-        right = player_left + self.video_backdrop.width()
+        player_top_left = self.mapFromGlobal(
+            self.video_backdrop.mapToGlobal(QPoint(0, 0)))
+        left = player_top_left.x()
+        right = left + self.video_backdrop.width()
         corner = menu_bar.cornerWidget(Qt.Corner.TopRightCorner)
         if corner is not None and corner.isVisible():
-            right = min(right, corner.geometry().left() - 6)
-        left = max(0, min(left, menu_bar.width()))
-        right = max(left, min(right, menu_bar.width()))
+            corner_left = self.mapFromGlobal(
+                corner.mapToGlobal(QPoint(0, 0))).x()
+            right = min(right, corner_left - 6)
+        menu_top = self.mapFromGlobal(menu_bar.mapToGlobal(QPoint(0, 0))).y()
+        left = max(0, min(left, self.width()))
+        right = max(left, min(right, self.width()))
         self.media_info.setGeometry(
-            left, 0, max(0, right - left), menu_bar.height())
+            left, menu_top, max(0, right - left), menu_bar.height())
         self.media_info.raise_()
 
     def _restore_workspace_splitter(self):
@@ -4238,7 +4347,7 @@ class ScenespyApp(QMainWindow):
             themed_icon(
                 "fa6s.toggle-on" if self.auto_process.isChecked() else "fa6s.toggle-off",
                 ACCENT, scale_factor=.85),
-            "Auto process", menu, hover_color=ACCENT)
+            "Auto process queue", menu, hover_color=ACCENT)
         auto_action = QWidgetAction(menu)
         auto_action.setDefaultWidget(auto_item)
         menu.addAction(auto_action)
@@ -4844,6 +4953,22 @@ class ScenespyApp(QMainWindow):
         media = media or self.current_media
         if not media:
             return []
+        # Queue results stay transactional until that item has exported, but
+        # its preview transport must already follow the exact finalized cut
+        # layout visible in the timeline.
+        task = getattr(self, "task", None)
+        if task and getattr(self, "processing_media", None) is media:
+            live = task.live_segments.get(media.media_id)
+            if live is not None:
+                cuts, live_removed, _finalized = live
+                if cuts is not None:
+                    boundaries = [
+                        0, *(cut.frame for cut in cuts), media.total_frames]
+                    removed = set(live_removed or [])
+                    return [
+                        segment for index, segment in enumerate(
+                            zip(boundaries, boundaries[1:]), 1)
+                        if index not in removed]
         removed = set(media.removed_segments)
         return [segment for index, segment in enumerate(media.segments(), 1)
                 if index not in removed]
@@ -5568,6 +5693,7 @@ class ScenespyApp(QMainWindow):
         locked = self._current_media_is_processing()
         controls_enabled = has_media and not locked
         self.timeline.setEnabled(controls_enabled)
+        self._set_timeline_locked_visual(locked)
         self.seek.setEnabled(controls_enabled)
         self.clock.setEnabled(controls_enabled)
         self.duration_clock.setEnabled(controls_enabled)
@@ -5594,6 +5720,11 @@ class ScenespyApp(QMainWindow):
         else:
             self.play_button.setToolTip("Play / Pause")
             self._update_play_button(self.player.playbackState())
+
+    def _set_timeline_locked_visual(self, locked):
+        effect = getattr(self, "timeline_lock_effect", None)
+        if effect is not None:
+            effect.setOpacity(.58 if locked else 1.0)
 
     def _show_processing_frame(self, image, seconds=-1.0):
         if not self._processing_preview_active or image is None:
@@ -6475,6 +6606,28 @@ class ScenespyApp(QMainWindow):
             end > start and index not in unavailable
             for index, (start, end) in enumerate(media.segments(), 1))
 
+    @staticmethod
+    def _media_is_queue_eligible(media):
+        """Return whether a new queue may take ownership of this media."""
+        # An analyzed item is an independent project awaiting export.  A new
+        # queue must leave its results, edits, and settings untouched.
+        return bool(media and not media.analyzed and not media.exported)
+
+    @classmethod
+    def _queue_candidates(cls, media_items):
+        return [media for media in media_items
+                if cls._media_is_queue_eligible(media)]
+
+    @staticmethod
+    def _queue_result_preview_remaining(
+            ready_at, now=None,
+            minimum_ms=QUEUE_RESULT_PREVIEW_MIN_MS):
+        if ready_at is None:
+            return 0.0
+        now = time.monotonic() if now is None else float(now)
+        elapsed = max(0.0, now - float(ready_at))
+        return max(0.0, float(minimum_ms) / 1000.0 - elapsed)
+
     def _analysis_edit_plan(self, media):
         segments = list(media.segments())
         excluded_indexes = set(media.excluded_segments)
@@ -6678,7 +6831,8 @@ class ScenespyApp(QMainWindow):
         self.start_task(
             work, lambda result, target=media: self.analysis_finished(target, result),
             "Analyzing video", preview_media=media,
-            done_label="Video analyzed")
+            done_label="Video analyzed",
+            minimum_preview_ms=(900 if mode == "interval" else 0))
 
     def _process_batch_item(self, task, media, edit_plan, output, mode,
                             sensitivity, interval, accel):
@@ -6738,6 +6892,8 @@ class ScenespyApp(QMainWindow):
                     live_timeline[:] = mapped
                 task.segments_found.emit(
                     media, (mapped[0], mapped[2], finalized))
+                if finalized:
+                    task.media_result_ready_at[media.media_id] = time.monotonic()
             engine = SceneEngine(
                 analysis_path, output, cfg, LogAdapter(task), ProgressAdapter(task),
                 previewer=previewer, preview_enabled=True,
@@ -6757,20 +6913,36 @@ class ScenespyApp(QMainWindow):
                 cuts, excluded, removed = self._mapped_timeline(
                     mapping, analysis_boundaries, mode,
                     excluded_ranges, removed_ranges)
+                task.segments_found.emit(
+                    media, (cuts, removed, True))
+                task.media_result_ready_at[media.media_id] = time.monotonic()
             boundaries = [0, *(cut.frame for cut in cuts), media.total_frames]
             unavailable = set(excluded) | set(removed)
             export_segments = [segment for segment_index, segment in enumerate(
                 zip(boundaries, boundaries[1:]), 1)
                 if segment_index not in unavailable]
             task.media_analyzed.emit(media)
+            task.cut_preview_ready.clear()
+            task.cut_preview_started.emit(media)
+            while (not task.isInterruptionRequested() and
+                   not task.cut_preview_ready.wait(.025)):
+                pass
+            if task.isInterruptionRequested():
+                raise RuntimeError("Video processing was cancelled")
             if media.frame_times:
                 cfg["FRAME_TIMES"] = media.frame_times
             exporter = SceneEngine(
                 media.path, output, cfg, LogAdapter(task), ProgressAdapter(task),
-                preview_enabled=False)
+                previewer=PreviewAdapter(task), preview_enabled=True,
+                preview_frames=[
+                    frame
+                    for start, end in export_segments
+                    for frame in (start, max(start, end - 1))])
             exporter.scene_mode = mode == "scene"
+            exporter.detected = len(export_segments)
             exporter._start_time = time.time()
             task.register_cancel(exporter.stop)
+            exporter.start_preview()
             export_complete = False
             try:
                 exporter._cut_scenes(export_segments)
@@ -6778,6 +6950,8 @@ class ScenespyApp(QMainWindow):
                     raise RuntimeError("Video processing was cancelled")
                 export_complete = True
             finally:
+                exporter.finish_preview(
+                    show_final=not task.isInterruptionRequested())
                 if not export_complete:
                     remove_owned_directory(exporter._cut_output_dir, output)
             return (media, "cuts", cuts, cuts, excluded, removed,
@@ -6796,6 +6970,12 @@ class ScenespyApp(QMainWindow):
             self.statusBar().showMessage(
                 "A queue requires at least two videos in Media.", 6000)
             return
+        media_queue = self._queue_candidates(self.project.media)
+        if not media_queue:
+            self.statusBar().showMessage(
+                "Queue has no new videos to process. Pending exports were left unchanged.",
+                5000)
+            return
         output = self.project.output_folder
         if not output or not os.path.isdir(output):
             output = QFileDialog.getExistingDirectory(
@@ -6808,11 +6988,6 @@ class ScenespyApp(QMainWindow):
                 return
             self.project.output_folder = output
             self.output_button.setToolTip(f"Output folder: {output}")
-        # Resume checkpoints without repeating items already exported.
-        media_queue = [media for media in self.project.media if not media.exported]
-        if not media_queue:
-            self.statusBar().showMessage("Queue is already complete.", 4000)
-            return
         empty_media = [media for media in media_queue
                        if not self._media_has_processable_frames(media)]
         if empty_media:
@@ -6848,32 +7023,60 @@ class ScenespyApp(QMainWindow):
         def work(task):
             completed, failures = [], []
             total = len(media_queue)
+            prepared_edit_plans = {}
             for index, media in enumerate(media_queue, 1):
                 if task.isInterruptionRequested():
                     break
+                task.preview_ready.clear()
                 task.media_started.emit(media)
+                while (not task.isInterruptionRequested() and
+                       not task.preview_ready.wait(.025)):
+                    pass
+                if task.isInterruptionRequested():
+                    break
                 task.progress.emit(-1, f"Processing {index}/{total} · {Path(media.path).name}")
                 try:
                     # Snapshot this item only when its turn begins, so edits
                     # made while an earlier queue item runs are respected.
-                    edit_plan = self._analysis_edit_plan(media)
+                    edit_plan = prepared_edit_plans.pop(
+                        media.media_id, None)
+                    if edit_plan is None:
+                        edit_plan = self._analysis_edit_plan(media)
                     item_result = self._process_batch_item(
                         task, media, edit_plan, output, mode,
                         sensitivity, interval, accel)
                     completed.append(item_result)
                     task.media_finished.emit(media, True, item_result)
+                    task.progress.emit(
+                        1.0, "Complete · displaying detected cuts")
                 except Exception as error:
                     if task.isInterruptionRequested():
                         break
                     failures.append((Path(media.path).name, str(error) or type(error).__name__))
                     task.media_finished.emit(media, False, None)
+                hold_result = index < total or mode == "interval"
+                if hold_result and not task.isInterruptionRequested():
+                    # Prepare the immutable edit mapping while the completed
+                    # timeline remains on screen.  Actual decoding stays
+                    # strictly sequential and begins only after the handoff.
+                    if index < total:
+                        next_media = media_queue[index]
+                        prepared_edit_plans[next_media.media_id] = (
+                            self._analysis_edit_plan(next_media))
+                    remaining = self._queue_result_preview_remaining(
+                        task.media_result_ready_at.get(media.media_id))
+                    deadline = time.monotonic() + remaining
+                    while (not task.isInterruptionRequested() and
+                           time.monotonic() < deadline):
+                        time.sleep(min(.025, max(
+                            0.0, deadline - time.monotonic())))
             return completed, failures
 
         self.batch_active = True
         self._refresh_queue_metrics()
         self.start_task(
             work, self.batch_finished, f"Processing queue · {len(media_queue)} videos",
-            preview_media=self.current_media)
+            preview_media=media_queue[0])
 
     def batch_finished(self, result):
         completed, failures = result
@@ -7144,6 +7347,7 @@ class ScenespyApp(QMainWindow):
         task.media_started.connect(self.batch_media_started)
         task.media_analyzed.connect(self.batch_media_analyzed)
         task.media_finished.connect(self.batch_media_finished)
+        task.cut_preview_started.connect(self._prepare_queue_cut_preview)
         task.result.connect(lambda result: self.task_done(task, callback, result))
         task.failed.connect(lambda message: self.task_failed(task, message))
         task.cancelled.connect(lambda: self.task_cancelled(task))
@@ -7154,10 +7358,11 @@ class ScenespyApp(QMainWindow):
     def toggle_primary_action(self):
         if self.task:
             self.stop_current_task()
+        elif (self.current_media and self.current_media.analyzed and
+              not self.current_media.exported):
+            self.export_result()
         elif self.batch_mode:
             self.process_batch()
-        elif self.current_media and self.current_media.analyzed:
-            self.export_result()
         else:
             self.analyze()
 
@@ -7230,34 +7435,37 @@ class ScenespyApp(QMainWindow):
             self.action_button.style().polish(self.action_button)
             return
         disabled_reason = ""
-        batch_finished = bool(
-            self.batch_mode and self.project.media and
-            all(media.exported for media in self.project.media))
-        if batch_finished or (not self.batch_mode and self.current_media and
-                              self.current_media.exported):
+        if self.current_media and self.current_media.exported:
             label = "Finished"
             enabled = False
             button_style = "success"
-        elif self.batch_mode:
-            label = "Process queue"
-            has_content = bool(self.project.media) and all(
-                self._media_has_processable_frames(media)
-                for media in self.project.media)
-            enabled = has_content
-            if not has_content and self.project.media:
-                disabled_reason = (
-                    "Restore at least one timeline sequence in every queued video.")
-            elif not (self.project.output_folder and
-                      os.path.isdir(self.project.output_folder)):
-                disabled_reason = "Choose the queue output folder when starting."
-            button_style = "primary"
-        elif self.current_media and self.current_media.analyzed:
+        elif (self.current_media and self.current_media.analyzed and
+              not self.current_media.exported):
+            # Pending results stay independent from automatic queue mode.
             label = "Export"
             enabled = self._media_has_processable_frames(self.current_media)
             if not enabled:
                 disabled_reason = (
                     "Restore at least one timeline sequence before exporting.")
             button_style = "warning"
+        elif (self.batch_mode and
+              self._media_is_queue_eligible(self.current_media)):
+            label = "Process queue"
+            queue_media = self._queue_candidates(self.project.media)
+            has_content = bool(queue_media) and all(
+                self._media_has_processable_frames(media)
+                for media in queue_media)
+            enabled = has_content
+            if not queue_media:
+                disabled_reason = (
+                    "No new videos to process. Pending exports are not part of the queue.")
+            elif not has_content:
+                disabled_reason = (
+                    "Restore at least one timeline sequence in every queued video.")
+            elif not (self.project.output_folder and
+                      os.path.isdir(self.project.output_folder)):
+                disabled_reason = "Choose the queue output folder when starting."
+            button_style = "primary"
         else:
             label = "Start"
             enabled = self._media_has_processable_frames(self.current_media)
@@ -7482,6 +7690,9 @@ class ScenespyApp(QMainWindow):
             list(cuts), list(removed), bool(finalized))
         if self.current_media is media:
             self.timeline.show_live_segments(
+                # Progressive Scene Detection updates remain lightweight.
+                # Final layouts use the background thumbnail decoder shared
+                # with normal mode, so the complete indicators remain cheap.
                 media, cuts, removed, load_thumbnails=bool(finalized))
 
     def _restore_live_results_for_current(self):
@@ -7533,6 +7744,8 @@ class ScenespyApp(QMainWindow):
 
     def batch_media_started(self, media):
         if not self.batch_active:
+            if self.task:
+                self.task.preview_ready.set()
             return
         if self.task and media.mode == "faces":
             self.task.live_faces.setdefault(media.media_id, [])
@@ -7548,18 +7761,24 @@ class ScenespyApp(QMainWindow):
         self._refresh_queue_metrics()
         self._mark_processing_media(media)
         try:
-            row = next(index for index, item in enumerate(self.project.media) if item is media)
-        except StopIteration:
-            return
-        if self.media_list.currentRow() != row:
-            self.media_list.setCurrentRow(row)
-        else:
-            # setCurrentRow does not emit when the row is unchanged.
-            self._restore_live_results_for_current()
-            self._restore_selected_media_progress()
-            self._update_transport_access()
-        if getattr(self, "_processing_preview_media", None) is not media:
-            self._begin_processing_preview(media)
+            try:
+                row = next(
+                    index for index, item in enumerate(self.project.media)
+                    if item is media)
+            except StopIteration:
+                return
+            if self.media_list.currentRow() != row:
+                self.media_list.setCurrentRow(row)
+            else:
+                # setCurrentRow does not emit when the row is unchanged.
+                self._restore_live_results_for_current()
+                self._restore_selected_media_progress()
+                self._update_transport_access()
+            if getattr(self, "_processing_preview_media", None) is not media:
+                self._begin_processing_preview(media)
+        finally:
+            if self.task:
+                self.task.preview_ready.set()
 
     def batch_media_finished(self, media, succeeded, result=None):
         if succeeded and result:
@@ -7606,6 +7825,22 @@ class ScenespyApp(QMainWindow):
             return
         self._batch_analyzed_media.add(media.media_id)
         self._refresh_media_item_states()
+
+    def _prepare_queue_cut_preview(self, media):
+        """Rewind the finalized queue timeline before its export preview."""
+        task = self.task
+        if not task:
+            return
+        try:
+            if (self.batch_active and media is self.processing_media and
+                    self._processing_preview_selected()):
+                self.processing_position_animation.stop()
+                self._set_progress_value(0, immediate=True)
+                task.media_progress[media.media_id] = (0, "Cutting clips")
+                self.progress_label.setText("Cutting clips")
+                self._sync_processing_position(0.0)
+        finally:
+            task.cut_preview_ready.set()
 
     def _mark_processing_media(self, media):
         self.processing_media = media
@@ -7752,8 +7987,9 @@ class ScenespyApp(QMainWindow):
         if self.batch_mode or self.batch_active:
             saved_media = copy.deepcopy(self.project.media)
             if self.batch_active:
+                queued_ids = set(getattr(self, "_queue_media_ids", ()))
                 for media in saved_media:
-                    if not media.exported:
+                    if media.media_id in queued_ids and not media.exported:
                         # A running/failed/unstarted item is a pending job in
                         # the checkpoint, never a partial analysis result.
                         media.analyzed = False
@@ -7867,6 +8103,12 @@ class ScenespyApp(QMainWindow):
         self._end_edit_preview()
         self._end_processing_preview()
         self._release_frame_decoder(force=True)
+        if not self.timeline.stop_thumbnail_decoder(timeout_ms=3000):
+            thumbnail_decoder = self.timeline._clip_thumbnail_decoder
+            if thumbnail_decoder is not None:
+                thumbnail_decoder.terminate()
+                thumbnail_decoder.wait(1000)
+                self.timeline._clip_thumbnail_decoder = None
         self.player.stop()
         self.player.setSource(QUrl())
         self.processing_preview.clear_source()

@@ -1,17 +1,67 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from PySide6.QtCore import Qt
 
 from scenespy.project import CutEvent, FaceEvent, MediaItem, ScenespyProject
-from scenespy.qt_app import (exported_path_size, final_face_crop_box,
+from scenespy.qt_app import (ScenespyApp, exported_path_size, final_face_crop_box,
                              format_file_size, parse_timecode, player_timecode,
                              primary_modifier, scrub_timecode, timecode,
                              transport_timecode)
 
 
 class ProjectModelTests(unittest.TestCase):
+    def test_new_queue_excludes_projects_waiting_for_export(self):
+        fresh = MediaItem("fresh.mp4", 5, 24, 120)
+        pending_export = MediaItem(
+            "pending.mp4", 5, 24, 120, analyzed=True, exported=False,
+            cuts=[CutEvent(48)])
+        exported = MediaItem(
+            "finished.mp4", 5, 24, 120, analyzed=True, exported=True)
+
+        candidates = ScenespyApp._queue_candidates(
+            [pending_export, fresh, exported])
+
+        self.assertEqual(candidates, [fresh])
+        self.assertTrue(pending_export.analyzed)
+        self.assertEqual(pending_export.cuts[0].frame, 48)
+
+    def test_pending_export_action_takes_priority_over_queue(self):
+        calls = []
+        host = SimpleNamespace(
+            task=None,
+            batch_mode=True,
+            current_media=MediaItem(
+                "pending.mp4", 5, 24, 120,
+                analyzed=True, exported=False),
+            stop_current_task=lambda: calls.append("stop"),
+            export_result=lambda: calls.append("export"),
+            process_batch=lambda: calls.append("queue"),
+            analyze=lambda: calls.append("analyze"),
+        )
+
+        ScenespyApp.toggle_primary_action(host)
+
+        self.assertEqual(calls, ["export"])
+
+    def test_queue_result_preview_waits_only_for_unseen_remainder(self):
+        self.assertAlmostEqual(
+            ScenespyApp._queue_result_preview_remaining(
+                ready_at=10.0, now=10.25, minimum_ms=900),
+            .65,
+        )
+        self.assertEqual(
+            ScenespyApp._queue_result_preview_remaining(
+                ready_at=10.0, now=11.0, minimum_ms=900),
+            0.0,
+        )
+        self.assertEqual(
+            ScenespyApp._queue_result_preview_remaining(None, now=10.0),
+            0.0,
+        )
+
     def test_file_size_uses_the_correct_scaled_unit(self):
         self.assertEqual(format_file_size(0), "0 B")
         self.assertEqual(format_file_size(1023), "1023 B")

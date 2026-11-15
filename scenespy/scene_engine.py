@@ -215,7 +215,20 @@ class SceneEngine:
                 int(ratio * len(self.preview_frames)))
             return max(0.0, self.preview_frames[index] / max(
                 self._get_video_fps(), 0.001))
-        return ratio * self._get_video_duration()
+        duration = max(0.0, float(self._get_video_duration()))
+        if duration <= 0:
+            return 0.0
+        # Seeking exactly to duration targets EOF and produces no image on
+        # many OpenCV/FFmpeg backends.  Keep every preview request on a real
+        # frame, including the final 100% update used by interval mode.
+        frame_duration = 1.0 / max(self._get_video_fps(), 0.001)
+        last_frame_time = max(0.0, duration - frame_duration)
+        total_frames = getattr(self, "_total_frames", None)
+        if total_frames:
+            last_frame_time = min(
+                last_frame_time,
+                max(0.0, (int(total_frames) - 1) * frame_duration))
+        return min(last_frame_time, ratio * duration)
 
     def total_time(self):
         if not self._start_time:
@@ -1011,10 +1024,53 @@ class SceneEngine:
                 scenes.append((start_frame, end_frame))
             t += interval
         self.detected = len(scenes)
+        self._pace_fixed_interval_preview()
         self._analysis_ratio = 1.0
         if self.progress:
             self.progress.after(0, lambda: self.progress.update(1.0))
         return scenes
+
+    def _pace_fixed_interval_preview(self):
+        """Give the shared progress-driven preview time to display frames."""
+        if (not self.preview_enabled or not self.previewer or
+                not getattr(self.previewer, "enabled", True) or self._stop):
+            return
+        # Scene Detection naturally advances over time while decoding.  Fixed
+        # intervals are calculated immediately, so advance only their visual
+        # progress over a short window.  The existing preview thread remains
+        # solely responsible for frame decoding, sizing, and publication.
+        duration = max(0.0, float(
+            self.cfg.get("INTERVAL_PREVIEW_SECONDS", 1.0)))
+        if duration <= 0:
+            return
+        started = time.monotonic()
+        # Match the Scene Detection preview cadence.  Emitting on the 25 ms
+        # cancellation poll used to flood the Qt event queue, repeatedly
+        # restarting progress/playhead animations and causing lag or crashes.
+        steps = max(1, int(round(duration / PREVIEW_INTERVAL)))
+        for step in range(1, steps + 1):
+            if self._stop:
+                return
+            self._analysis_ratio = step / steps
+            if self.progress:
+                self.progress.after(
+                    0, lambda value=self._analysis_ratio:
+                    self.progress.update(value))
+            deadline = started + duration * step / steps
+            while not self._stop and time.monotonic() < deadline:
+                time.sleep(min(.025, deadline - time.monotonic()))
+        # The background worker may still be completing its previous seek when
+        # this instant analysis ends.  Publish the final sample through the
+        # same decoder/sizing/adapter path before run() shuts that worker down.
+        if not self._stop and getattr(self.previewer, "enabled", True):
+            preview_time = self._preview_time_for_ratio(1.0)
+            image = self._get_preview_frame_at(preview_time)
+            if image is not None and self._ui_alive:
+                self.previewer.after(
+                    0, lambda img=image, seconds=preview_time: (
+                        self.previewer.update_image_at(img, seconds)
+                        if hasattr(self.previewer, "update_image_at") else
+                        self.previewer.update_image(img)))
 
     def _record_cut_failure(self, task, error):
         idx, output_file, start_time, end_time, _aligned_start, _aligned_end, _start_frame, _end_frame, _precise = task

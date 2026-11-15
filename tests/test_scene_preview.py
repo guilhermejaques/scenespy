@@ -4,6 +4,44 @@ from scenespy.scene_engine import SceneEngine
 
 
 class ScenePreviewTests(unittest.TestCase):
+    def test_interval_pacing_uses_shared_decoder_for_final_frame(self):
+        frames = []
+
+        class Previewer:
+            enabled = True
+
+            def after(self, _delay, callback):
+                callback()
+
+            def update_image_at(self, _image, seconds):
+                frames.append(seconds)
+
+        engine = SceneEngine(
+            "video.mp4", "output",
+            {"INTERVAL_PREVIEW_SECONDS": .01},
+            previewer=Previewer())
+        engine._analysis_ratio = 0.0
+        engine._get_video_duration = lambda: 1.0
+        engine._get_video_fps = lambda: 10.0
+        engine._total_frames = 10
+        engine._get_preview_frame_at = lambda _seconds: object()
+
+        engine._pace_fixed_interval_preview()
+
+        self.assertEqual(engine._analysis_ratio, 1.0)
+        self.assertEqual(frames, [.9])
+
+    def test_full_progress_preview_uses_last_frame_not_eof(self):
+        engine = SceneEngine("video.mp4", "output", {})
+        engine._get_video_duration = lambda: 2.0
+        engine._get_video_fps = lambda: 10.0
+
+        self.assertEqual(engine._preview_time_for_ratio(0.0), 0.0)
+        self.assertAlmostEqual(engine._preview_time_for_ratio(1.0), 1.9)
+
+        engine._total_frames = 19
+        self.assertAlmostEqual(engine._preview_time_for_ratio(1.0), 1.8)
+
     def test_export_frame_time_prefers_vfr_timestamp_map(self):
         engine = SceneEngine.__new__(SceneEngine)
         engine.cfg = {"FRAME_TIMES": [0.0, .031, .071, .106]}
