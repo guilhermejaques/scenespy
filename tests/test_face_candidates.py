@@ -42,6 +42,7 @@ class FaceCandidateTests(unittest.TestCase):
             crop = Path(folder, candidate["file"])
             self.assertTrue(crop.is_file())
             self.assertEqual(crop.suffix, ".png")
+            self.assertEqual(candidate["file"], "candidate_1.png")
 
         self.assertFalse(candidate["accepted"])
         self.assertEqual(candidate["rejection_reason"],
@@ -72,6 +73,7 @@ class FaceCandidateTests(unittest.TestCase):
         self.assertEqual(len(engine._saved_faces), 1)
         self.assertEqual(len(engine._face_candidates), 1)
         self.assertTrue(engine._face_candidates[0]["accepted"])
+        self.assertEqual(engine._face_candidates[0]["file"], "face_1.png")
 
     def test_finalized_tracks_are_published_once_with_saved_state(self):
         published = []
@@ -90,8 +92,8 @@ class FaceCandidateTests(unittest.TestCase):
         self.assertEqual(len(published), 2)
         self.assertTrue(published[0]["accepted"])
         self.assertFalse(published[1]["accepted"])
-        self.assertTrue(published[0]["file"].startswith("face_"))
-        self.assertTrue(published[1]["file"].startswith("candidate_"))
+        self.assertEqual(published[0]["file"], "face_1.png")
+        self.assertEqual(published[1]["file"], "candidate_2.png")
 
 
 if __name__ == "__main__":

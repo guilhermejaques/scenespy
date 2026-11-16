@@ -1134,7 +1134,7 @@ class SceneEngine:
                     f"Output duration is too long ({actual_duration:.2f}s of {expected_duration:.2f}s)")
         return actual_duration
 
-    def _cut_scenes(self, scenes):
+    def _cut_scenes(self, scenes, scene_numbers=None):
         outdir = build_output_dir(
             self.output,
             mode="scene" if self.scene_mode else "interval",
@@ -1157,11 +1157,18 @@ class SceneEngine:
             self.progress.after(0, lambda text=label: self.progress.set_status(text))
 
         keyframes = self._get_keyframes() or [0.0]
+        numbers = (list(scene_numbers) if scene_numbers is not None else
+                   list(range(1, len(scenes) + 1)))
+        if len(numbers) != len(scenes):
+            raise ValueError("scene_numbers must match the number of scenes")
         tasks = []
-        for i, (start_frame, end_frame) in enumerate(scenes):
+        for i, (start_frame, end_frame) in zip(numbers, scenes):
+            i = int(i)
+            if i < 1:
+                raise ValueError("scene numbers must start at 1")
             start_time = self._time_for_frame(start_frame, fps)
             end_time = self._time_for_frame(end_frame, fps)
-            output_file = os.path.join(outdir, f"scene_{i:03d}.mp4")
+            output_file = os.path.join(outdir, f"scene_{i}.mp4")
             aligned_start = self._nearest_keyframe_before(start_time, keyframes)
             aligned_end = self._nearest_keyframe_after(end_time, keyframes)
             start_delta = abs(start_time - aligned_start)
@@ -1213,8 +1220,9 @@ class SceneEngine:
                 if self.log:
                     err_msg = str(cut_error)[:80] or "Unknown error"
                     err_type = failure["error_type"]
-                    self.log.after(0, lambda e=err_msg, t=err_type: self.log.append_message(
-                        f"Error: scene_000 could not be exported [{t}] ({e})", kind="error"))
+                    scene_name = failure["file"]
+                    self.log.after(0, lambda n=scene_name, e=err_msg, t=err_type: self.log.append_message(
+                        f"Error: {n} could not be exported [{t}] ({e})", kind="error"))
             self.completed_attempts = 1
             _schedule_cut_ui_update(force=True)
         else:

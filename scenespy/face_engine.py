@@ -447,7 +447,7 @@ class FaceDetectionEngine:
         passes_gate = self._track_passes_face_gate(track, cfg)
         accepted = bool(has_enough_frames and passes_gate and track.get("face") is not None)
         if accepted:
-            fname = f"face_{self.done + 1:04d}.png"
+            fname = f"face_{self.done + 1}.png"
             path = os.path.join(outdir, fname)
             if cv2.imwrite(path, track["face"]):
                 self.done += 1
@@ -462,7 +462,7 @@ class FaceDetectionEngine:
         reason = ("Insufficient duration" if not has_enough_frames else
                   "Automatic quality filter" if not passes_gate else
                   "Crop could not be saved")
-        fname = f"candidate_{int(track.get('id', 0)):06d}.png"
+        fname = f"candidate_{int(track.get('id', 0))}.png"
         face = track.get("face")
         saved = bool(face is not None and cv2.imwrite(
             os.path.join(outdir, fname), face,

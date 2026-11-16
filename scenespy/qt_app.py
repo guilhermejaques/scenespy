@@ -1613,8 +1613,8 @@ class ClipPreviewChip(QGraphicsRectItem):
         if not self.live_preview:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip(
-            f"Clip {index:02d} · available when analysis is complete"
-            if self.live_preview else f"Preview clip {index:02d}")
+            f"Clip {index} · available when analysis is complete"
+            if self.live_preview else f"Preview clip {index}")
         self.setZValue(15)
 
     def paint(self, painter, option, widget=None):
@@ -2307,7 +2307,7 @@ class TimelineView(QGraphicsView):
             segment_enabled = index not in self.media.excluded_segments
             x = self.x_for_frame(start)
             width = max(1, self.x_for_frame(end) - x)
-            tooltip = (f"Scene {index:02d} · "
+            tooltip = (f"Scene {index} · "
                        f"{self.display_timecode(self.media.seconds_for_frame(start), self.media.duration)} – "
                        f"{self.display_timecode(self.media.seconds_for_frame(end), self.media.duration)}")
             segment = SceneSegmentItem(
@@ -2326,13 +2326,13 @@ class TimelineView(QGraphicsView):
                 segment.setToolTip("")
             elif not self.media.analyzed:
                 segment.setToolTip(
-                    f"Clip {index:02d} · "
+                    f"Clip {index} · "
                     f"{self.display_timecode(self.media.seconds_for_frame(start), self.media.duration)} – "
                     f"{self.display_timecode(self.media.seconds_for_frame(end), self.media.duration)}")
             segment.setOpacity(1.0 if segment_enabled else .38)
             self.scene().addItem(segment)
             if has_sequences and width >= 64:
-                label = self.scene().addSimpleText(f"{index:02d}")
+                label = self.scene().addSimpleText(str(index))
                 label.setBrush(QColor("#cbd5e1"))
                 label.setPos(x + 8, 48)
                 label.setOpacity(1.0 if segment_enabled else .38)
@@ -2566,7 +2566,7 @@ class TimelineView(QGraphicsView):
                 max(2.0, self.scene().sceneRect().right() - label_width - 2.0)),
         )
         label.setPos(label_x, 130)
-        label.setToolTip(f"Clip {int(index):02d} exact duration")
+        label.setToolTip(f"Clip {int(index)} exact duration")
         label.setZValue(24)
         self._clip_duration_label = label
         self._clip_duration_timer.start(5000)
@@ -4085,6 +4085,7 @@ class ScenespyApp(QMainWindow):
         QSlider#volumeSlider::handle:vertical:hover {{ background:white; border:0; }}
         QFrame#transportGroup QLineEdit#editableTimecode, QFrame#transportGroup QLineEdit#timecode {{ background:transparent; color:#f3f4f6; border:0; border-radius:0; padding:5px 4px; font-weight:700; }}
         QFrame#transportGroup QLineEdit#editableTimecode:hover, QFrame#transportGroup QLineEdit#editableTimecode:focus {{ background:#2d3136; color:white; border:1px solid #69717c; border-radius:7px; padding:4px 8px; }}
+        QFrame#transportGroup QLineEdit#editableTimecode:disabled, QFrame#transportGroup QLineEdit#timecode:disabled {{ background:transparent; color:#5d626a; border:0; }}
         QFrame#transportGroup QLabel#timeSeparator {{ background:transparent; color:#737b87; border:0; min-width:16px; max-width:16px; padding:5px 0; font-weight:700; }}
         QProgressBar {{ background:#202226; border:1px solid #41454b; border-radius:4px; height:7px; text-align:center; }}
         QProgressBar::chunk {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #188a51, stop:1 {SUCCESS}); border-radius:3px; }}
@@ -5291,7 +5292,7 @@ class ScenespyApp(QMainWindow):
             self.viewer_stack.setCurrentWidget(self.video)
             self.video.show()
         self.player.pause()
-        self.selection_title.setText(f"Clip {index:02d}")
+        self.selection_title.setText(f"Clip {index}")
         self._set_segment_selection_detail(start_seconds, end_seconds, index)
         self._show_segment_thumbnail(start_seconds, end_seconds)
         self.play_segment(start_seconds, end_seconds)
@@ -5307,7 +5308,7 @@ class ScenespyApp(QMainWindow):
         self._sync_progress_metrics_visibility()
         excluded = index in self.current_media.excluded_segments
         self._configure_segment_actions(index)
-        self.selection_title.setText(f"Clip {index:02d}")
+        self.selection_title.setText(f"Clip {index}")
         self._set_segment_selection_detail(
             start_seconds, end_seconds, index,
             include_analysis_details=False)
@@ -6157,7 +6158,7 @@ class ScenespyApp(QMainWindow):
             return
         suggested = os.path.join(
             os.path.dirname(media.path),
-            f"{Path(media.path).stem}_face_{event.best_frame:06d}.png")
+            f"{Path(media.path).stem}_face_{event.best_frame + 1}.png")
         target, selected_filter = QFileDialog.getSaveFileName(
             self, "Save selected face", suggested,
             "PNG image (*.png);;JPEG image (*.jpg *.jpeg)")
@@ -6918,9 +6919,13 @@ class ScenespyApp(QMainWindow):
                 task.media_result_ready_at[media.media_id] = time.monotonic()
             boundaries = [0, *(cut.frame for cut in cuts), media.total_frames]
             unavailable = set(excluded) | set(removed)
-            export_segments = [segment for segment_index, segment in enumerate(
-                zip(boundaries, boundaries[1:]), 1)
+            numbered_export_segments = [
+                (segment_index, segment)
+                for segment_index, segment in enumerate(
+                    zip(boundaries, boundaries[1:]), 1)
                 if segment_index not in unavailable]
+            export_numbers = [index for index, _segment in numbered_export_segments]
+            export_segments = [segment for _index, segment in numbered_export_segments]
             task.media_analyzed.emit(media)
             task.cut_preview_ready.clear()
             task.cut_preview_started.emit(media)
@@ -6945,7 +6950,7 @@ class ScenespyApp(QMainWindow):
             exporter.start_preview()
             export_complete = False
             try:
-                exporter._cut_scenes(export_segments)
+                exporter._cut_scenes(export_segments, export_numbers)
                 if task.isInterruptionRequested():
                     raise RuntimeError("Video processing was cancelled")
                 export_complete = True
@@ -7144,8 +7149,12 @@ class ScenespyApp(QMainWindow):
             self.output_button.setToolTip(f"Output folder: {folder}")
         media = self.current_media
         unavailable = set(media.excluded_segments) | set(media.removed_segments)
-        segments = [segment for index, segment in enumerate(media.segments(), 1)
-                    if index not in unavailable]
+        numbered_segments = [
+            (index, segment)
+            for index, segment in enumerate(media.segments(), 1)
+            if index not in unavailable]
+        segment_numbers = [index for index, _segment in numbered_segments]
+        segments = [segment for _index, segment in numbered_segments]
         if not segments:
             self.statusBar().showMessage(
                 "Include at least one sequence before exporting.", 5000)
@@ -7166,6 +7175,7 @@ class ScenespyApp(QMainWindow):
                     lambda path=staging, root=folder:
                     remove_owned_directory(path, root))
                 saved = 0
+                exported_face_files = {}
                 available_faces = [event for event in media.faces
                                    if face_event_is_included(media, event)]
                 export_faces = [event for event in available_faces
@@ -7202,9 +7212,12 @@ class ScenespyApp(QMainWindow):
                                         media.seconds_for_frame(event.best_frame))
                             except Exception:
                                 pass
-                        target = os.path.join(
-                            staging, f"face_{saved + 1:04d}.png")
+                        face_number = saved + 1
+                        filename = f"face_{face_number}.png"
+                        target = os.path.join(staging, filename)
                         shutil.copy2(event.crop_file, target)
+                        exported_face_files[event.event_id] = (
+                            face_number, filename)
                         saved += 1
                         task.metrics.emit(len(available_faces), saved)
                         task.progress.emit(
@@ -7217,9 +7230,16 @@ class ScenespyApp(QMainWindow):
                 try:
                     if task.isInterruptionRequested():
                         return None
+                    face_records = []
+                    for event in available_faces:
+                        record = vars(event).copy()
+                        exported = exported_face_files.get(event.event_id)
+                        record["face_number"] = exported[0] if exported else None
+                        record["exported_file"] = exported[1] if exported else ""
+                        face_records.append(record)
                     with open(os.path.join(staging, "faces.json"), "w", encoding="utf-8") as handle:
                         json.dump({"source": media.path,
-                                   "faces": [vars(event) for event in available_faces],
+                                   "faces": face_records,
                                    "faces_exported": saved}, handle, indent=2)
                     backup = None
                     if os.path.exists(destination):
@@ -7253,7 +7273,7 @@ class ScenespyApp(QMainWindow):
             engine.start_preview()
             export_complete = False
             try:
-                engine._cut_scenes(segments)
+                engine._cut_scenes(segments, segment_numbers)
                 if task.isInterruptionRequested():
                     return None
                 export_complete = True
