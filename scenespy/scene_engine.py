@@ -53,6 +53,8 @@ class SceneEngine:
         self._rejected_scene_candidates = []
         self._cut_failures = []
         self._cut_output_dir = None
+        self._cut_scene_records = []
+        self._cut_scene_records_by_number = {}
         self._temp_files = []
         self._last_cut_ui_update = 0.0
         self._cut_ui_update_interval = 0.15
@@ -260,11 +262,33 @@ class SceneEngine:
             duration = round(float(self._get_video_duration()), 4)
         except Exception:
             duration = None
+        try:
+            fps = float(self._get_video_fps())
+        except Exception:
+            fps = 0.0
+        try:
+            total_frames = int(
+                self._total_frames or
+                self._get_video_total_frames(fps, duration))
+        except Exception:
+            total_frames = None
+        timeline_duration = (
+            total_frames / fps if total_frames is not None and fps > 0 else duration)
         return {
             "video": {
                 "file": os.path.basename(self.video),
                 "path": self.video,
                 "duration": duration,
+                "timeline_duration": (
+                    round(float(timeline_duration), 6)
+                    if timeline_duration is not None else None),
+                "container_duration_difference": (
+                    round(float(duration) - float(timeline_duration), 6)
+                    if duration is not None and timeline_duration is not None else None),
+                "fps": round(fps, 6),
+                "total_frames": total_frames,
+                "file_size_bytes": (
+                    os.path.getsize(self.video) if os.path.isfile(self.video) else None),
             },
             "process": {
                 "mode": "scene" if getattr(self, "scene_mode", True) else "interval",
@@ -1085,19 +1109,63 @@ class SceneEngine:
             "error": message[:1000],
         }
         self._cut_failures.append(failure)
+        record = getattr(self, "_cut_scene_records_by_number", {}).get(int(idx))
+        if record is not None:
+            record.update(
+                status="failed",
+                exported=False,
+                error_type=type(error).__name__,
+                error=message[:1000],
+            )
         self.failed = len(self._cut_failures)
         return failure
+
+    def _scene_export_records(self, scenes, scene_numbers, fps):
+        """Describe the exact half-open frame ranges shown and exported."""
+        records = []
+        for number, (start_frame, end_frame) in zip(scene_numbers, scenes):
+            number = int(number)
+            start_frame, end_frame = int(start_frame), int(end_frame)
+            start_time = self._time_for_frame(start_frame, fps)
+            end_time = self._time_for_frame(end_frame, fps)
+            records.append({
+                "scene_number": number,
+                "file": f"scene_{number}.mp4",
+                "start_frame": start_frame,
+                "end_frame": end_frame,
+                "last_frame": end_frame - 1,
+                "frame_count": max(0, end_frame - start_frame),
+                "start_time": round(float(start_time), 6),
+                "end_time": round(float(end_time), 6),
+                "duration": round(max(0.0, float(end_time) - float(start_time)), 6),
+                "actual_duration": None,
+                "file_size_bytes": None,
+                "status": "pending",
+                "exported": False,
+            })
+        return records
 
     def _write_cut_failure_report(self, outdir):
         if not self._cut_failures:
             return None
         path = os.path.join(outdir, "cut_errors.json")
-        report = self._process_summary(outdir)
-        report["results"] = {
+        process_metadata = self._process_summary(outdir)
+        results = {
             "failed_cuts": len(self._cut_failures),
             "failed_duration": round(sum(float(f.get("duration", 0.0)) for f in self._cut_failures), 4),
         }
-        report["failed_scenes"] = self._cut_failures
+        report = {
+            "summary": {
+                "status": "completed_with_errors",
+                "mode": process_metadata["process"]["mode"],
+                "failed_cuts": results["failed_cuts"],
+                "failed_duration": results["failed_duration"],
+                "action": "Check each failed_scenes error and retry the export.",
+            },
+            "failed_scenes": self._cut_failures,
+            "results": results,
+            **process_metadata,
+        }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2)
         return path
@@ -1161,6 +1229,12 @@ class SceneEngine:
                    list(range(1, len(scenes) + 1)))
         if len(numbers) != len(scenes):
             raise ValueError("scene_numbers must match the number of scenes")
+        self._cut_scene_records = self._scene_export_records(
+            scenes, numbers, fps)
+        self._cut_scene_records_by_number = {
+            record["scene_number"]: record
+            for record in self._cut_scene_records
+        }
         tasks = []
         for i, (start_frame, end_frame) in zip(numbers, scenes):
             i = int(i)
@@ -1191,7 +1265,20 @@ class SceneEngine:
                     self.video, start_frame, end_frame, output_file, aligned_start)
             else:
                 self._run_ffmpeg_copy(start_time, end_time, output_file)
-            self._validate_cut_output(output_file, end_time - start_time)
+            return self._validate_cut_output(
+                output_file, end_time - start_time)
+
+        def _record_cut_success(task, actual_duration):
+            record = self._cut_scene_records_by_number.get(int(task[0]))
+            if record is not None:
+                record.update(
+                    actual_duration=round(float(actual_duration), 6),
+                    file_size_bytes=(
+                        os.path.getsize(task[1])
+                        if os.path.isfile(task[1]) else None),
+                    status="exported",
+                    exported=True,
+                )
 
         def _schedule_cut_ui_update(force=False):
             now = time.time()
@@ -1211,7 +1298,8 @@ class SceneEngine:
 
         if self.total <= 1:
             try:
-                _cut_one(tasks[0])
+                actual_duration = _cut_one(tasks[0])
+                _record_cut_success(tasks[0], actual_duration)
                 self.done = 1
             except Exception as cut_error:
                 if self._stop or str(cut_error) == "Stopped":
@@ -1234,7 +1322,9 @@ class SceneEngine:
                         pool.shutdown(wait=False)
                         return
                     try:
-                        future.result()
+                        actual_duration = future.result()
+                        _record_cut_success(
+                            futures[future], actual_duration)
                         with self._cut_lock:
                             self.done += 1
                     except Exception as cut_error:
@@ -1264,16 +1354,90 @@ class SceneEngine:
 
     def _write_scene_metadata(self, outdir, scenes, fps):
         try:
-            metadata = self._process_summary(outdir)
+            process_metadata = self._process_summary(outdir)
+            if not self._cut_scene_records:
+                numbers = list(range(1, len(scenes) + 1))
+                self._cut_scene_records = self._scene_export_records(
+                    scenes, numbers, fps)
+                self._cut_scene_records_by_number = {
+                    record["scene_number"]: record
+                    for record in self._cut_scene_records
+                }
             failed_cuts = len(getattr(self, "_cut_failures", []))
-            metadata["results"] = {
+            records = list(self._cut_scene_records)
+            exported_records = [record for record in records if record["exported"]]
+            expected_duration = sum(record["duration"] for record in exported_records)
+            actual_duration = sum(
+                float(record["actual_duration"] or 0.0)
+                for record in exported_records)
+            valid_ranges = all(
+                record["start_frame"] >= 0 and
+                record["end_frame"] > record["start_frame"] and
+                record["last_frame"] == record["end_frame"] - 1 and
+                record["frame_count"] == record["end_frame"] - record["start_frame"]
+                for record in records)
+            chronological = all(
+                left["end_frame"] <= right["start_frame"]
+                for left, right in zip(records, records[1:]))
+            files_present = all(
+                os.path.isfile(os.path.join(outdir, record["file"]))
+                for record in exported_records)
+            unique_names = len({record["file"] for record in records}) == len(records)
+            issues = []
+            if failed_cuts:
+                issues.append(f"{failed_cuts} clip(s) failed to export")
+            if not valid_ranges:
+                issues.append("One or more clip frame ranges are invalid")
+            if not chronological:
+                issues.append("Clip frame ranges overlap or are out of order")
+            if not files_present:
+                issues.append("One or more exported clip files are missing")
+            if not unique_names:
+                issues.append("Duplicate clip filenames were generated")
+            audit_passed = not issues
+            results = {
                 "status": "completed_with_errors" if failed_cuts else "completed",
                 "total_cuts": len(scenes),
                 "successful_cuts": int(self.done),
                 "failed_cuts": failed_cuts,
             }
             if failed_cuts:
-                metadata["results"]["error_report"] = "cut_errors.json"
+                results["error_report"] = "cut_errors.json"
+            metadata = {
+                "summary": {
+                    "status": results["status"],
+                    "mode": process_metadata["process"]["mode"],
+                    "clips_requested": len(records),
+                    "clips_exported": len(exported_records),
+                    "clips_failed": failed_cuts,
+                    "source_duration": process_metadata["video"].get(
+                        "timeline_duration"),
+                    "container_duration": process_metadata["video"].get(
+                        "duration"),
+                    "exported_duration": round(actual_duration, 6),
+                    "frames_exported": sum(
+                        record["frame_count"] for record in exported_records),
+                    "audit_passed": audit_passed,
+                    "issues": issues,
+                },
+                "scenes": records,
+                "audit": {
+                    "frame_range_convention": (
+                        "start_frame is inclusive; end_frame is exclusive; last_frame is inclusive"
+                    ),
+                    "frame_ranges_valid": valid_ranges,
+                    "frame_ranges_chronological": chronological,
+                    "exported_files_present": files_present,
+                    "filenames_unique": unique_names,
+                    "expected_exported_duration": round(expected_duration, 6),
+                    "actual_exported_duration": round(actual_duration, 6),
+                    "duration_difference": round(actual_duration - expected_duration, 6),
+                    "exported_frame_count": sum(
+                        record["frame_count"] for record in exported_records),
+                },
+                "results": results,
+                **process_metadata,
+            }
             with open(os.path.join(outdir, "scenes.json"), "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=2)
         except Exception as e:

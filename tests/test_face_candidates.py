@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -30,6 +31,26 @@ def sample_track(track_id=1, frames=5):
 
 
 class FaceCandidateTests(unittest.TestCase):
+    def test_face_json_prioritizes_summary_and_audits_saved_files(self):
+        engine = FaceDetectionEngine(
+            "video.mp4", "output", keep_rejected=True)
+        engine._track_passes_face_gate = lambda _track, _cfg: True
+        engine._start_time = 1.0
+        engine._end_time = 2.0
+
+        with tempfile.TemporaryDirectory() as folder:
+            engine._save_face_track_if_valid(
+                sample_track(), folder, min_required=3, cfg={})
+            engine._write_face_metadata(folder, fps=24.0, frames_processed=48)
+            payload = json.loads(Path(folder, "faces.json").read_text(
+                encoding="utf-8"))
+
+        self.assertEqual(next(iter(payload)), "summary")
+        self.assertEqual(payload["summary"]["faces_saved"], 1)
+        self.assertTrue(payload["summary"]["audit_passed"])
+        self.assertTrue(payload["audit"]["saved_files_present"])
+        self.assertEqual(payload["faces"][0]["file"], "face_1.png")
+
     def test_rejected_track_keeps_one_lightweight_review_crop(self):
         engine = FaceDetectionEngine(
             "video.mp4", "output", keep_rejected=True)

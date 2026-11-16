@@ -201,7 +201,8 @@ class TimelineMappingTests(unittest.TestCase):
         host = self._timeline_host(media)
 
         first_duration = media.seconds_for_frame(100)
-        final_duration = media.duration - media.seconds_for_frame(200)
+        timeline_end = media.seconds_for_frame(media.total_frames)
+        final_duration = timeline_end - media.seconds_for_frame(200)
         expected_duration = first_duration + final_duration
         self.assertAlmostEqual(
             ScenespyApp._timeline_duration(host), expected_duration, places=9)
@@ -216,7 +217,7 @@ class TimelineMappingTests(unittest.TestCase):
             media.seconds_for_frame(200), places=9)
         self.assertAlmostEqual(
             ScenespyApp._timeline_to_source_seconds(host, expected_duration),
-            media.duration, places=9)
+            timeline_end, places=9)
 
     def test_visible_transport_time_round_trips_away_from_ripple_join(self):
         media = MediaItem(

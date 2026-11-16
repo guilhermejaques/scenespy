@@ -1,18 +1,52 @@
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 from PySide6.QtCore import Qt
 
 from scenespy.project import CutEvent, FaceEvent, MediaItem, ScenespyProject
+from scenespy.shared import next_output_path
 from scenespy.qt_app import (ScenespyApp, exported_path_size, final_face_crop_box,
                              format_file_size, parse_timecode, player_timecode,
                              primary_modifier, scrub_timecode, timecode,
+                             valid_faces_output_name,
                              transport_timecode)
 
 
 class ProjectModelTests(unittest.TestCase):
+    def test_reviewed_faces_folder_uses_standard_fd_name(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = next_output_path(
+                folder, "faces", "Low", "nvidia",
+                datetime(2026, 11, 16, 16, 9, 43, 297000))
+            name = Path(path).name
+            Path(path).mkdir()
+            collision_name = Path(next_output_path(
+                folder, "faces", "Low", "nvidia",
+                datetime(2026, 11, 16, 16, 9, 43, 999000))).name
+
+        self.assertEqual(name, "FD_20261116_160943_Low_nvidia")
+        self.assertEqual(collision_name, "FD_20261116_160943_Low_nvidia_2")
+        self.assertTrue(valid_faces_output_name(name))
+        self.assertTrue(valid_faces_output_name(collision_name))
+        self.assertFalse(valid_faces_output_name("243181_faces_reviewed"))
+
+    def test_all_output_modes_omit_milliseconds(self):
+        moment = datetime(2026, 11, 16, 16, 9, 43, 987000)
+        with tempfile.TemporaryDirectory() as folder:
+            names = {
+                mode: Path(next_output_path(
+                    folder, mode, "Normal", "cpu", moment)).name
+                for mode in ("scene", "interval", "faces")
+            }
+
+        self.assertEqual(names["scene"], "SD_20261116_160943_Normal_cpu")
+        self.assertEqual(names["interval"], "ES_20261116_160943_Normal_cpu")
+        self.assertEqual(names["faces"], "FD_20261116_160943_Normal_cpu")
+        self.assertNotIn("987", " ".join(names.values()))
+
     def test_new_queue_excludes_projects_waiting_for_export(self):
         fresh = MediaItem("fresh.mp4", 5, 24, 120)
         pending_export = MediaItem(
@@ -138,7 +172,17 @@ class ProjectModelTests(unittest.TestCase):
         self.assertEqual(media.frame_for_seconds(150 / 29.97), 150)
         self.assertEqual(media.frame_for_seconds(-5), 0)
         self.assertEqual(media.frame_for_seconds(999), 300)
-        self.assertEqual(media.seconds_for_frame(300), 10.2)
+        self.assertAlmostEqual(media.seconds_for_frame(300), 300 / 29.97, places=9)
+
+    def test_cfr_timeline_ignores_longer_container_audio_at_final_boundary(self):
+        media = MediaItem("video.mp4", 87.04, 24000 / 1001, 2086)
+
+        self.assertAlmostEqual(
+            media.seconds_for_frame(media.total_frames), 87.0035833333,
+            places=8)
+        self.assertAlmostEqual(
+            media.seconds_for_frame(2086) - media.seconds_for_frame(2080),
+            6 / (24000 / 1001), places=9)
 
     def test_variable_frame_rate_uses_real_frame_timestamps(self):
         times = [0.0, 0.033, 0.071, 0.100, 0.151]

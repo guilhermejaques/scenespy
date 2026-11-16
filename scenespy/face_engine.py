@@ -799,7 +799,76 @@ class FaceDetectionEngine:
         try:
             end_time = self._end_time or time.time()
             elapsed = max(0.0, end_time - self._start_time) if self._start_time else 0.0
+            face_records = []
+            for face in self._saved_faces:
+                record = dict(face)
+                path = os.path.join(outdir, record.get("file", ""))
+                image = cv2.imread(path) if os.path.isfile(path) else None
+                record["file_size_bytes"] = (
+                    os.path.getsize(path) if os.path.isfile(path) else None)
+                record["image_width"] = (
+                    int(image.shape[1]) if image is not None else None)
+                record["image_height"] = (
+                    int(image.shape[0]) if image is not None else None)
+                face_records.append(record)
+            saved_files = [face.get("file", "") for face in face_records]
+            files_present = all(
+                filename and os.path.isfile(os.path.join(outdir, filename))
+                for filename in saved_files)
+            unique_names = len(set(saved_files)) == len(saved_files)
+            valid_frames = all(
+                int(face.get("first_frame", -1)) >= 0 and
+                int(face.get("first_frame", -1)) <= int(face.get("best_frame", -1)) <=
+                int(face.get("last_frame", -1))
+                for face in face_records)
+            valid_boxes = all(
+                len(face.get("box") or ()) == 4 and
+                len(face.get("crop_box") or ()) == 4
+                for face in face_records)
+            dimensions_match = all(
+                face["image_width"] ==
+                int(face["crop_box"][2]) - int(face["crop_box"][0]) and
+                face["image_height"] ==
+                int(face["crop_box"][3]) - int(face["crop_box"][1])
+                for face in face_records if len(face.get("crop_box") or ()) == 4)
+            issues = []
+            if not files_present:
+                issues.append("One or more saved face files are missing")
+            if not unique_names:
+                issues.append("Duplicate face filenames were generated")
+            if not valid_frames:
+                issues.append("One or more face frame ranges are invalid")
+            if not valid_boxes:
+                issues.append("One or more saved faces have invalid crop coordinates")
+            if not dimensions_match:
+                issues.append("One or more saved images do not match their crop dimensions")
+            status = "stopped" if self._stop else "completed"
+            audit_passed = not issues and not self._stop
             metadata = {
+                "summary": {
+                    "status": status,
+                    "mode": "faces",
+                    "faces_detected": int(self.detected),
+                    "faces_saved": int(self.done),
+                    "tracks_rejected": max(
+                        0, len(self._face_candidates) - len(self._saved_faces)),
+                    "frames_processed": int(frames_processed),
+                    "duration_processed": round(
+                        self._frame_time(frames_processed, fps), 4),
+                    "audit_passed": audit_passed,
+                    "issues": issues,
+                },
+                "faces": face_records,
+                "audit": {
+                    "saved_files_present": files_present,
+                    "filenames_unique": unique_names,
+                    "frame_ranges_valid": valid_frames,
+                    "crop_coordinates_valid": valid_boxes,
+                    "saved_dimensions_match_crop": dimensions_match,
+                    "identity_note": (
+                        "track_id groups one continuous face track; it does not identify a person globally."
+                    ),
+                },
                 "video": {
                     "file": os.path.basename(self.video),
                     "path": self.video,
@@ -820,7 +889,7 @@ class FaceDetectionEngine:
                     "folder": outdir,
                 },
                 "results": {
-                    "status": "stopped" if self._stop else "completed",
+                    "status": status,
                     "faces_detected": int(self.detected),
                     "faces_saved": int(self.done),
                     "tracks_saved": len(self._saved_faces),
@@ -830,7 +899,6 @@ class FaceDetectionEngine:
                         "track_id groups continuous face tracks only; it is not a global person identity."
                     ),
                 },
-                "faces": self._saved_faces,
             }
             if self.keep_rejected:
                 metadata["candidates"] = self._face_candidates

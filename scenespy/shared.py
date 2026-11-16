@@ -565,11 +565,23 @@ def validate_runtime_dependencies():
     return False, message
 
 
-def build_output_dir(base_output, mode, profile, accel):
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+def next_output_path(base_output, mode, profile, accel, now=None):
+    """Return a readable second-based output path without reusing a folder."""
+    moment = now or datetime.datetime.now()
+    ts = moment.strftime("%Y%m%d_%H%M%S")
     mode_tag = MODE_ABBREV.get(mode, mode.upper())
-    path = os.path.join(base_output, f"{mode_tag}_{ts}_{profile}_{accel}")
-    os.makedirs(path, exist_ok=True)
+    name = f"{mode_tag}_{ts}_{profile}_{accel}"
+    path = os.path.join(base_output, name)
+    suffix = 2
+    while os.path.exists(path):
+        path = os.path.join(base_output, f"{name}_{suffix}")
+        suffix += 1
+    return path
+
+
+def build_output_dir(base_output, mode, profile, accel):
+    path = next_output_path(base_output, mode, profile, accel)
+    os.makedirs(path, exist_ok=False)
     return path
 
 

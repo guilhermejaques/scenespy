@@ -1,9 +1,69 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from scenespy.scene_engine import SceneEngine
 
 
 class ScenePreviewTests(unittest.TestCase):
+    def test_scene_export_records_match_timeline_ranges_and_names(self):
+        engine = SceneEngine("video.mp4", "output", {})
+        records = engine._scene_export_records(
+            [(0, 24), (24, 60)], [1, 3], 24.0)
+
+        self.assertEqual([record["scene_number"] for record in records],
+                         [1, 3])
+        self.assertEqual([record["file"] for record in records],
+                         ["scene_1.mp4", "scene_3.mp4"])
+        self.assertEqual(records[0]["start_frame"], 0)
+        self.assertEqual(records[0]["end_frame"], 24)
+        self.assertEqual(records[0]["last_frame"], 23)
+        self.assertEqual(records[0]["frame_count"], 24)
+        self.assertEqual(records[0]["start_time"], 0.0)
+        self.assertEqual(records[0]["end_time"], 1.0)
+        self.assertEqual(records[1]["duration"], 1.5)
+
+    def test_scene_json_contains_auditable_clip_records(self):
+        engine = SceneEngine("video.mp4", "output", {})
+        engine.done = 1
+        engine._cut_scene_records = engine._scene_export_records(
+            [(0, 24)], [1], 24.0)
+        engine._cut_scene_records[0].update(
+            actual_duration=1.0, status="exported", exported=True)
+        engine._process_summary = lambda _outdir: {
+            "video": {"file": "video.mp4", "duration": 1.0},
+            "process": {"mode": "scene"},
+            "output": {"folder": _outdir},
+        }
+
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, "scene_1.mp4").write_bytes(b"exported")
+            engine._write_scene_metadata(folder, [(0, 24)], 24.0)
+            payload = json.loads(Path(folder, "scenes.json").read_text(
+                encoding="utf-8"))
+
+        self.assertEqual(payload["results"]["total_cuts"], 1)
+        self.assertEqual(next(iter(payload)), "summary")
+        self.assertTrue(payload["summary"]["audit_passed"])
+        self.assertEqual(payload["scenes"], engine._cut_scene_records)
+        self.assertEqual(payload["scenes"][0]["file"], "scene_1.mp4")
+        self.assertTrue(payload["scenes"][0]["exported"])
+
+    def test_failed_cut_updates_matching_scene_record(self):
+        engine = SceneEngine("video.mp4", "output", {})
+        engine._cut_scene_records = engine._scene_export_records(
+            [(24, 48)], [2], 24.0)
+        engine._cut_scene_records_by_number = {2: engine._cut_scene_records[0]}
+        task = (2, "scene_2.mp4", 1.0, 2.0, 0.0, 2.0, 24, 48, True)
+
+        failure = engine._record_cut_failure(task, RuntimeError("cut failed"))
+
+        self.assertEqual(failure["scene_number"], 2)
+        self.assertEqual(engine._cut_scene_records[0]["status"], "failed")
+        self.assertFalse(engine._cut_scene_records[0]["exported"])
+        self.assertEqual(engine._cut_scene_records[0]["error"], "cut failed")
+
     def test_interval_pacing_uses_shared_decoder_for_final_frame(self):
         frames = []
 

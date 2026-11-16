@@ -69,7 +69,14 @@ class MediaItem:
     def seconds_for_frame(self, frame: int | float) -> float:
         """Map a frame onto the player's canonical media duration."""
         if float(frame) >= self.total_frames:
-            return max(0.0, self.duration)
+            # CFR exports cut on exact half-open frame boundaries.  Container
+            # duration can follow a slightly longer audio stream, so using it
+            # here would make the final timeline clip disagree with the video
+            # frames actually exported.  VFR media still needs its probed end
+            # duration because the final frame timestamp has no following PTS.
+            if self.frame_times:
+                return max(0.0, self.duration)
+            return max(0.0, self.total_frames / max(self.fps, 0.001))
         if self.frame_times:
             index = max(0, min(int(round(float(frame))),
                                len(self.frame_times) - 1))

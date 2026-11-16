@@ -49,6 +49,7 @@ from .shared import (ACCEL_OPTIONS, ACCENT, ALLOWED_VIDEO_EXTENSIONS, BG_CARD, B
                      PROFILES, SUCCESS,
                      TEXT_MAIN, TEXT_MUTED,
                      USER_DATA_DIR, detect_available_encoder_accel, detect_available_inference_accel,
+                     next_output_path,
                      status_labels, terminate_all_child_processes)
 
 
@@ -77,6 +78,16 @@ FACE_THUMBNAIL_SIZE = QSize(80, 52)
 INDICATOR_PLAY_POINTS = (
     QPointF(-2.5, -4), QPointF(4, 0), QPointF(-2.5, 4))
 QUEUE_RESULT_PREVIEW_MIN_MS = 900
+
+
+def valid_faces_output_name(name):
+    parts = str(name).split("_")
+    if len(parts) not in (5, 6) or parts[0] != "FD":
+        return False
+    if not (len(parts[1]) == 8 and parts[1].isdigit() and
+            len(parts[2]) == 6 and parts[2].isdigit()):
+        return False
+    return len(parts) == 5 or parts[-1].isdigit()
 
 
 def primary_modifier(platform=None):
@@ -7166,10 +7177,11 @@ class ScenespyApp(QMainWindow):
             stage="cut")
         def work(task):
             if media.mode == "faces":
-                destination = os.path.join(folder, f"{Path(media.path).stem}_faces_reviewed")
+                destination = next_output_path(
+                    folder, "faces", media.sensitivity, accel)
                 staging = os.path.join(
                     folder,
-                    f".{Path(media.path).stem}_faces_reviewed.{uuid.uuid4().hex}.part")
+                    f".{os.path.basename(destination)}.{uuid.uuid4().hex}.part")
                 os.makedirs(staging, exist_ok=False)
                 task.register_cleanup(
                     lambda path=staging, root=folder:
@@ -7236,11 +7248,104 @@ class ScenespyApp(QMainWindow):
                         exported = exported_face_files.get(event.event_id)
                         record["face_number"] = exported[0] if exported else None
                         record["exported_file"] = exported[1] if exported else ""
+                        if exported:
+                            exported_path = os.path.join(staging, exported[1])
+                            image = cv2.imread(exported_path)
+                            record["file_size_bytes"] = os.path.getsize(exported_path)
+                            record["image_width"] = (
+                                int(image.shape[1]) if image is not None else None)
+                            record["image_height"] = (
+                                int(image.shape[0]) if image is not None else None)
+                        else:
+                            record["file_size_bytes"] = None
+                            record["image_width"] = None
+                            record["image_height"] = None
                         face_records.append(record)
+                    exported_records = [
+                        record for record in face_records
+                        if record["exported_file"]]
+                    files_present = all(
+                        os.path.isfile(os.path.join(
+                            staging, record["exported_file"]))
+                        for record in exported_records)
+                    numbers_contiguous = [
+                        record["face_number"] for record in exported_records
+                    ] == list(range(1, saved + 1))
+                    filenames_unique = len({
+                        record["exported_file"] for record in exported_records
+                    }) == len(exported_records)
+                    valid_frames = all(
+                        1 <= int(record["start_frame"]) <=
+                        int(record["best_frame"]) <=
+                        int(record["end_frame"])
+                        for record in face_records)
+                    folder_name = os.path.basename(destination)
+                    folder_name_valid = valid_faces_output_name(folder_name)
+                    valid_crop_coordinates = all(
+                        len(record.get("crop_box") or ()) == 4 and
+                        0 <= int(record["crop_box"][0]) < int(record["crop_box"][2]) <= media.width and
+                        0 <= int(record["crop_box"][1]) < int(record["crop_box"][3]) <= media.height
+                        for record in face_records)
+                    dimensions_match = all(
+                        record["image_width"] ==
+                        int(record["crop_box"][2]) - int(record["crop_box"][0]) and
+                        record["image_height"] ==
+                        int(record["crop_box"][3]) - int(record["crop_box"][1])
+                        for record in exported_records)
+                    issues = []
+                    if not files_present:
+                        issues.append("One or more exported face files are missing")
+                    if not numbers_contiguous:
+                        issues.append("Exported face numbering is not continuous from 1")
+                    if not filenames_unique:
+                        issues.append("Duplicate face filenames were generated")
+                    if not valid_frames:
+                        issues.append("One or more face frame ranges are invalid")
+                    if not folder_name_valid:
+                        issues.append(
+                            "Output folder name does not follow the FD timestamp/profile/acceleration standard")
+                    if not valid_crop_coordinates:
+                        issues.append("One or more face crop coordinates are invalid")
+                    if not dimensions_match:
+                        issues.append("One or more exported images do not match their crop dimensions")
+                    payload = {
+                        "summary": {
+                            "status": "completed" if not issues else "completed_with_errors",
+                            "mode": "faces_reviewed",
+                            "faces_available": len(available_faces),
+                            "faces_exported": saved,
+                            "faces_not_exported": len(available_faces) - saved,
+                            "source_duration": round(float(media.duration), 6),
+                            "audit_passed": not issues,
+                            "issues": issues,
+                        },
+                        "faces": face_records,
+                        "audit": {
+                            "exported_files_present": files_present,
+                            "face_numbers_start_at_one_and_are_contiguous": numbers_contiguous,
+                            "filenames_unique": filenames_unique,
+                            "frame_ranges_valid": valid_frames,
+                            "output_folder_name_valid": folder_name_valid,
+                            "expected_output_folder_pattern": (
+                                "FD_YYYYMMDD_HHMMSS_Sensitivity_acceleration"
+                            ),
+                            "crop_coordinates_valid": valid_crop_coordinates,
+                            "exported_dimensions_match_crop": dimensions_match,
+                            "frame_number_convention": (
+                                "Face frame fields are one-based; subtract 1 for zero-based media coordinates."
+                            ),
+                        },
+                        "source": {
+                            "file": Path(media.path).name,
+                            "path": media.path,
+                            "duration": round(float(media.duration), 6),
+                            "fps": round(float(media.fps), 6),
+                            "total_frames": int(media.total_frames),
+                        },
+                        "output": {"folder": destination},
+                    }
                     with open(os.path.join(staging, "faces.json"), "w", encoding="utf-8") as handle:
-                        json.dump({"source": media.path,
-                                   "faces": face_records,
-                                   "faces_exported": saved}, handle, indent=2)
+                        json.dump(payload, handle, indent=2)
                     backup = None
                     if os.path.exists(destination):
                         backup = f"{destination}.{uuid.uuid4().hex}.backup"
