@@ -9,6 +9,85 @@ from scenespy.qt_app import (ScenespyApp, TimelineView, clip_preview_candidates,
 
 
 class TimelineMappingTests(unittest.TestCase):
+    def test_timeline_undo_and_redo_keep_media_histories_isolated(self):
+        first = MediaItem("first.mp4", 10, 24, 240, cuts=[CutEvent(100)])
+        second = MediaItem("second.mp4", 10, 24, 240, cuts=[CutEvent(80)])
+        messages = []
+        host = SimpleNamespace(
+            current_media=first,
+            _undo_stacks={},
+            _redo_stacks={},
+            _pending_timeline_edit=None,
+            _current_media_is_processing=lambda: False,
+            _refresh_undo_actions=lambda: None,
+            statusBar=lambda: SimpleNamespace(
+                showMessage=lambda message, _timeout: messages.append(message)),
+        )
+        host._capture_timeline_state = lambda media: ScenespyApp._capture_timeline_state(media)
+        host._push_undo_snapshot = lambda state, label: ScenespyApp._push_undo_snapshot(
+            host, state, label)
+        host._restore_timeline_state = lambda state: setattr(
+            host.current_media, "cuts", state["cuts"])
+
+        original = host._capture_timeline_state(first)
+        host._push_undo_snapshot(original, "Add cut marker")
+        first.cuts.append(CutEvent(150))
+        ScenespyApp.undo_timeline_edit(host)
+
+        self.assertEqual([cut.frame for cut in first.cuts], [100])
+        self.assertEqual(second.cuts[0].frame, 80)
+        ScenespyApp.redo_timeline_edit(host)
+        self.assertEqual([cut.frame for cut in first.cuts], [100, 150])
+        self.assertEqual(messages, [
+            "Undid: Add cut marker", "Redid: Add cut marker"])
+
+    def test_automatic_result_clears_only_its_media_history(self):
+        first = MediaItem("first.mp4", 10, 24, 240)
+        second = MediaItem("second.mp4", 10, 24, 240)
+        host = SimpleNamespace(
+            _undo_stacks={first.media_id: [(object(), "edit")],
+                          second.media_id: [(object(), "edit")]},
+            _redo_stacks={first.media_id: [(object(), "edit")]},
+            _pending_timeline_edit=(first.media_id, object(), "drag"),
+            _refresh_undo_actions=lambda: None,
+        )
+
+        ScenespyApp._clear_edit_history(host, first)
+
+        self.assertNotIn(first.media_id, host._undo_stacks)
+        self.assertNotIn(first.media_id, host._redo_stacks)
+        self.assertIn(second.media_id, host._undo_stacks)
+        self.assertIsNone(host._pending_timeline_edit)
+
+    def test_delete_shortcut_dispatches_permanent_timeline_removal(self):
+        calls = []
+        media = MediaItem("video.mp4", 10, 24, 240)
+        host = SimpleNamespace(
+            current_media=media,
+            _manual_face_draft=None,
+            selected_segment=(3, 2.0, 4.0),
+            selected_cut=None,
+            _current_media_is_processing=lambda: False,
+            remove_segment_permanently=lambda index: calls.append(("clip", index)),
+            remove_face_permanently=lambda event: calls.append(("face", event.event_id)),
+            remove_cut_marker=lambda event: calls.append(("cut", event.event_id)),
+        )
+
+        ScenespyApp.delete_selected_timeline_item(host)
+        face = FaceEvent(1, 2, 1)
+        cut = CutEvent(120)
+        host.selected_segment = None
+        host.selected_cut = face
+        ScenespyApp.delete_selected_timeline_item(host)
+        host.selected_cut = cut
+        ScenespyApp.delete_selected_timeline_item(host)
+
+        self.assertEqual(calls, [
+            ("clip", 3),
+            ("face", face.event_id),
+            ("cut", cut.event_id),
+        ])
+
     def test_timeline_invalidates_playhead_before_scene_destroys_items(self):
         observations = []
         host = SimpleNamespace(playhead=object())

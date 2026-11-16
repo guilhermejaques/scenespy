@@ -1344,6 +1344,8 @@ class CutHandle(QGraphicsLineItem):
             QTimer.singleShot(
                 0, lambda event=selected_event:
                 self.timeline.finish_handle_move(event))
+        else:
+            self.timeline.editCancelled.emit()
 
     def mousePressEvent(self, event):
         self._press_frame = int(self.event.frame)
@@ -1902,6 +1904,7 @@ class TimelineView(QGraphicsView):
     scrubStarted = Signal()
     scrubFinished = Signal(float)
     editStarted = Signal()
+    editCancelled = Signal()
     cutSelected = Signal(object)
     segmentActivated = Signal(float, float, int)
     segmentSelected = Signal(float, float, int)
@@ -3088,6 +3091,9 @@ class ScenespyApp(QMainWindow):
         self._edit_preview_media_id = None
         self._active_playback_face_key = None
         self._playback_face_index = None
+        self._undo_stacks = {}
+        self._redo_stacks = {}
+        self._pending_timeline_edit = None
         self._play_after_edit_sync = False
         self.available_encoder_accel = detect_available_encoder_accel()
         self.available_inference_accel = detect_available_inference_accel()
@@ -3444,6 +3450,7 @@ class ScenespyApp(QMainWindow):
         self.timeline.scrubStarted.connect(self._begin_timeline_scrub)
         self.timeline.scrubFinished.connect(self._finish_timeline_scrub)
         self.timeline.editStarted.connect(self._begin_timeline_edit)
+        self.timeline.editCancelled.connect(self._cancel_timeline_edit)
         self.timeline.cutSelected.connect(self.show_cut)
         self.timeline.segmentActivated.connect(self.show_segment)
         self.timeline.segmentSelected.connect(self.show_segment)
@@ -3842,14 +3849,31 @@ class ScenespyApp(QMainWindow):
         file_menu.addActions([self.import_action, self.load_action, save_action])
         edit_menu = ShortcutMenu("&Edit", self)
         self.menuBar().addMenu(edit_menu)
+        self.undo_action = QAction("Undo", self)
+        self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
+        self.undo_action.triggered.connect(self.undo_timeline_edit)
+        self.redo_action = QAction("Redo", self)
+        self.redo_action.setShortcuts([
+            QKeySequence.StandardKey.Redo,
+            primary_shortcut(Qt.Key.Key_Z, shift=True),
+        ])
+        self.redo_action.triggered.connect(self.redo_timeline_edit)
+        self.delete_timeline_action = QAction("Delete Timeline Item", self)
+        self.delete_timeline_action.setShortcut(QKeySequence(Qt.Key.Key_Delete))
+        self.delete_timeline_action.triggered.connect(
+            self.delete_selected_timeline_item)
+        self.addAction(self.delete_timeline_action)
         edit_menu.addAction(playback_action)
         edit_menu.addActions([previous_frame_action, next_frame_action])
+        edit_menu.addSeparator()
+        edit_menu.addActions([self.undo_action, self.redo_action])
         edit_menu.addSeparator()
         edit_menu.addAction(self.add_cut_action)
         view_menu = ShortcutMenu("&View", self)
         self.menuBar().addMenu(view_menu)
         view_menu.addAction(reset_layout_action)
         view_menu.addActions([zoom_in_action, zoom_out_action])
+        view_menu.addSeparator()
         self.milliseconds_menu_item = CompactMenuItem(
             themed_icon(
                 "fa6s.toggle-on" if self.show_milliseconds else "fa6s.toggle-off",
@@ -4318,6 +4342,8 @@ class ScenespyApp(QMainWindow):
     def _discard_media_runtime(self, media):
         """Drop background work, transient state, and cache for removed media."""
         media_id = media.media_id
+        self._undo_stacks.pop(media_id, None)
+        self._redo_stacks.pop(media_id, None)
         self.timeline.discard_media_cache(media)
         cache_cleanup_deferred = False
         proxy_task = self._playback_proxy_tasks.pop(media_id, None)
@@ -5028,6 +5054,10 @@ class ScenespyApp(QMainWindow):
         lower, upper = self.timeline.bounds_for(event)
         target_frame = max(
             lower, min(upper, media.frame_for_seconds(seconds)))
+        if target_frame == event.frame:
+            self._set_cut_time_editor(event)
+            return
+        self._record_timeline_edit("Change cut time")
         if not event.original_frame:
             event.original_frame = event.frame
         event.frame = target_frame
@@ -5146,7 +5176,137 @@ class ScenespyApp(QMainWindow):
             self.clock.setText(self._player_timecode(position, duration))
         self.duration_clock.setText(self._player_timecode(duration, duration))
 
+    @staticmethod
+    def _capture_timeline_state(media):
+        return {
+            "cuts": copy.deepcopy(media.cuts),
+            "faces": copy.deepcopy(media.faces),
+            "excluded_segments": list(media.excluded_segments),
+            "removed_segments": list(media.removed_segments),
+            "exported": bool(media.exported),
+        }
+
+    def _push_undo_snapshot(self, state, label="Edit timeline"):
+        media = self.current_media
+        if not media or self._current_media_is_processing():
+            return
+        stack = self._undo_stacks.setdefault(media.media_id, [])
+        stack.append((state, str(label)))
+        del stack[:-50]
+        self._redo_stacks[media.media_id] = []
+        self._refresh_undo_actions()
+
+    def _record_timeline_edit(self, label):
+        if not self.current_media or self._current_media_is_processing():
+            return False
+        self._pending_timeline_edit = None
+        self._push_undo_snapshot(
+            self._capture_timeline_state(self.current_media), label)
+        return True
+
+    def _clear_edit_history(self, media):
+        if not media:
+            return
+        self._undo_stacks.pop(media.media_id, None)
+        self._redo_stacks.pop(media.media_id, None)
+        if (self._pending_timeline_edit and
+                self._pending_timeline_edit[0] == media.media_id):
+            self._pending_timeline_edit = None
+        self._refresh_undo_actions()
+
+    def _restore_timeline_state(self, state):
+        media = self.current_media
+        if not media:
+            return
+        media.cuts = copy.deepcopy(state["cuts"])
+        media.faces = copy.deepcopy(state["faces"])
+        media.excluded_segments = list(state["excluded_segments"])
+        media.removed_segments = list(state["removed_segments"])
+        media.exported = bool(state["exported"])
+        media.normalize_cuts()
+        self._manual_face_draft = None
+        self.selected_cut = None
+        self.selected_segment = None
+        self.timeline.set_media(media)
+        self.show_cut(None)
+        self._invalidate_playback_face_index()
+        self._refresh_transport_timeline()
+        self._refresh_media_metrics()
+        self._refresh_media_item_states()
+        self._refresh_action_button()
+        self._refresh_cut_action_state()
+
+    def undo_timeline_edit(self):
+        focus = QApplication.focusWidget()
+        if isinstance(focus, QLineEdit) and focus.hasFocus():
+            focus.undo()
+            return
+        media = self.current_media
+        if not media or self._current_media_is_processing():
+            return
+        stack = self._undo_stacks.setdefault(media.media_id, [])
+        if not stack:
+            return
+        state, label = stack.pop()
+        self._redo_stacks.setdefault(media.media_id, []).append((
+            self._capture_timeline_state(media), label))
+        self._restore_timeline_state(state)
+        self.statusBar().showMessage(f"Undid: {label}", 3000)
+        self._refresh_undo_actions()
+
+    def redo_timeline_edit(self):
+        focus = QApplication.focusWidget()
+        if isinstance(focus, QLineEdit) and focus.hasFocus():
+            focus.redo()
+            return
+        media = self.current_media
+        if not media or self._current_media_is_processing():
+            return
+        stack = self._redo_stacks.setdefault(media.media_id, [])
+        if not stack:
+            return
+        state, label = stack.pop()
+        self._undo_stacks.setdefault(media.media_id, []).append((
+            self._capture_timeline_state(media), label))
+        self._restore_timeline_state(state)
+        self.statusBar().showMessage(f"Redid: {label}", 3000)
+        self._refresh_undo_actions()
+
+    def _refresh_undo_actions(self):
+        if not hasattr(self, "undo_action"):
+            return
+        media_id = self.current_media.media_id if self.current_media else None
+        locked = self._current_media_is_processing() if self.current_media else False
+        undo = self._undo_stacks.get(media_id, []) if media_id else []
+        redo = self._redo_stacks.get(media_id, []) if media_id else []
+        self.undo_action.setEnabled(bool(undo) and not locked)
+        self.redo_action.setEnabled(bool(redo) and not locked)
+        self.undo_action.setText(f"Undo {undo[-1][1]}" if undo else "Undo")
+        self.redo_action.setText(f"Redo {redo[-1][1]}" if redo else "Redo")
+
+    def delete_selected_timeline_item(self):
+        """Permanently remove the selected timeline item, like its context menu."""
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QSpinBox, QComboBox)) and focus.hasFocus():
+            return
+        if (not self.current_media or self._current_media_is_processing() or
+                self._manual_face_draft is not None):
+            return
+        if self.selected_segment is not None:
+            self.remove_segment_permanently(self.selected_segment[0])
+            return
+        event = self.selected_cut
+        if isinstance(event, FaceEvent):
+            self.remove_face_permanently(event)
+        elif isinstance(event, CutEvent):
+            self.remove_cut_marker(event)
+
     def _timeline_content_changed(self):
+        if self._pending_timeline_edit is not None:
+            media_id, state, label = self._pending_timeline_edit
+            self._pending_timeline_edit = None
+            if self.current_media and self.current_media.media_id == media_id:
+                self._push_undo_snapshot(state, label)
         self._mark_current_unexported()
         self._refresh_transport_timeline()
         self._refresh_media_metrics()
@@ -5155,12 +5315,22 @@ class ScenespyApp(QMainWindow):
 
     def _begin_timeline_edit(self):
         """Stop transient previews before a cut boundary is edited."""
+        if (self.current_media and not self._current_media_is_processing() and
+                self._pending_timeline_edit is None):
+            self._pending_timeline_edit = (
+                self.current_media.media_id,
+                self._capture_timeline_state(self.current_media),
+                "Move cut marker",
+            )
         self.player.pause()
         self._interactive_seek_timer.stop()
         self._pending_interactive_seek_ms = None
         self._interactive_seek_inflight_ms = None
         self._reset_frame_step_target()
         self._stop_segment_preview()
+
+    def _cancel_timeline_edit(self):
+        self._pending_timeline_edit = None
 
     def seek_timeline_ms(self, value):
         duration = self._timeline_duration()
@@ -5732,6 +5902,7 @@ class ScenespyApp(QMainWindow):
         else:
             self.play_button.setToolTip("Play / Pause")
             self._update_play_button(self.player.playbackState())
+        self._refresh_undo_actions()
 
     def _set_timeline_locked_visual(self, locked):
         effect = getattr(self, "timeline_lock_effect", None)
@@ -5882,6 +6053,8 @@ class ScenespyApp(QMainWindow):
         if not ScenespyApp._can_add_cut_frame(self, frame):
             return
         if 0 < frame < self.current_media.total_frames:
+            if hasattr(self, "_record_timeline_edit"):
+                self._record_timeline_edit("Add cut marker")
             # A playhead may sit between two frame boundaries at high zoom.
             # Cuts are frame-based, so keep the rebuilt playhead on the exact
             # same boundary as the new marker instead of restoring the former
@@ -6124,13 +6297,15 @@ class ScenespyApp(QMainWindow):
         os.makedirs(cache, exist_ok=True)
         event.crop_file = os.path.join(cache, f"manual_face_{event.event_id}.png")
         candidate = event.review_frames[0]
+        previous_state = self._capture_timeline_state(media)
         media.faces.append(event)
         self._manual_face_draft = None
         self._set_manual_face_controls(False)
-        if not self._apply_face_frame(event, candidate):
+        if not self._apply_face_frame(event, candidate, record_undo=False):
             media.faces = [face for face in media.faces if face.event_id != event.event_id]
             self.show_cut(None)
             return
+        self._push_undo_snapshot(previous_state, "Add face")
         media.analyzed = True
         self._refresh_media_metrics()
         self.statusBar().showMessage("Manual face crop added.", 4000)
@@ -6220,10 +6395,16 @@ class ScenespyApp(QMainWindow):
             return
         self.statusBar().showMessage(f"Face saved · {target}", 6000)
 
-    def _apply_face_frame(self, event, candidate):
+    def _apply_face_frame(self, event, candidate, record_undo=True):
         if not self.current_media or not event.crop_file:
             return False
         crop_box = [int(value) for value in candidate["crop_box"]]
+        candidate_box = [int(value) for value in candidate["box"]]
+        if (os.path.isfile(event.crop_file) and
+                int(candidate["frame"]) == event.best_frame and
+                candidate_box == list(event.box) and
+                crop_box == list(event.crop_box)):
+            return True
         ok, frame = False, None
         cap = cv2.VideoCapture(self.current_media.path)
         try:
@@ -6242,15 +6423,22 @@ class ScenespyApp(QMainWindow):
         if crop.size == 0:
             self.statusBar().showMessage("The selected face crop is outside the frame.", 5000)
             return False
-        target = Path(event.crop_file)
-        temporary = target.with_name(f"{target.stem}.review.tmp{target.suffix or '.png'}")
-        if not cv2.imwrite(str(temporary), crop):
+        previous_path = Path(event.crop_file)
+        suffix = previous_path.suffix or ".png"
+        target = previous_path.with_name(
+            f"{previous_path.stem}.edit_{uuid.uuid4().hex}{suffix}")
+        if not cv2.imwrite(str(target), crop):
             self.statusBar().showMessage("Could not update the selected face crop.", 5000)
             return False
-        os.replace(temporary, target)
+        if record_undo:
+            label = ("Change face frame" if int(candidate["frame"]) != event.best_frame
+                     else "Adjust face crop")
+            self._record_timeline_edit(label)
+        event.crop_file = str(target)
         event.best_frame = int(candidate["frame"])
-        event.box = [int(value) for value in candidate["box"]]
+        event.box = candidate_box
         event.crop_box = crop_box
+        self.timeline.invalidate_face_thumbnail(str(previous_path))
         self.timeline.invalidate_face_thumbnail(event.crop_file)
         self._mark_current_unexported()
         self.timeline.rebuild()
@@ -6283,6 +6471,9 @@ class ScenespyApp(QMainWindow):
             adjacent = []
             if index > 1 and index - 2 < len(cuts): adjacent.append(cuts[index - 2])
             if index - 1 < len(cuts): adjacent.append(cuts[index - 1])
+            if any(cut.original_frame and cut.frame != cut.original_frame
+                   for cut in adjacent):
+                self._record_timeline_edit("Reset clip boundaries")
             for cut in adjacent:
                 if cut.original_frame:
                     cut.frame = cut.original_frame
@@ -6323,6 +6514,8 @@ class ScenespyApp(QMainWindow):
             return
         event = self.selected_cut
         if not isinstance(event, FaceEvent) or len(crop_box or ()) != 4:
+            return
+        if [int(value) for value in crop_box] == list(event.crop_box):
             return
         candidate = {
             "frame": event.best_frame,
@@ -6496,6 +6689,9 @@ class ScenespyApp(QMainWindow):
             return
         if self.selected_segment:
             index, start_seconds, end_seconds = self.selected_segment
+            self._record_timeline_edit(
+                "Include clip" if index in self.current_media.excluded_segments
+                else "Exclude clip")
             excluded = set(self.current_media.excluded_segments)
             if index in excluded:
                 excluded.remove(index)
@@ -6512,6 +6708,8 @@ class ScenespyApp(QMainWindow):
             return
         if isinstance(self.selected_cut, FaceEvent):
             event = self.selected_cut
+            self._record_timeline_edit(
+                "Include face" if not event.enabled else "Exclude face")
             event.enabled = not event.enabled
             self._mark_current_unexported()
             self._refresh_media_metrics()
@@ -6538,6 +6736,7 @@ class ScenespyApp(QMainWindow):
              if cut.event_id == event.event_id), None)
         if boundary_index is None:
             return
+        self._record_timeline_edit("Remove cut marker")
         left_index = boundary_index + 1
         right_index = left_index + 1
 
@@ -6571,12 +6770,13 @@ class ScenespyApp(QMainWindow):
         if (self._current_media_is_processing() or not self.current_media or
                 not isinstance(event, FaceEvent)):
             return
-        before = len(self.current_media.faces)
+        if not any(face.event_id == event.event_id
+                   for face in self.current_media.faces):
+            return
+        self._record_timeline_edit("Remove face")
         self.current_media.faces = [
             face for face in self.current_media.faces
             if face.event_id != event.event_id]
-        if len(self.current_media.faces) == before:
-            return
         self._mark_current_unexported()
         self._refresh_media_metrics()
         self.selected_cut = None
@@ -6589,6 +6789,7 @@ class ScenespyApp(QMainWindow):
         index = int(index)
         if not 0 < index <= len(self.current_media.segments()):
             return
+        self._record_timeline_edit("Remove clip")
         removed = set(self.current_media.removed_segments)
         removed.add(index)
         self.current_media.removed_segments = sorted(removed)
@@ -7097,6 +7298,7 @@ class ScenespyApp(QMainWindow):
     def batch_finished(self, result):
         completed, failures = result
         for media, kind, events, cuts, excluded, removed, _saved_bytes in completed:
+            self._clear_edit_history(media)
             media.analyzed = True
             media.exported = True
             media.cuts = cuts
@@ -7124,6 +7326,7 @@ class ScenespyApp(QMainWindow):
             QMessageBox.warning(self, "Queue completed with errors", f"{summary}\n\n{details}")
 
     def analysis_finished(self, media, result):
+        self._clear_edit_history(media)
         kind, events, cuts, excluded, removed = result
         media.cuts = cuts
         media.normalize_cuts()
@@ -7907,6 +8110,7 @@ class ScenespyApp(QMainWindow):
 
     def batch_media_finished(self, media, succeeded, result=None):
         if succeeded and result:
+            self._clear_edit_history(media)
             _media, kind, events, cuts, excluded, removed, saved_bytes = result
             media.analyzed = True
             media.exported = True
