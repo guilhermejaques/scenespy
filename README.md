@@ -110,29 +110,33 @@ Use the ready-to-use version of Scenespy from the GitHub **Releases** tab. Do no
 - Linux: [Scenespy-Linux-x64](https://github.com/guilhermejaques/scenespy/releases/tag/0.1.0)
 - macOS: [Scenespy-MacOS-x64](https://github.com/guilhermejaques/scenespy/releases/tag/0.1.0)
 
-Download the package for your system, extract the folder, and run the `install_runtime` installer included with the app. This installer configures and installs the external dependencies used by the app, such as FFmpeg/FFprobe, private Python, and AI packages that are required. Open the command line on your system and locate the app directory to run the installer, then launch the `Scenespy` app.
+Download and open the installer for your system. A single English-language
+setup installs Scenespy and automatically downloads FFmpeg, the private Python
+runtime, and the AI packages. An internet connection is required during setup;
+no terminal commands or additional scripts are required.
 
-Windows (`.bat` installer may run as administrator, use right-click for that)
+The installer offers AI face detection as a large optional download and selects
+it by default. When selected, it automatically chooses CPU, NVIDIA/CUDA, or
+Apple MPS for the current hardware. You may deselect it to save download and
+disk space; the core video workflow remains available, but AI face detection is
+not installed.
 
-```bat
-install_runtime_windows.bat 
-Scenespy.exe
-```
+Allow approximately 1 GB for the core installation, up to 3 GB with CPU AI
+features, or up to 6 GB when the NVIDIA/CUDA runtime is selected automatically.
 
-Linux and MacOS:
+- Windows: run the `*-setup.exe` installer.
+- Linux: make the downloaded `.run` file executable and open it.
+- macOS: open the `.pkg` for Intel or Apple Silicon.
 
-```bash
-chmod +x install_runtime.sh  # Permission command
-./install_runtime.sh 
-./Scenespy # App 
-```
+After setup completes, launch Scenespy from the operating system's application
+menu.
+
+Packaged versions check GitHub Releases for updates when the app starts. If a
+new version is available, Scenespy can download the correct installer for the
+current system, verify its SHA-256 checksum, and open it. The check is silent
+when the computer is offline.
 
 ---
-
-For beginner users who do not know how to use the command line:  
-you only need to locate the folder where the app is and run the installer before executing the app. Example:
-
-`cd Downloads` > `cd Scenespy-Linux-x64` > `chmod +x install_runtime.sh` > `./install_runtime.sh`
 
 ### Commands to use in the terminal
 

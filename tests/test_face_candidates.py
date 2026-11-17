@@ -2,10 +2,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
-from scenespy.face_engine import FaceDetectionEngine
+from scenespy.face_engine import FaceDetectionEngine, _FramePrefetcher
 
 
 def sample_track(track_id=1, frames=5):
@@ -31,6 +33,74 @@ def sample_track(track_id=1, frames=5):
 
 
 class FaceCandidateTests(unittest.TestCase):
+    def test_apple_mps_is_validated_and_falls_back_before_processing(self):
+        created_models = []
+
+        class Model:
+            def __init__(self, _path):
+                created_models.append(self)
+
+            def predict(self, *_args, **_kwargs):
+                raise RuntimeError("unsupported MPS operation")
+
+        fake_torch = SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: False),
+            backends=SimpleNamespace(
+                mps=SimpleNamespace(is_available=lambda: True)))
+        engine = FaceDetectionEngine(
+            "video.mp4", "output", accel="apple")
+
+        with patch("scenespy.face_engine._ensure_torch", return_value=True), \
+                patch("scenespy.face_engine._ensure_yolo", return_value=Model), \
+                patch("scenespy.face_engine._ensure_mediapipe", return_value=None), \
+                patch("scenespy.face_engine.shared.torch", fake_torch):
+            engine._load_deps()
+
+        self.assertEqual(engine.requested_accel, "apple")
+        self.assertEqual(engine.accel, "cpu")
+        self.assertEqual(engine.device, "cpu")
+        self.assertIn("unsupported MPS", engine.acceleration_fallback_reason)
+        self.assertEqual(len(created_models), 2)
+
+    def test_cuda_frame_prefetch_preserves_order_and_end_of_stream(self):
+        class Capture:
+            def __init__(self):
+                self.frames = iter([1, 2, 3, 4])
+
+            def read(self):
+                try:
+                    return True, next(self.frames)
+                except StopIteration:
+                    return False, None
+
+        prefetcher = _FramePrefetcher(
+            Capture(), stop_cb=lambda: False, capacity=2)
+        frames = []
+        try:
+            while True:
+                ok, frame = prefetcher.read()
+                if not ok:
+                    break
+                frames.append(frame)
+        finally:
+            prefetcher.close()
+
+        self.assertEqual(frames, [1, 2, 3, 4])
+        self.assertGreaterEqual(prefetcher.decode_seconds, 0.0)
+
+    def test_cuda_frame_prefetch_propagates_decoder_errors(self):
+        class BrokenCapture:
+            def read(self):
+                raise RuntimeError("decoder failed")
+
+        prefetcher = _FramePrefetcher(
+            BrokenCapture(), stop_cb=lambda: False, capacity=2)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "decoder failed"):
+                prefetcher.read()
+        finally:
+            prefetcher.close()
+
     def test_face_json_prioritizes_summary_and_audits_saved_files(self):
         engine = FaceDetectionEngine(
             "video.mp4", "output", keep_rejected=True)
@@ -50,6 +120,10 @@ class FaceCandidateTests(unittest.TestCase):
         self.assertTrue(payload["summary"]["audit_passed"])
         self.assertTrue(payload["audit"]["saved_files_present"])
         self.assertEqual(payload["faces"][0]["file"], "face_1.png")
+        self.assertEqual(payload["process"]["acceleration_requested"], "cpu")
+        self.assertEqual(payload["process"]["acceleration_used"], "cpu")
+        self.assertFalse(payload["process"]["acceleration_fallback"])
+        self.assertEqual(payload["process"]["timings"], {})
 
     def test_rejected_track_keeps_one_lightweight_review_crop(self):
         engine = FaceDetectionEngine(

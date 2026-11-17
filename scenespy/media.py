@@ -18,6 +18,19 @@ def _rate(value: str) -> float:
         return 0.0
 
 
+def _duration_seconds(value) -> float:
+    try:
+        text = str(value or "").strip()
+        if not text:
+            return 0.0
+        if ":" not in text:
+            return float(text)
+        hours, minutes, seconds = text.split(":", 2)
+        return float(hours) * 3600.0 + float(minutes) * 60.0 + float(seconds)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _frame_times(path: str) -> list[float]:
     command = [
         resolve_executable("ffprobe"), "-v", "error", "-select_streams", "v:0",
@@ -54,7 +67,7 @@ def _is_genuinely_vfr(times: list[float]) -> bool:
 def probe_media(path: str) -> MediaItem:
     command = [
         resolve_executable("ffprobe"), "-v", "error", "-select_streams", "v:0",
-        "-show_entries", "stream=width,height,avg_frame_rate,r_frame_rate,nb_frames,duration:format=duration",
+        "-show_entries", "stream=width,height,avg_frame_rate,r_frame_rate,nb_frames,duration,start_time:stream_tags=DURATION,NUMBER_OF_FRAMES:format=duration",
         "-of", "json", path,
     ]
     kwargs = {"capture_output": True, "text": True, "check": True}
@@ -63,9 +76,18 @@ def probe_media(path: str) -> MediaItem:
     result = subprocess.run(command, **kwargs)
     data = json.loads(result.stdout or "{}")
     stream = (data.get("streams") or [{}])[0]
-    duration = float(stream.get("duration") or (data.get("format") or {}).get("duration") or 0)
+    stream_duration = _duration_seconds(
+        stream.get("duration") or (stream.get("tags") or {}).get("DURATION"))
+    try:
+        stream_duration -= max(
+            0.0, float(stream.get("start_time") or 0.0))
+    except (TypeError, ValueError):
+        pass
+    duration = (stream_duration or
+                float((data.get("format") or {}).get("duration") or 0))
     fps = _rate(stream.get("avg_frame_rate") or "0/1") or 30.0
-    frames = int(stream.get("nb_frames") or round(duration * fps))
+    tagged_frames = (stream.get("tags") or {}).get("NUMBER_OF_FRAMES")
+    frames = int(stream.get("nb_frames") or tagged_frames or round(duration * fps))
     nominal_fps = _rate(stream.get("r_frame_rate") or "0/1")
     suspect_vfr = bool(
         nominal_fps and abs(nominal_fps - fps) / max(fps, 0.001) > 0.005)

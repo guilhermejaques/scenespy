@@ -20,6 +20,7 @@ import io
 import shutil
 import site
 import platform
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image, ImageOps
 import numpy as np
@@ -376,7 +377,7 @@ ANALYSIS_MOSAIC_GAP = 4
 MODE_ACCEL_COMPAT = {
     "scene": {"encoder": {"cpu", "nvidia", "amd", "intel", "apple"}, "inference": {"cpu"}},
     "interval": {"encoder": {"cpu", "nvidia", "amd", "intel", "apple"}, "inference": {"cpu"}},
-    "faces": {"encoder": {"cpu"}, "inference": {"cpu", "nvidia"}},
+    "faces": {"encoder": {"cpu"}, "inference": {"cpu", "nvidia", "apple"}},
 }
 
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
@@ -418,17 +419,39 @@ DANGER = "#ef4444"
 
 
 def test_ffmpeg_encoder(encoder: str) -> bool:
+    options = {
+        "libx264": ["-crf", "16", "-preset", "medium", "-tune", "film"],
+        "h264_nvenc": [
+            "-preset", "p5", "-cq", "19", "-rc", "vbr", "-b:v", "0",
+            "-spatial_aq", "1", "-temporal_aq", "1", "-rc-lookahead", "20"],
+        "h264_amf": ["-quality", "balanced", "-rc", "vbr_peak"],
+        "h264_qsv": ["-preset", "medium", "-global_quality", "20"],
+        "h264_videotoolbox": ["-q:v", "65"],
+    }.get(encoder, [])
+    output = None
     try:
+        handle, output = tempfile.mkstemp(suffix=".mp4")
+        os.close(handle)
+        os.remove(output)
         result = run_hidden(
-            ["ffmpeg", "-y", "-f", "lavfi", "-i",
-             "color=c=black:s=160x120:d=0.1",
-             "-c:v", encoder, "-f", "null", "-"],
+            ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+             "color=c=black:s=320x180:r=30:d=0.2",
+             "-frames:v", "3", "-c:v", encoder, *options,
+             "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart",
+             output],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            text=True, timeout=5
+            text=True, timeout=10
         )
-        return result.returncode == 0
+        return (result.returncode == 0 and os.path.isfile(output) and
+                os.path.getsize(output) > 0)
     except Exception:
         return False
+    finally:
+        if output:
+            try:
+                os.remove(output)
+            except OSError:
+                pass
 
 
 def detect_available_accel():
@@ -450,8 +473,19 @@ def detect_available_encoder_accel():
 
 def detect_available_inference_accel():
     available = {"cpu"}
-    if importlib.util.find_spec("torch") and shutil.which("nvidia-smi"):
-        available.add("nvidia")
+    if importlib.util.find_spec("torch"):
+        try:
+            # Importing torch is the only reliable way to distinguish a CUDA
+            # build with a usable driver/device from a CPU-only installation.
+            import torch
+            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+                available.add("nvidia")
+            mps = getattr(getattr(torch, "backends", None), "mps", None)
+            if mps is not None and mps.is_available():
+                available.add("apple")
+        except Exception:
+            # Capability probing must never prevent the application starting.
+            pass
     return available
 
 
@@ -479,6 +513,22 @@ def face_detection_required_modules():
     if mediapipe_required():
         modules.append("mediapipe")
     return modules
+
+
+def missing_face_detection_modules():
+    """Return AI modules absent from the app's private runtime."""
+    return _missing_modules(*face_detection_required_modules())
+
+
+def refresh_ai_runtime():
+    """Make a newly installed private AI runtime visible to this process."""
+    global _AI_PACK_PATHS_ADDED, torch, TORCH_AVAILABLE
+    _AI_PACK_PATHS_ADDED = False
+    torch = None
+    TORCH_AVAILABLE = False
+    LAST_IMPORT_ERRORS.clear()
+    importlib.invalidate_caches()
+    add_ai_pack_to_path()
 
 
 def _missing_executables(*names):
@@ -557,8 +607,9 @@ def validate_runtime_dependencies():
     message = (
         "Scenespy requires FFmpeg and FFprobe to process videos.\n\n"
         f"Missing: {', '.join(missing)}\n\n"
-        "Run install_runtime next to Scenespy, install FFmpeg in PATH, "
-        "or place the binaries here:\n"
+        "The automatic runtime setup did not complete. Reinstall Scenespy "
+        "with an internet connection, or install FFmpeg in PATH.\n\n"
+        "Expected runtime path:\n"
         f"{runtime_dir}\n\n"
         f"Bundled fallback path:\n{bundled_dir}"
     )

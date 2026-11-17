@@ -1,19 +1,58 @@
 import unittest
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scenespy.frame_map import FrameMap, create_playback_proxy
+from scenespy.frame_map import (FrameMap, create_analysis_proxy,
+                                create_playback_proxy)
 
 
 class FrameMapTests(unittest.TestCase):
+    def test_analysis_proxy_cache_is_exact_and_reusable(self):
+        def successful_ffmpeg(command, **_kwargs):
+            Path(command[-1]).write_bytes(b"proxy")
+            return SimpleNamespace(returncode=0, stderr=b"")
+
+        with TemporaryDirectory() as folder, \
+                patch("scenespy.frame_map.ffmpeg_path", return_value="ffmpeg"), \
+                patch("scenespy.frame_map.run_hidden_cancelable",
+                      side_effect=successful_ffmpeg) as run:
+            source = Path(folder, "source.mp4")
+            source.write_bytes(b"source")
+            target = Path(folder, "proxy.mp4")
+            timings = {}
+            mapping = FrameMap([(0, 50), (75, 100)], 100)
+
+            create_analysis_proxy(
+                source, target, mapping, 25.0, timings=timings)
+            self.assertFalse(timings["analysis_proxy_cache_hit"])
+            self.assertEqual(run.call_count, 1)
+
+            cached_timings = {}
+            create_analysis_proxy(
+                source, target, mapping, 25.0, timings=cached_timings)
+            self.assertTrue(cached_timings["analysis_proxy_cache_hit"])
+            self.assertEqual(cached_timings["analysis_proxy_seconds"], 0.0)
+            self.assertEqual(run.call_count, 1)
+
+            target.write_bytes(b"truncated")
+            create_analysis_proxy(source, target, mapping, 25.0)
+            self.assertEqual(run.call_count, 2)
+
+            create_analysis_proxy(
+                source, target, FrameMap([(0, 49), (75, 100)], 100), 25.0)
+            self.assertEqual(run.call_count, 3)
+
     def test_playback_proxy_is_small_seek_friendly_and_frame_limited(self):
+        timings = {}
         with TemporaryDirectory() as folder, \
                 patch("scenespy.frame_map.ffmpeg_path", return_value="ffmpeg"), \
                 patch("scenespy.frame_map.run_hidden_cancelable",
                       return_value=SimpleNamespace(returncode=0, stderr=b"")) as run:
             target = f"{folder}/proxy.mp4"
-            create_playback_proxy("source.mp4", target, 29.97, 300)
+            create_playback_proxy(
+                "source.mp4", target, 29.97, 300, timings=timings)
 
         command = run.call_args.args[0]
         self.assertIn(
@@ -22,6 +61,8 @@ class FrameMapTests(unittest.TestCase):
         self.assertEqual(command[command.index("-frames:v") + 1], "300")
         self.assertEqual(command[command.index("-g") + 1], "12")
         self.assertIn("0:a:0?", command)
+        self.assertIn("playback_proxy_seconds", timings)
+        self.assertGreaterEqual(timings["playback_proxy_seconds"], 0.0)
 
     def test_maps_concatenated_frames_to_original_ranges(self):
         mapping = FrameMap([(0, 100), (200, 260)], 300)

@@ -1,5 +1,67 @@
 from .shared import *
 from . import shared as shared
+import queue
+
+
+class _FramePrefetcher:
+    """Read a few ordered frames ahead while a GPU processes the current one."""
+    _END = object()
+
+    def __init__(self, capture, stop_cb, capacity=2):
+        self.capture = capture
+        self.stop_cb = stop_cb
+        self.items = queue.Queue(maxsize=max(1, int(capacity)))
+        self.cancelled = threading.Event()
+        self.decode_seconds = 0.0
+        self.error = None
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _put(self, item):
+        while not self.cancelled.is_set() and not self.stop_cb():
+            try:
+                self.items.put(item, timeout=0.05)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _run(self):
+        try:
+            while not self.cancelled.is_set() and not self.stop_cb():
+                started = time.perf_counter()
+                ret, frame = self.capture.read()
+                self.decode_seconds += time.perf_counter() - started
+                if not ret:
+                    break
+                if not self._put(frame):
+                    return
+        except Exception as error:
+            self.error = error
+        finally:
+            self._put(self._END)
+
+    def read(self):
+        while True:
+            if self.stop_cb():
+                return False, None
+            try:
+                item = self.items.get(timeout=0.05)
+            except queue.Empty:
+                if not self.thread.is_alive():
+                    if self.error is not None:
+                        raise self.error
+                    return False, None
+                continue
+            if item is self._END:
+                if self.error is not None:
+                    raise self.error
+                return False, None
+            return True, item
+
+    def close(self):
+        self.cancelled.set()
+        self.thread.join(timeout=1.0)
 
 
 def draw_face_marker(frame, box, color=(0, 255, 0)):
@@ -16,7 +78,8 @@ class FaceDetectionEngine:
     """Detects and saves representative face crops from a video. Pipeline Face Detection!"""
     def __init__(self, video, output, logbox=None, progressbar=None,
                  previewer=None, profile="Normal", accel="cpu", preview_enabled=True,
-                 reset_frames=None, keep_rejected=False, face_callback=None):
+                 reset_frames=None, keep_rejected=False, face_callback=None,
+                 pipeline_timings=None):
         self.video = video
         self.output = output
         self.log = logbox
@@ -30,7 +93,9 @@ class FaceDetectionEngine:
         self._last_eta_update = 0
 
         self.profile = profile
+        self.requested_accel = accel
         self.accel = accel
+        self.acceleration_fallback_reason = None
         self._stop = False
         self._start_time = None
         self._end_time = None
@@ -40,6 +105,7 @@ class FaceDetectionEngine:
         self._saved_faces = []
         self._face_candidates = []
         self._output_dir = None
+        self._stage_timings = dict(pipeline_timings or {})
 
         self.device = None
         self.model = None
@@ -90,7 +156,8 @@ class FaceDetectionEngine:
             raise RuntimeError(
                 "Face detection requires PyTorch, but it was not found.\n\n"
                 f"AI pack folder: {shared.AI_PACK_DIR}\n"
-                "Run install_runtime next to the app, restart Scenespy, then try again."
+                "Reinstall Scenespy with an internet connection, restart the app, "
+                "and then try again."
             )
         if self._stop:
             return
@@ -113,13 +180,41 @@ class FaceDetectionEngine:
         self.mp = mp
 
         use_cuda = self.accel == "nvidia" and self.torch.cuda.is_available()
-        self.device = "cuda:0" if use_cuda else "cpu"
-        if not use_cuda:
+        mps_backend = getattr(
+            getattr(self.torch, "backends", None), "mps", None)
+        use_mps = (
+            self.accel == "apple" and mps_backend is not None and
+            mps_backend.is_available())
+        if use_cuda:
+            self.device = "cuda:0"
+        elif use_mps:
+            self.device = "mps"
+        else:
+            if self.accel != "cpu":
+                self.acceleration_fallback_reason = (
+                    f"{self.accel} inference backend is not available")
+            self.device = "cpu"
             self.accel = "cpu"
 
         self.model = YOLO(MODEL_FILE)
         if self._stop:
             return
+        if self.device != "cpu":
+            try:
+                # Validate this exact model/backend before opening the source
+                # video or creating any output. Unsupported GPU operations then
+                # fall back cleanly instead of leaving a partial project.
+                self.model.predict(
+                    np.zeros((64, 64, 3), dtype=np.uint8),
+                    conf=self.profile_cfg["conf"], iou=0.45, imgsz=640,
+                    device=self.device, half=use_cuda, verbose=False)
+            except Exception as error:
+                self.acceleration_fallback_reason = (
+                    str(error).strip()[:500] or
+                    f"The face model is not compatible with {self.device}")
+                self.accel = "cpu"
+                self.device = "cpu"
+                self.model = YOLO(MODEL_FILE)
 
         if mp is not None:
             self.mp_face = mp.solutions.face_mesh.FaceMesh(
@@ -491,6 +586,7 @@ class FaceDetectionEngine:
         self._start_time = time.time()
         cap = cv2.VideoCapture(self.video)
         self._cap = cap
+        prefetcher = None
         try:
             if self.progress and self._ui_alive:
                 self.progress.after(0, lambda: self.progress.set_status("Detecting faces"))
@@ -501,6 +597,9 @@ class FaceDetectionEngine:
                                       profile=self.profile, accel=self.accel)
             self._output_dir = outdir
             frame_idx = 0
+            inferred_frames = 0
+            decode_seconds = 0.0
+            inference_seconds = 0.0
             track_id = 0
             min_lm_frames = 1 if self.profile == "High" else 2
             iou_thresh = 0.45
@@ -512,11 +611,19 @@ class FaceDetectionEngine:
             effective_fps = fps * (sample_keep / sample_cycle)
             ttl_frames = max(2, int(round(effective_fps * self.profile_cfg["ttl"])))
             min_required_frames = 3
+            if self.device != "cpu":
+                prefetcher = _FramePrefetcher(
+                    cap, stop_cb=lambda: self._stop, capacity=2)
 
             while cap.isOpened():
                 if self._stop:
                     break
-                ret, frame = cap.read()
+                if prefetcher is not None:
+                    ret, frame = prefetcher.read()
+                else:
+                    decode_started = time.perf_counter()
+                    ret, frame = cap.read()
+                    decode_seconds += time.perf_counter() - decode_started
                 if not ret:
                     break
 
@@ -569,10 +676,13 @@ class FaceDetectionEngine:
                     continue
 
                 use_cuda = self.device.startswith("cuda")
+                inference_started = time.perf_counter()
                 results = self.model.predict(
                     frame, conf=self.profile_cfg["conf"], iou=iou_thresh,
                     imgsz=640 if frame.shape[1] <= 1280 else 800,
                     device=self.device, half=use_cuda, verbose=False)[0]
+                inference_seconds += time.perf_counter() - inference_started
+                inferred_frames += 1
 
                 detections = []
                 boxes_xyxy = results.boxes.xyxy
@@ -707,7 +817,9 @@ class FaceDetectionEngine:
                 self.log.after(0, lambda d=self.detected, c=self.done:
                 self.log.write_status(detected=d, cut=c, eta="00:00"))
         finally:
-
+            if prefetcher is not None:
+                prefetcher.close()
+                decode_seconds = prefetcher.decode_seconds
             if cap:
                 try:
                     cap.release()
@@ -718,6 +830,10 @@ class FaceDetectionEngine:
                 try:
                     if self.torch.cuda.is_available():
                         self.torch.cuda.empty_cache()
+                    elif (self.device == "mps" and
+                          hasattr(self.torch, "mps") and
+                          hasattr(self.torch.mps, "empty_cache")):
+                        self.torch.mps.empty_cache()
                 except Exception:
                     pass
             self.model = None
@@ -731,6 +847,20 @@ class FaceDetectionEngine:
             self.device = None
 
         self._end_time = time.time()
+        total_seconds = max(0.0, self._end_time - self._start_time)
+        self._stage_timings.update({
+            "decode_seconds": round(decode_seconds, 6),
+            "inference_seconds": round(inference_seconds, 6),
+            "postprocess_and_ui_seconds": round(max(
+                0.0, total_seconds - decode_seconds - inference_seconds), 6),
+            "inferred_frames": int(inferred_frames),
+            "decode_prefetch": prefetcher is not None,
+            "processing_seconds": round(total_seconds, 6),
+        })
+        self._stage_timings["measured_pipeline_seconds"] = round(
+            total_seconds + float(
+                self._stage_timings.get("analysis_proxy_seconds", 0.0) or 0.0),
+            6)
         self._write_face_metadata(outdir, fps, frame_idx)
         return not self._stop
 
@@ -880,10 +1010,15 @@ class FaceDetectionEngine:
                     "mode": "faces",
                     "profile": self.profile,
                     "accel": self.accel,
+                    "acceleration_requested": self.requested_accel,
+                    "acceleration_used": self.accel,
+                    "acceleration_fallback": self.requested_accel != self.accel,
+                    "acceleration_fallback_reason": self.acceleration_fallback_reason,
                     "started_at": self._format_process_timestamp(self._start_time),
                     "finished_at": self._format_process_timestamp(end_time),
                     "elapsed": self._format_elapsed(elapsed),
                     "elapsed_seconds": round(elapsed, 2),
+                    "timings": dict(self._stage_timings),
                 },
                 "output": {
                     "folder": outdir,

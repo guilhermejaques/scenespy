@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import json
+import os
+import time
+import uuid
 
 from .shared import ffmpeg_path, run_hidden_cancelable
 
@@ -98,15 +102,44 @@ class FrameMap:
         return boundaries, excluded
 
 
-def create_analysis_proxy(source, target, mapping, fps, stop_cb=None):
+def create_analysis_proxy(source, target, mapping, fps, stop_cb=None,
+                          timings=None):
     """Create an exact-frame, video-only concatenation for model analysis."""
     if not mapping.ranges:
         raise ValueError("At least one included sequence is required")
     executable = ffmpeg_path()
     if not executable:
         raise RuntimeError("FFmpeg is required for pre-analysis video edits")
-    target = str(Path(target))
-    Path(target).parent.mkdir(parents=True, exist_ok=True)
+    source_path = Path(source).resolve()
+    target_path = Path(target)
+    target = str(target_path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path = target_path.with_suffix(target_path.suffix + ".cache.json")
+    source_stat = source_path.stat()
+    cache_key = {
+        "version": 1,
+        "source": str(source_path),
+        "source_size": int(source_stat.st_size),
+        "source_mtime_ns": int(source_stat.st_mtime_ns),
+        "fps": f"{float(fps):.12g}",
+        "analysis_frames": int(mapping.analysis_frames),
+        "ranges": [[item.start, item.end] for item in mapping.ranges],
+    }
+    try:
+        cached_metadata = json.loads(
+            metadata_path.read_text(encoding="utf-8"))
+        proxy_size = target_path.stat().st_size
+        cache_valid = (
+            cached_metadata.get("key") == cache_key and
+            int(cached_metadata.get("proxy_size", -1)) == proxy_size and
+            target_path.is_file() and proxy_size > 0)
+    except (OSError, ValueError, TypeError):
+        cache_valid = False
+    if cache_valid:
+        if timings is not None:
+            timings["analysis_proxy_seconds"] = 0.0
+            timings["analysis_proxy_cache_hit"] = True
+        return target
     count = len(mapping.ranges)
     if count == 1:
         source_label = "[0:v]"
@@ -133,17 +166,51 @@ def create_analysis_proxy(source, target, mapping, fps, stop_cb=None):
         "-r", f"{float(fps):.12g}", "-fps_mode", "cfr",
         "-frames:v", str(mapping.analysis_frames),
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "0",
-        "-pix_fmt", "yuv420p", target,
+        "-pix_fmt", "yuv420p",
     ]
-    result = run_hidden_cancelable(
-        command, stop_cb=stop_cb, capture_output=True)
-    if result.returncode:
-        detail = (result.stderr or b"").decode(errors="ignore").strip()
-        raise RuntimeError(detail or "Could not prepare the edited analysis stream")
+    build_path = target_path.with_name(
+        f"{target_path.stem}.building-{uuid.uuid4().hex}{target_path.suffix}")
+    command.append(str(build_path))
+    started = time.perf_counter()
+    try:
+        result = run_hidden_cancelable(
+            command, stop_cb=stop_cb, capture_output=True)
+        elapsed = time.perf_counter() - started
+        if timings is not None:
+            timings["analysis_proxy_seconds"] = round(elapsed, 6)
+            timings["analysis_proxy_cache_hit"] = False
+        if result.returncode:
+            detail = (result.stderr or b"").decode(errors="ignore").strip()
+            raise RuntimeError(
+                detail or "Could not prepare the edited analysis stream")
+        if not build_path.is_file() or build_path.stat().st_size <= 0:
+            raise RuntimeError("FFmpeg did not create a valid analysis proxy")
+        os.replace(build_path, target_path)
+        metadata_temp = metadata_path.with_name(
+            f"{metadata_path.name}.building-{uuid.uuid4().hex}")
+        try:
+            metadata_temp.write_text(
+                json.dumps({
+                    "key": cache_key,
+                    "proxy_size": int(target_path.stat().st_size),
+                }, indent=2),
+                encoding="utf-8")
+            os.replace(metadata_temp, metadata_path)
+        finally:
+            try:
+                metadata_temp.unlink(missing_ok=True)
+            except OSError:
+                pass
+    finally:
+        try:
+            build_path.unlink(missing_ok=True)
+        except OSError:
+            pass
     return target
 
 
-def create_playback_proxy(source, target, fps, total_frames, stop_cb=None):
+def create_playback_proxy(source, target, fps, total_frames, stop_cb=None,
+                          timings=None):
     """Create a frame-aligned, seek-friendly proxy used only for playback."""
     executable = ffmpeg_path()
     if not executable:
@@ -161,8 +228,12 @@ def create_playback_proxy(source, target, fps, total_frames, stop_cb=None):
         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart", target,
     ]
+    started = time.perf_counter()
     result = run_hidden_cancelable(
         command, stop_cb=stop_cb, capture_output=True, low_priority=True)
+    elapsed = time.perf_counter() - started
+    if timings is not None:
+        timings["playback_proxy_seconds"] = round(elapsed, 6)
     if result.returncode:
         detail = (result.stderr or b"").decode(errors="ignore").strip()
         raise RuntimeError(detail or "Could not create the playback proxy")

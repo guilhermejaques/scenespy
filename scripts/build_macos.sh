@@ -31,6 +31,8 @@ cp scripts/install_runtime.py release/Scenespy-macos/_internal/dependencies/inst
 cp scripts/install_runtime_unix.sh release/Scenespy-macos/install_runtime.sh
 chmod +x release/Scenespy-macos/install_runtime.sh
 
+bash ./scripts/build_macos_installer.sh
+
 rm -rf build dist
 
 echo "macOS distribution app ready: $ROOT/release/Scenespy-macos/Scenespy.app"

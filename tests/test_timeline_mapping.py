@@ -1,14 +1,115 @@
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from scenespy.frame_map import FrameMap
 from scenespy.project import CutEvent, FaceEvent, MediaItem
 from scenespy.qt_app import (ScenespyApp, TimelineView, clip_preview_candidates,
                              clip_preview_frame,
-                             face_event_source_frame)
+                             face_event_source_frame,
+                             next_face_edit_path,
+                             place_timeline_indicator_lane)
 
 
 class TimelineMappingTests(unittest.TestCase):
+    def test_face_previous_and_next_stop_at_candidate_boundaries(self):
+        event = FaceEvent(
+            1, 30, 10, crop_file="face.png", box=[1, 1, 5, 5],
+            crop_box=[0, 0, 8, 8],
+            review_frames=[
+                {"frame": 10, "box": [1, 1, 5, 5], "crop_box": [0, 0, 8, 8]},
+                {"frame": 20, "box": [2, 2, 6, 6], "crop_box": [1, 1, 9, 9]},
+                {"frame": 30, "box": [3, 3, 7, 7], "crop_box": [2, 2, 10, 10]},
+            ])
+        applied = []
+        host = SimpleNamespace(
+            selected_segment=None, selected_cut=event,
+            _face_review_frames=lambda selected:
+            ScenespyApp._face_review_frames(host, selected),
+            _apply_face_frame=lambda selected, candidate:
+            applied.append(candidate["frame"]) or setattr(
+                selected, "best_frame", candidate["frame"]) or True)
+
+        ScenespyApp.step_face_frame(host, -1)
+        self.assertEqual(applied, [])
+        ScenespyApp.step_face_frame(host, 1)
+        ScenespyApp.step_face_frame(host, 1)
+        ScenespyApp.step_face_frame(host, 1)
+        self.assertEqual(applied, [20, 30])
+
+    def test_face_navigation_buttons_match_first_middle_and_last_candidate(self):
+        class Button:
+            def __init__(self):
+                self.enabled = None
+            def setIcon(self, _icon): pass
+            def setToolTip(self, _text): pass
+            def setVisible(self, _visible): pass
+            def setEnabled(self, enabled): self.enabled = bool(enabled)
+
+        event = FaceEvent(
+            1, 3, 1, box=[1, 1, 5, 5], crop_box=[0, 0, 8, 8],
+            original_best_frame=1,
+            review_frames=[
+                {"frame": frame, "box": [1, 1, 5, 5],
+                 "crop_box": [0, 0, 8, 8]}
+                for frame in (1, 2, 3)])
+        host = SimpleNamespace(
+            face_save_button=Button(), face_previous_button=Button(),
+            face_next_button=Button(), face_reset_button=Button(),
+            _face_review_frames=lambda selected:
+            ScenespyApp._face_review_frames(host, selected))
+        for frame, expected in ((1, (False, True)), (2, (True, True)),
+                                (3, (True, False))):
+            event.best_frame = frame
+            ScenespyApp._set_face_navigation_state(host, event)
+            self.assertEqual(
+                (host.face_previous_button.enabled,
+                 host.face_next_button.enabled), expected)
+
+    def test_face_reset_restores_original_candidate_and_crop(self):
+        event = FaceEvent(
+            1, 20, 20, crop_file="face.png", box=[2, 2, 6, 6],
+            crop_box=[1, 1, 9, 9], original_best_frame=10,
+            original_box=[3, 3, 7, 7], original_crop_box=[2, 2, 10, 10],
+            review_frames=[
+                {"frame": 10, "box": [1, 1, 5, 5], "crop_box": [0, 0, 8, 8]},
+                {"frame": 20, "box": [2, 2, 6, 6], "crop_box": [1, 1, 9, 9]},
+            ])
+        applied = []
+        host = SimpleNamespace(
+            selected_segment=None, selected_cut=event,
+            _face_review_frames=lambda selected:
+            ScenespyApp._face_review_frames(host, selected),
+            _apply_face_frame=lambda selected, candidate:
+            applied.append(candidate) or True)
+
+        ScenespyApp.reset_face_frame(host)
+
+        self.assertEqual(applied[0]["frame"], 10)
+        self.assertEqual(applied[0]["box"], event.original_box)
+        self.assertEqual(applied[0]["crop_box"], event.original_crop_box)
+
+    def test_repeated_face_candidate_edits_do_not_grow_the_path(self):
+        path = Path("cache") / "original_face.png"
+        lengths = []
+        for _index in range(100):
+            path = next_face_edit_path(path, "face-event-id")
+            lengths.append(len(path.name))
+        self.assertEqual(len(set(lengths)), 1)
+        self.assertEqual(path.parent, Path("cache"))
+
+    def test_face_indicator_lanes_preserve_close_and_reuse_spaced_rows(self):
+        occupied = []
+        self.assertEqual(place_timeline_indicator_lane(10, occupied), (0, 50.0))
+        self.assertEqual(place_timeline_indicator_lane(20, occupied), (1, 60.0))
+        self.assertEqual(place_timeline_indicator_lane(46, occupied), (0, 86.0))
+        self.assertEqual(occupied, [86.0, 60.0])
+
+    def test_face_export_progress_uses_completed_and_total_counts(self):
+        self.assertEqual(
+            ScenespyApp._face_export_progress_label(12, 18),
+            "Faces exported: 12 / 18")
+
     def test_timeline_undo_and_redo_keep_media_histories_isolated(self):
         first = MediaItem("first.mp4", 10, 24, 240, cuts=[CutEvent(100)])
         second = MediaItem("second.mp4", 10, 24, 240, cuts=[CutEvent(80)])
@@ -223,7 +324,7 @@ class TimelineMappingTests(unittest.TestCase):
         self.assertIn(("position", 0.0), events)
         self.assertIn(("progress", 0, True), events)
         self.assertEqual(task.media_progress[media.media_id],
-                         (0, "Cutting clips"))
+                         (0, "Scenes cut: 0 / 1"))
         self.assertEqual(events[-1], "ready")
 
     def test_stopping_clip_preview_preserves_timed_duration_label(self):
@@ -472,6 +573,71 @@ class TimelineMappingTests(unittest.TestCase):
         ScenespyApp.step_face_frame(host, 1)
 
         self.assertEqual(shown, [100, 199])
+
+    def test_segment_include_exclude_button_round_trips_without_losing_selection(self):
+        media = MediaItem(
+            "video.mp4", duration=10, fps=30, total_frames=300,
+            cuts=[CutEvent(100), CutEvent(200)], analyzed=True)
+        selected = (2, media.seconds_for_frame(100), media.seconds_for_frame(200))
+        labels = []
+        host = SimpleNamespace(
+            current_media=media, selected_segment=selected, selected_cut=None,
+            _current_media_is_processing=lambda: False,
+            _record_timeline_edit=labels.append,
+            _mark_current_unexported=lambda: None,
+            _refresh_media_metrics=lambda: None,
+            timeline=SimpleNamespace(rebuild=lambda: None),
+            show_segment=lambda start, end, index: setattr(
+                host, "selected_segment", (index, start, end)),
+            _refresh_action_button=lambda: None)
+
+        ScenespyApp.remove_cut(host)
+        self.assertEqual(media.excluded_segments, [2])
+        self.assertEqual(host.selected_segment, selected)
+        ScenespyApp.remove_cut(host)
+        self.assertEqual(media.excluded_segments, [])
+        self.assertEqual(labels, ["Exclude clip", "Include clip"])
+
+    def test_segment_reset_restores_both_adjacent_boundaries(self):
+        first = CutEvent(110, original_frame=100)
+        second = CutEvent(210, original_frame=200)
+        media = MediaItem(
+            "video.mp4", duration=10, fps=30, total_frames=300,
+            cuts=[first, second], analyzed=True)
+        shown = []
+        host = SimpleNamespace(
+            current_media=media,
+            selected_segment=(2, media.seconds_for_frame(110),
+                              media.seconds_for_frame(210)),
+            selected_cut=None,
+            _record_timeline_edit=lambda label: shown.append(label),
+            timeline=SimpleNamespace(rebuild=lambda: None),
+            _mark_current_unexported=lambda: None,
+            show_segment=lambda start, end, index:
+            shown.append((start, end, index)))
+
+        ScenespyApp.reset_face_frame(host)
+
+        self.assertEqual([cut.frame for cut in media.cuts], [100, 200])
+        self.assertEqual(shown[0], "Reset clip boundaries")
+        self.assertEqual(shown[-1][2], 2)
+
+    def test_selection_mutations_are_blocked_while_processing(self):
+        face = FaceEvent(1, 10, 5, enabled=True)
+        media = MediaItem(
+            "video.mp4", duration=10, fps=30, total_frames=300,
+            faces=[face], cuts=[CutEvent(100)])
+        host = SimpleNamespace(
+            current_media=media, selected_segment=None, selected_cut=face,
+            _current_media_is_processing=lambda: True)
+
+        ScenespyApp.remove_cut(host)
+        ScenespyApp.remove_face_permanently(host, face)
+        ScenespyApp.remove_segment_permanently(host, 1)
+
+        self.assertTrue(face.enabled)
+        self.assertEqual(media.faces, [face])
+        self.assertEqual(media.removed_segments, [])
 
     def test_selection_preview_reuses_timeline_thumbnail_source_frame(self):
         media = MediaItem(

@@ -56,6 +56,9 @@ class MediaItem:
     acceleration: str = "cpu"
     analyzed: bool = False
     exported: bool = False
+    # None distinguishes legacy projects with unknown output size from a
+    # measured export which legitimately saved zero bytes.
+    exported_bytes: int | None = None
     cuts: list[CutEvent] = field(default_factory=list)
     faces: list[FaceEvent] = field(default_factory=list)
     excluded_segments: list[int] = field(default_factory=list)

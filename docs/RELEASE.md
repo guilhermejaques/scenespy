@@ -1,14 +1,30 @@
 # Scenespy release builds
 
 Build each platform on that same platform. Do not build Windows, Linux, and
-macOS releases from one OS.
+macOS releases from one OS. Pushing a tag such as `v0.2.1` runs
+`.github/workflows/release-installers.yml` and attaches all installers to the
+GitHub Release. The tag and `scenespy.__version__` should match. SHA-256 files
+are published beside every artifact and are required by the in-app updater.
 
-The release app is intentionally lightweight:
+At startup, packaged apps check the latest GitHub Release without blocking the
+interface. A newer platform-specific installer is offered in-app, downloaded
+over HTTPS, verified against its release SHA-256 file, and opened only after
+successful verification. Offline checks fail silently.
+
+The application bundle is intentionally lightweight. Each platform installer
+automatically downloads and installs the runtime during setup:
 
 - Torch, TorchVision, Ultralytics, and MediaPipe are not bundled.
 - FFmpeg and FFprobe are not bundled.
-- A runtime installer is shipped next to the app and installs those pieces on
-  the user's machine.
+- The end user does not need to run a second script.
+- Python is installed privately for Scenespy, so a system Python installation
+  is not required.
+- AI face detection is offered as a large optional download and selected by
+  default. When selected, the installer automatically chooses CPU, NVIDIA/CUDA,
+  or Apple MPS for the current hardware. If deselected, the core app and FFmpeg
+  remain fully functional, but AI face detection is not installed.
+- Installers display approximately 1 GB for the core setup, up to 3 GB for the
+  CPU AI runtime, and up to 6 GB for the NVIDIA/CUDA runtime.
 
 ## Requirements files
 
@@ -28,7 +44,7 @@ Prerequisites:
 - The project virtual environment, or a Python that can install dependencies.
 - `models/yolov8n-face.pt`.
 
-Build the distributable folder:
+Build the distributable folder and the Windows installer (requires Inno Setup 6):
 
 ```powershell
 .\scripts\build_windows.ps1
@@ -45,9 +61,14 @@ The release is:
 ```text
 release/Scenespy-windows-x64/
 release/Scenespy-windows-x64.zip
+release/Scenespy-<version>-windows-x64-setup.exe
 ```
 
-User installation:
+End users should run the `*-setup.exe`. The setup wizard automatically installs
+FFmpeg and the AI runtime before launching Scenespy. The ZIP remains available
+as a portable/developer alternative and does not perform automatic setup.
+
+Portable installation:
 
 ```text
 Scenespy-windows-x64/
@@ -70,7 +91,7 @@ Run this on the target Linux family:
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
-./scripts/build_linux.sh
+bash ./scripts/build_linux.sh
 ```
 
 The build Python must have Tk support. On Debian/Ubuntu this usually means
@@ -81,9 +102,23 @@ The release is:
 ```text
 release/Scenespy-linux-x64/
 release/Scenespy-linux-x64.tar.gz
+release/Scenespy-<version>-linux-x64.run
 ```
 
-User installation:
+User installation (the app itself is installed per-user; the runtime may ask
+for administrator permission to install FFmpeg through the system package manager):
+
+```bash
+chmod +x Scenespy-<version>-linux-x64.run
+./Scenespy-<version>-linux-x64.run
+```
+
+This installs the app in `~/.local/opt/scenespy`, creates a launcher under
+`~/.local/share/applications`, links `scenespy` in `~/.local/bin`, and then
+automatically installs FFmpeg and the AI runtime.
+The tarball remains available as a portable alternative.
+
+Portable installation:
 
 ```bash
 tar -xzf Scenespy-linux-x64.tar.gz
@@ -105,16 +140,25 @@ Run this on macOS:
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
-./scripts/build_macos.sh
+bash ./scripts/build_macos.sh
 ```
 
 The release is:
 
 ```text
 release/Scenespy-macos/Scenespy.app
+release/Scenespy-<version>-macos-x64.pkg
+release/Scenespy-<version>-macos-arm64.pkg
 ```
 
-User installation:
+User installation: open the PKG and follow the installer. It installs
+`Scenespy.app` in Applications and automatically downloads FFmpeg and the AI
+runtime for the signed-in user.
+
+Unsigned local builds may require Control-click > Open. Public distribution
+should use an Apple Developer ID certificate and notarization.
+
+Portable installation:
 
 ```bash
 cd Scenespy-macos
@@ -162,8 +206,9 @@ to CPU PyTorch.
 
 Test the generated app outside the repository:
 
-1. Run the runtime installer.
-2. Open the app.
+1. Run the platform installer with an active internet connection and confirm
+   runtime setup completes automatically.
+2. Open the app without running any additional scripts.
 3. Confirm no missing FFmpeg warning appears.
 4. Process a small video with `Every seconds`.
 5. Process a small video with `Scene detection`.

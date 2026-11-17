@@ -1,6 +1,8 @@
 param(
     [ValidateSet("auto", "cpu", "cuda")]
-    [string]$TorchMode = "auto"
+    [string]$TorchMode = "auto",
+    [switch]$SkipAI,
+    [switch]$SkipFFmpeg
 )
 
 Set-StrictMode -Version Latest
@@ -55,4 +57,7 @@ Write-Host "Install target: $AppData"
 Write-Host ""
 
 Ensure-PrivatePython
-& $PrivatePython $Installer --torch-mode $TorchMode
+$RuntimeArgs = @($Installer, "--torch-mode", $TorchMode)
+if ($SkipAI) { $RuntimeArgs += "--skip-ai" }
+if ($SkipFFmpeg) { $RuntimeArgs += "--skip-ffmpeg" }
+& $PrivatePython @RuntimeArgs

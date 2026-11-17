@@ -29,6 +29,7 @@ cp scripts/install_runtime_unix.sh release/Scenespy-linux-x64/install_runtime.sh
 chmod +x release/Scenespy-linux-x64/install_runtime.sh
 
 tar -C release -czf release/Scenespy-linux-x64.tar.gz Scenespy-linux-x64
+bash ./scripts/build_linux_installer.sh
 rm -rf build dist
 
 echo "Linux distribution folder ready: $ROOT/release/Scenespy-linux-x64"

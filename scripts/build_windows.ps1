@@ -1,5 +1,6 @@
 param(
-    [switch]$Zip
+    [switch]$Zip,
+    [switch]$SkipInstaller
 )
 
 Set-StrictMode -Version Latest
@@ -11,6 +12,9 @@ $ReleaseDir = Join-Path $Root "release"
 $ReleaseApp = Join-Path $ReleaseDir "Scenespy-windows-x64"
 $DependenciesDir = Join-Path $ReleaseApp "_internal\dependencies"
 $ZipPath = Join-Path $ReleaseDir "Scenespy-windows-x64.zip"
+$VersionMatch = Select-String -Path (Join-Path $Root "scenespy\__init__.py") -Pattern '^__version__\s*=\s*"([^"]+)"$'
+if (-not $VersionMatch) { throw "Could not read Scenespy version." }
+$AppVersion = $VersionMatch.Matches[0].Groups[1].Value
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 $Python = if (Test-Path $VenvPython) { $VenvPython } else { "python" }
 
@@ -51,6 +55,20 @@ Copy-Item -Path (Join-Path $Root "scripts\install_runtime_windows.bat") -Destina
 if ($Zip) {
     Compress-Archive -Path $ReleaseApp -DestinationPath $ZipPath -CompressionLevel Optimal
     Write-Host "Windows ZIP ready: $ZipPath"
+}
+
+if (-not $SkipInstaller) {
+    $InnoCandidates = @(
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
+        (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
+    )
+    $InnoCompiler = $InnoCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+    if (-not $InnoCompiler) {
+        throw "Inno Setup 6 was not found. Install it or use -SkipInstaller for a portable build."
+    }
+    & $InnoCompiler "/DAppVersion=$AppVersion" "/DSourceDir=$ReleaseApp" "/DOutputDir=$ReleaseDir" (Join-Path $Root "installer\windows\Scenespy.iss")
+    if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
 }
 
 if (Test-Path (Join-Path $Root "build")) {

@@ -16,6 +16,17 @@ from scenespy.qt_app import (ScenespyApp, exported_path_size, final_face_crop_bo
 
 
 class ProjectModelTests(unittest.TestCase):
+    def test_project_round_trip_preserves_individual_export_size(self):
+        media = MediaItem(
+            "video.mp4", duration=1, fps=25, total_frames=25,
+            exported=True, exported_bytes=123456)
+        project = ScenespyProject(media=[media])
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "saved.scenespy"
+            project.save(path)
+            restored = ScenespyProject.load(path)
+        self.assertEqual(restored.media[0].exported_bytes, 123456)
+
     def test_reviewed_faces_folder_uses_standard_fd_name(self):
         with tempfile.TemporaryDirectory() as folder:
             path = next_output_path(
