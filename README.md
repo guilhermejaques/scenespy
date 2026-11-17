@@ -116,7 +116,7 @@ All downloads and their SHA-256 checksum files are available on the [Scenespy v0
 Download and open the installer for your system. A single English-language
 setup installs Scenespy and automatically downloads FFmpeg, the private Python
 runtime, and the AI packages. An internet connection is required during setup;
-no terminal commands or additional scripts are required.
+no terminal commands or additional scripts are required (different from version 0.1.0).
 
 The installer offers AI face detection as a large optional download and selects
 it by default. When selected, it automatically chooses CPU, NVIDIA/CUDA, or
