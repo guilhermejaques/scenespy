@@ -142,55 +142,6 @@ when the computer is offline.
 
 ---
 
-### Commands to use in the terminal
-
-Open terminal
-
-| System | How to open |
-|---|---|
-| Windows | `Win + R` → `cmd` |
-| PowerShell | Search for “PowerShell” |
-| macOS | `Command + Space` → `Terminal` |
-| Linux | `Ctrl + Alt + T` |
-
-Check which folder you are in
-
-| System | Command |
-|---|---|
-| Windows CMD | `cd` |
-| PowerShell | `pwd` |
-| macOS/Linux | `pwd` |
-
-List files
-
-| System | Command |
-|---|---|
-| Windows CMD | `dir` |
-| PowerShell | `ls` |
-| macOS/Linux | `ls` |
-
-Enter a folder
-
-| System | Command |
-|---|---|
-| Windows | `cd Downloads` |
-| macOS/Linux | `cd Downloads` |
-
-Go back one folder
-
-| System | Command |
-|---|---|
-| All | `cd ..` |
-
-Run a file
-
-| System | Command |
-|---|---|
-| PowerShell | `.\filename.ps1` |
-| macOS/Linux | `./filename.sh` |
-
----
-
 ## Run from source code
 
 You are responsible for installing Python, Python dependencies, FFmpeg/FFprobe, and libraries.
