@@ -1,22 +1,101 @@
 from .shared import *
 from . import shared as shared
+import queue
+
+
+class _FramePrefetcher:
+    """Read a few ordered frames ahead while a GPU processes the current one."""
+    _END = object()
+
+    def __init__(self, capture, stop_cb, capacity=2):
+        self.capture = capture
+        self.stop_cb = stop_cb
+        self.items = queue.Queue(maxsize=max(1, int(capacity)))
+        self.cancelled = threading.Event()
+        self.decode_seconds = 0.0
+        self.error = None
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _put(self, item):
+        while not self.cancelled.is_set() and not self.stop_cb():
+            try:
+                self.items.put(item, timeout=0.05)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _run(self):
+        try:
+            while not self.cancelled.is_set() and not self.stop_cb():
+                started = time.perf_counter()
+                ret, frame = self.capture.read()
+                self.decode_seconds += time.perf_counter() - started
+                if not ret:
+                    break
+                if not self._put(frame):
+                    return
+        except Exception as error:
+            self.error = error
+        finally:
+            self._put(self._END)
+
+    def read(self):
+        while True:
+            if self.stop_cb():
+                return False, None
+            try:
+                item = self.items.get(timeout=0.05)
+            except queue.Empty:
+                if not self.thread.is_alive():
+                    if self.error is not None:
+                        raise self.error
+                    return False, None
+                continue
+            if item is self._END:
+                if self.error is not None:
+                    raise self.error
+                return False, None
+            return True, item
+
+    def close(self):
+        self.cancelled.set()
+        self.thread.join(timeout=1.0)
+
+
+def draw_face_marker(frame, box, color=(0, 255, 0)):
+    """Draw a cheap high-contrast face marker: black keyline + color."""
+    if frame is None or len(box or ()) != 4:
+        return
+    x1, y1, x2, y2 = (int(value) for value in box)
+    cv2.rectangle(frame, (x1 + 1, y1 + 1), (x2 + 1, y2 + 1),
+                  (0, 0, 0), 2)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
 
 class FaceDetectionEngine:
     """Detects and saves representative face crops from a video. Pipeline Face Detection!"""
     def __init__(self, video, output, logbox=None, progressbar=None,
-                 previewer=None, profile="Normal", accel="cpu", preview_enabled=True):
+                 previewer=None, profile="Normal", accel="cpu", preview_enabled=True,
+                 reset_frames=None, keep_rejected=False, face_callback=None,
+                 pipeline_timings=None):
         self.video = video
         self.output = output
         self.log = logbox
         self.progress = progressbar
         self.previewer = previewer
         self.preview_enabled = preview_enabled
+        self.reset_frames = {int(frame) for frame in (reset_frames or []) if int(frame) > 0}
+        self.keep_rejected = bool(keep_rejected)
+        self.face_callback = face_callback
         self._ui_alive = True
         self._last_eta_update = 0
 
         self.profile = profile
+        self.requested_accel = accel
         self.accel = accel
+        self.acceleration_fallback_reason = None
         self._stop = False
         self._start_time = None
         self._end_time = None
@@ -24,7 +103,9 @@ class FaceDetectionEngine:
         self.done = 0
         self._face_ratio = 0.0
         self._saved_faces = []
+        self._face_candidates = []
         self._output_dir = None
+        self._stage_timings = dict(pipeline_timings or {})
 
         self.device = None
         self.model = None
@@ -33,7 +114,7 @@ class FaceDetectionEngine:
         self.YOLO = None
         self.mp = None
 
-        self.profile_cfg = {
+        profile_configs = {
             "Low": {"conf": 0.45, "min_size": 64, "ttl": 0.6,
                     "min_frames": 0.35, "min_valid_ratio": 0.65, "min_sharpness": 10,
                     "min_quality": 0.42, "strong_conf": 0.78},
@@ -43,10 +124,26 @@ class FaceDetectionEngine:
             "High": {"conf": 0.22, "min_size": 24, "ttl": 2.5,
                      "min_frames": 0.12, "min_valid_ratio": 0.18, "min_sharpness": 2,
                      "min_quality": 0.18, "strong_conf": 0.38},
-        }[profile]
+        }
+        if profile not in profile_configs:
+            available = ", ".join(profile_configs)
+            raise ValueError(
+                f"Unsupported face sensitivity: {profile!r}. "
+                f"Choose one of: {available}.")
+        self.profile_cfg = profile_configs[profile]
 
         self.last_preview = 0
         self._cap = None
+
+    def _publish_face_candidate(self, metadata):
+        """Publish one finalized track without making UI failures fatal."""
+        if not self.face_callback or self._stop or not self._ui_alive:
+            return
+        try:
+            self.face_callback(dict(metadata))
+        except Exception as error:
+            if DEBUG:
+                print(f"[DEBUG] Failed to publish face candidate: {error}")
 
     def _load_deps(self):
         """Load heavy dependencies on worker thread to avoid blocking UI."""
@@ -59,7 +156,8 @@ class FaceDetectionEngine:
             raise RuntimeError(
                 "Face detection requires PyTorch, but it was not found.\n\n"
                 f"AI pack folder: {shared.AI_PACK_DIR}\n"
-                "Run install_runtime next to the app, restart Scenespy, then try again."
+                "Reinstall Scenespy with an internet connection, restart the app, "
+                "and then try again."
             )
         if self._stop:
             return
@@ -82,13 +180,41 @@ class FaceDetectionEngine:
         self.mp = mp
 
         use_cuda = self.accel == "nvidia" and self.torch.cuda.is_available()
-        self.device = "cuda:0" if use_cuda else "cpu"
-        if not use_cuda:
+        mps_backend = getattr(
+            getattr(self.torch, "backends", None), "mps", None)
+        use_mps = (
+            self.accel == "apple" and mps_backend is not None and
+            mps_backend.is_available())
+        if use_cuda:
+            self.device = "cuda:0"
+        elif use_mps:
+            self.device = "mps"
+        else:
+            if self.accel != "cpu":
+                self.acceleration_fallback_reason = (
+                    f"{self.accel} inference backend is not available")
+            self.device = "cpu"
             self.accel = "cpu"
 
         self.model = YOLO(MODEL_FILE)
         if self._stop:
             return
+        if self.device != "cpu":
+            try:
+                # Validate this exact model/backend before opening the source
+                # video or creating any output. Unsupported GPU operations then
+                # fall back cleanly instead of leaving a partial project.
+                self.model.predict(
+                    np.zeros((64, 64, 3), dtype=np.uint8),
+                    conf=self.profile_cfg["conf"], iou=0.45, imgsz=640,
+                    device=self.device, half=use_cuda, verbose=False)
+            except Exception as error:
+                self.acceleration_fallback_reason = (
+                    str(error).strip()[:500] or
+                    f"The face model is not compatible with {self.device}")
+                self.accel = "cpu"
+                self.device = "cpu"
+                self.model = YOLO(MODEL_FILE)
 
         if mp is not None:
             self.mp_face = mp.solutions.face_mesh.FaceMesh(
@@ -347,9 +473,16 @@ class FaceDetectionEngine:
         state, covariance = self._new_sort_state(detection["box"])
         timestamp = self._frame_time(frame_idx, fps)
         valid = 1 if detection.get("landmarks_valid") else 0
+        candidate = {
+            "frame": int(frame_idx),
+            "box": list(detection["box"]),
+            "crop_box": list(detection["crop_box"]),
+        }
         return {
             "id": track_id,
             "box": detection["box"],
+            "best_box": tuple(int(value) for value in detection["box"]),
+            "best_crop_box": tuple(int(value) for value in detection["crop_box"]),
             "state": state,
             "covariance": covariance,
             "ttl": ttl_frames,
@@ -367,11 +500,21 @@ class FaceDetectionEngine:
             "first_frame": int(frame_idx),
             "last_frame": int(frame_idx),
             "best_frame": int(frame_idx),
+            "recent_candidates": [candidate],
+            "review_candidates": [candidate],
         }
 
     def _update_face_track(self, track, detection, ttl_frames, min_lm_frames, frame_idx, fps):
         timestamp = self._frame_time(frame_idx, fps)
         self._sort_update(track, detection["box"])
+        candidate = {
+            "frame": int(frame_idx),
+            "box": list(detection["box"]),
+            "crop_box": list(detection["crop_box"]),
+        }
+        recent = track.setdefault("recent_candidates", [])
+        recent.append(candidate)
+        del recent[:-16]
         track["ttl"] = ttl_frames
         track["frames"] += 1
         track["last_seen"] = timestamp
@@ -383,21 +526,46 @@ class FaceDetectionEngine:
             track["face_aspect"] = detection["face_aspect"]
             track["touches_top"] = detection["touches_top"]
             track["face"] = detection["face_crop"].copy()
+            track["best_box"] = tuple(int(value) for value in detection["box"])
+            track["best_crop_box"] = tuple(int(value) for value in detection["crop_box"])
             track["best_time"] = timestamp
             track["best_frame"] = int(frame_idx)
+            track["review_candidates"] = list(recent)
+        elif len(track.setdefault("review_candidates", [])) < 31:
+            track["review_candidates"].append(candidate)
         if detection.get("landmarks_valid") or (
                 track["frames"] >= min_lm_frames and self._valid_landmarks(detection["face_raw"])):
             track["valid"] = min(track["valid"] + 1, track["frames"])
 
     def _save_face_track_if_valid(self, track, outdir, min_required, cfg):
-        if (track["frames"] >= min_required and
-                self._track_passes_face_gate(track, cfg) and
-                track.get("face") is not None):
-            fname = f"face_{self.done + 1:04d}.png"
+        has_enough_frames = track["frames"] >= min_required
+        passes_gate = self._track_passes_face_gate(track, cfg)
+        accepted = bool(has_enough_frames and passes_gate and track.get("face") is not None)
+        if accepted:
+            fname = f"face_{self.done + 1}.png"
             path = os.path.join(outdir, fname)
             if cv2.imwrite(path, track["face"]):
                 self.done += 1
-                self._saved_faces.append(self._face_metadata(track, fname))
+                metadata = self._face_metadata(track, fname)
+                metadata.update(accepted=True, rejection_reason="")
+                self._saved_faces.append(metadata)
+                self._face_candidates.append(metadata)
+                self._publish_face_candidate(metadata)
+                return
+        if not self.keep_rejected:
+            return
+        reason = ("Insufficient duration" if not has_enough_frames else
+                  "Automatic quality filter" if not passes_gate else
+                  "Crop could not be saved")
+        fname = f"candidate_{int(track.get('id', 0))}.png"
+        face = track.get("face")
+        saved = bool(face is not None and cv2.imwrite(
+            os.path.join(outdir, fname), face,
+            [int(cv2.IMWRITE_PNG_COMPRESSION), 1]))
+        metadata = self._face_metadata(track, fname if saved else "")
+        metadata.update(accepted=False, rejection_reason=reason)
+        self._face_candidates.append(metadata)
+        self._publish_face_candidate(metadata)
 
     def run(self):
         if self._stop:
@@ -418,9 +586,10 @@ class FaceDetectionEngine:
         self._start_time = time.time()
         cap = cv2.VideoCapture(self.video)
         self._cap = cap
+        prefetcher = None
         try:
             if self.progress and self._ui_alive:
-                self.progress.after(0, lambda: self.progress.set_status("Detecting faces..."))
+                self.progress.after(0, lambda: self.progress.set_status("Detecting faces"))
             fps, total_frames = self._get_video_timing(cap)
 
             tracks = []
@@ -428,6 +597,9 @@ class FaceDetectionEngine:
                                       profile=self.profile, accel=self.accel)
             self._output_dir = outdir
             frame_idx = 0
+            inferred_frames = 0
+            decode_seconds = 0.0
+            inference_seconds = 0.0
             track_id = 0
             min_lm_frames = 1 if self.profile == "High" else 2
             iou_thresh = 0.45
@@ -439,30 +611,50 @@ class FaceDetectionEngine:
             effective_fps = fps * (sample_keep / sample_cycle)
             ttl_frames = max(2, int(round(effective_fps * self.profile_cfg["ttl"])))
             min_required_frames = 3
+            if self.device != "cpu":
+                prefetcher = _FramePrefetcher(
+                    cap, stop_cb=lambda: self._stop, capacity=2)
 
             while cap.isOpened():
                 if self._stop:
                     break
-                ret, frame = cap.read()
+                if prefetcher is not None:
+                    ret, frame = prefetcher.read()
+                else:
+                    decode_started = time.perf_counter()
+                    ret, frame = cap.read()
+                    decode_seconds += time.perf_counter() - decode_started
                 if not ret:
                     break
 
                 frame_idx += 1
+                if frame_idx - 1 in self.reset_frames and tracks:
+                    cfg = self.profile_cfg
+                    min_required = max(
+                        min_required_frames, int(effective_fps * cfg["min_frames"]))
+                    for track in tracks:
+                        self._save_face_track_if_valid(
+                            track, outdir, min_required, cfg)
+                    tracks = []
                 should_infer = ((frame_idx - 1) % sample_cycle) < sample_keep
                 if not should_infer:
-                    if self.previewer and self.preview_enabled:
+                    if (self.previewer and self.preview_enabled and
+                            getattr(self.previewer, "enabled", True)):
                         now = time.time()
                         if now - self.last_preview >= PREVIEW_INTERVAL:
                             draw = frame.copy()
                             for t in tracks:
                                 x1, y1, x2, y2 = t["box"]
-                                cv2.rectangle(draw, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                                draw_face_marker(draw, (x1, y1, x2, y2))
                             img = resize_for_preview(
                                 Image.fromarray(cv2.cvtColor(draw, cv2.COLOR_BGR2RGB)))
                             if img and self._ui_alive:
+                                preview_time = self._frame_time(max(0, frame_idx - 1), fps)
                                 self.previewer.after(
-                                    0, lambda img=img: (
-                                        self.previewer.update_image(img)
+                                    0, lambda img=img, seconds=preview_time: (
+                                        (self.previewer.update_image_at(img, seconds)
+                                         if hasattr(self.previewer, "update_image_at") else
+                                         self.previewer.update_image(img))
                                         if self._ui_alive else None))
                             self.last_preview = now
 
@@ -484,10 +676,13 @@ class FaceDetectionEngine:
                     continue
 
                 use_cuda = self.device.startswith("cuda")
+                inference_started = time.perf_counter()
                 results = self.model.predict(
                     frame, conf=self.profile_cfg["conf"], iou=iou_thresh,
                     imgsz=640 if frame.shape[1] <= 1280 else 800,
                     device=self.device, half=use_cuda, verbose=False)[0]
+                inference_seconds += time.perf_counter() - inference_started
+                inferred_frames += 1
 
                 detections = []
                 boxes_xyxy = results.boxes.xyxy
@@ -533,6 +728,7 @@ class FaceDetectionEngine:
                     landmarks_valid = self._valid_landmarks(face_raw)
                     detections.append({
                         "box": (x1, y1, x2, y2),
+                        "crop_box": (cx1, cy1, cx2, cy2),
                         "face_raw": face_raw,
                         "face_crop": face_crop,
                         "sharp": sharp,
@@ -574,19 +770,23 @@ class FaceDetectionEngine:
 
                 tracks = active_tracks
 
-                if self.previewer and self.preview_enabled:
+                if (self.previewer and self.preview_enabled and
+                        getattr(self.previewer, "enabled", True)):
                     now = time.time()
                     if now - self.last_preview >= PREVIEW_INTERVAL:
                         draw = frame.copy()
                         for t in tracks:
                             x1, y1, x2, y2 = t["box"]
-                            cv2.rectangle(draw, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                            draw_face_marker(draw, (x1, y1, x2, y2))
                         img = resize_for_preview(
                             Image.fromarray(cv2.cvtColor(draw, cv2.COLOR_BGR2RGB)))
                         if img and self._ui_alive:
+                            preview_time = self._frame_time(max(0, frame_idx - 1), fps)
                             self.previewer.after(
-                                0, lambda img=img: (
-                                    self.previewer.update_image(img)
+                                0, lambda img=img, seconds=preview_time: (
+                                    (self.previewer.update_image_at(img, seconds)
+                                     if hasattr(self.previewer, "update_image_at") else
+                                     self.previewer.update_image(img))
                                     if self._ui_alive else None))
                         self.last_preview = now
 
@@ -617,7 +817,9 @@ class FaceDetectionEngine:
                 self.log.after(0, lambda d=self.detected, c=self.done:
                 self.log.write_status(detected=d, cut=c, eta="00:00"))
         finally:
-
+            if prefetcher is not None:
+                prefetcher.close()
+                decode_seconds = prefetcher.decode_seconds
             if cap:
                 try:
                     cap.release()
@@ -628,6 +830,10 @@ class FaceDetectionEngine:
                 try:
                     if self.torch.cuda.is_available():
                         self.torch.cuda.empty_cache()
+                    elif (self.device == "mps" and
+                          hasattr(self.torch, "mps") and
+                          hasattr(self.torch.mps, "empty_cache")):
+                        self.torch.mps.empty_cache()
                 except Exception:
                     pass
             self.model = None
@@ -641,6 +847,20 @@ class FaceDetectionEngine:
             self.device = None
 
         self._end_time = time.time()
+        total_seconds = max(0.0, self._end_time - self._start_time)
+        self._stage_timings.update({
+            "decode_seconds": round(decode_seconds, 6),
+            "inference_seconds": round(inference_seconds, 6),
+            "postprocess_and_ui_seconds": round(max(
+                0.0, total_seconds - decode_seconds - inference_seconds), 6),
+            "inferred_frames": int(inferred_frames),
+            "decode_prefetch": prefetcher is not None,
+            "processing_seconds": round(total_seconds, 6),
+        })
+        self._stage_timings["measured_pipeline_seconds"] = round(
+            total_seconds + float(
+                self._stage_timings.get("analysis_proxy_seconds", 0.0) or 0.0),
+            6)
         self._write_face_metadata(outdir, fps, frame_idx)
         return not self._stop
 
@@ -678,6 +898,12 @@ class FaceDetectionEngine:
         best_time = float(track.get("best_time", first_seen))
         frames_seen = int(track.get("frames", 0))
         valid_frames = int(track.get("valid", 0))
+        candidates_by_frame = {
+            int(candidate["frame"]): candidate
+            for candidate in track.get("review_candidates", [])
+            if candidate.get("frame") is not None
+        }
+        candidates = [candidates_by_frame[frame] for frame in sorted(candidates_by_frame)]
         return {
             "track_id": int(track.get("id", 0)),
             "file": filename,
@@ -688,6 +914,9 @@ class FaceDetectionEngine:
             "first_frame": int(track.get("first_frame", 0)),
             "last_frame": int(track.get("last_frame", 0)),
             "best_frame": int(track.get("best_frame", 0)),
+            "box": list(track.get("best_box") or track.get("box") or ()),
+            "crop_box": list(track.get("best_crop_box") or ()),
+            "review_frames": candidates[:31],
             "frames_seen": frames_seen,
             "valid_landmark_frames": valid_frames,
             "valid_landmark_ratio": round(valid_frames / max(frames_seen, 1), 4),
@@ -700,7 +929,76 @@ class FaceDetectionEngine:
         try:
             end_time = self._end_time or time.time()
             elapsed = max(0.0, end_time - self._start_time) if self._start_time else 0.0
+            face_records = []
+            for face in self._saved_faces:
+                record = dict(face)
+                path = os.path.join(outdir, record.get("file", ""))
+                image = cv2.imread(path) if os.path.isfile(path) else None
+                record["file_size_bytes"] = (
+                    os.path.getsize(path) if os.path.isfile(path) else None)
+                record["image_width"] = (
+                    int(image.shape[1]) if image is not None else None)
+                record["image_height"] = (
+                    int(image.shape[0]) if image is not None else None)
+                face_records.append(record)
+            saved_files = [face.get("file", "") for face in face_records]
+            files_present = all(
+                filename and os.path.isfile(os.path.join(outdir, filename))
+                for filename in saved_files)
+            unique_names = len(set(saved_files)) == len(saved_files)
+            valid_frames = all(
+                int(face.get("first_frame", -1)) >= 0 and
+                int(face.get("first_frame", -1)) <= int(face.get("best_frame", -1)) <=
+                int(face.get("last_frame", -1))
+                for face in face_records)
+            valid_boxes = all(
+                len(face.get("box") or ()) == 4 and
+                len(face.get("crop_box") or ()) == 4
+                for face in face_records)
+            dimensions_match = all(
+                face["image_width"] ==
+                int(face["crop_box"][2]) - int(face["crop_box"][0]) and
+                face["image_height"] ==
+                int(face["crop_box"][3]) - int(face["crop_box"][1])
+                for face in face_records if len(face.get("crop_box") or ()) == 4)
+            issues = []
+            if not files_present:
+                issues.append("One or more saved face files are missing")
+            if not unique_names:
+                issues.append("Duplicate face filenames were generated")
+            if not valid_frames:
+                issues.append("One or more face frame ranges are invalid")
+            if not valid_boxes:
+                issues.append("One or more saved faces have invalid crop coordinates")
+            if not dimensions_match:
+                issues.append("One or more saved images do not match their crop dimensions")
+            status = "stopped" if self._stop else "completed"
+            audit_passed = not issues and not self._stop
             metadata = {
+                "summary": {
+                    "status": status,
+                    "mode": "faces",
+                    "faces_detected": int(self.detected),
+                    "faces_saved": int(self.done),
+                    "tracks_rejected": max(
+                        0, len(self._face_candidates) - len(self._saved_faces)),
+                    "frames_processed": int(frames_processed),
+                    "duration_processed": round(
+                        self._frame_time(frames_processed, fps), 4),
+                    "audit_passed": audit_passed,
+                    "issues": issues,
+                },
+                "faces": face_records,
+                "audit": {
+                    "saved_files_present": files_present,
+                    "filenames_unique": unique_names,
+                    "frame_ranges_valid": valid_frames,
+                    "crop_coordinates_valid": valid_boxes,
+                    "saved_dimensions_match_crop": dimensions_match,
+                    "identity_note": (
+                        "track_id groups one continuous face track; it does not identify a person globally."
+                    ),
+                },
                 "video": {
                     "file": os.path.basename(self.video),
                     "path": self.video,
@@ -712,25 +1010,33 @@ class FaceDetectionEngine:
                     "mode": "faces",
                     "profile": self.profile,
                     "accel": self.accel,
+                    "acceleration_requested": self.requested_accel,
+                    "acceleration_used": self.accel,
+                    "acceleration_fallback": self.requested_accel != self.accel,
+                    "acceleration_fallback_reason": self.acceleration_fallback_reason,
                     "started_at": self._format_process_timestamp(self._start_time),
                     "finished_at": self._format_process_timestamp(end_time),
                     "elapsed": self._format_elapsed(elapsed),
                     "elapsed_seconds": round(elapsed, 2),
+                    "timings": dict(self._stage_timings),
                 },
                 "output": {
                     "folder": outdir,
                 },
                 "results": {
-                    "status": "stopped" if self._stop else "completed",
+                    "status": status,
                     "faces_detected": int(self.detected),
                     "faces_saved": int(self.done),
                     "tracks_saved": len(self._saved_faces),
+                    "tracks_rejected": max(
+                        0, len(self._face_candidates) - len(self._saved_faces)),
                     "identity_note": (
                         "track_id groups continuous face tracks only; it is not a global person identity."
                     ),
                 },
-                "faces": self._saved_faces,
             }
+            if self.keep_rejected:
+                metadata["candidates"] = self._face_candidates
             with open(os.path.join(outdir, "faces.json"), "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=2)
         except Exception as e:

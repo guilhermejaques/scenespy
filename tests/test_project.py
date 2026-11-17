@@ -1,0 +1,273 @@
+import tempfile
+import unittest
+from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
+
+from PySide6.QtCore import Qt
+
+from scenespy.project import CutEvent, FaceEvent, MediaItem, ScenespyProject
+from scenespy.shared import next_output_path
+from scenespy.qt_app import (ScenespyApp, exported_path_size, final_face_crop_box,
+                             format_file_size, parse_timecode, player_timecode,
+                             primary_modifier, scrub_timecode, timecode,
+                             valid_faces_output_name,
+                             transport_timecode)
+
+
+class ProjectModelTests(unittest.TestCase):
+    def test_project_round_trip_preserves_individual_export_size(self):
+        media = MediaItem(
+            "video.mp4", duration=1, fps=25, total_frames=25,
+            exported=True, exported_bytes=123456)
+        project = ScenespyProject(media=[media])
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "saved.scenespy"
+            project.save(path)
+            restored = ScenespyProject.load(path)
+        self.assertEqual(restored.media[0].exported_bytes, 123456)
+
+    def test_reviewed_faces_folder_uses_standard_fd_name(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = next_output_path(
+                folder, "faces", "Low", "nvidia",
+                datetime(2026, 11, 16, 16, 9, 43, 297000))
+            name = Path(path).name
+            Path(path).mkdir()
+            collision_name = Path(next_output_path(
+                folder, "faces", "Low", "nvidia",
+                datetime(2026, 11, 16, 16, 9, 43, 999000))).name
+
+        self.assertEqual(name, "FD_20261116_160943_Low_nvidia")
+        self.assertEqual(collision_name, "FD_20261116_160943_Low_nvidia_2")
+        self.assertTrue(valid_faces_output_name(name))
+        self.assertTrue(valid_faces_output_name(collision_name))
+        self.assertFalse(valid_faces_output_name("243181_faces_reviewed"))
+
+    def test_all_output_modes_omit_milliseconds(self):
+        moment = datetime(2026, 11, 16, 16, 9, 43, 987000)
+        with tempfile.TemporaryDirectory() as folder:
+            names = {
+                mode: Path(next_output_path(
+                    folder, mode, "Normal", "cpu", moment)).name
+                for mode in ("scene", "interval", "faces")
+            }
+
+        self.assertEqual(names["scene"], "SD_20261116_160943_Normal_cpu")
+        self.assertEqual(names["interval"], "ES_20261116_160943_Normal_cpu")
+        self.assertEqual(names["faces"], "FD_20261116_160943_Normal_cpu")
+        self.assertNotIn("987", " ".join(names.values()))
+
+    def test_new_queue_excludes_projects_waiting_for_export(self):
+        fresh = MediaItem("fresh.mp4", 5, 24, 120)
+        pending_export = MediaItem(
+            "pending.mp4", 5, 24, 120, analyzed=True, exported=False,
+            cuts=[CutEvent(48)])
+        exported = MediaItem(
+            "finished.mp4", 5, 24, 120, analyzed=True, exported=True)
+
+        candidates = ScenespyApp._queue_candidates(
+            [pending_export, fresh, exported])
+
+        self.assertEqual(candidates, [fresh])
+        self.assertTrue(pending_export.analyzed)
+        self.assertEqual(pending_export.cuts[0].frame, 48)
+
+    def test_pending_export_action_takes_priority_over_queue(self):
+        calls = []
+        host = SimpleNamespace(
+            task=None,
+            batch_mode=True,
+            current_media=MediaItem(
+                "pending.mp4", 5, 24, 120,
+                analyzed=True, exported=False),
+            stop_current_task=lambda: calls.append("stop"),
+            export_result=lambda: calls.append("export"),
+            process_batch=lambda: calls.append("queue"),
+            analyze=lambda: calls.append("analyze"),
+        )
+
+        ScenespyApp.toggle_primary_action(host)
+
+        self.assertEqual(calls, ["export"])
+
+    def test_queue_result_preview_waits_only_for_unseen_remainder(self):
+        self.assertAlmostEqual(
+            ScenespyApp._queue_result_preview_remaining(
+                ready_at=10.0, now=10.25, minimum_ms=900),
+            .65,
+        )
+        self.assertEqual(
+            ScenespyApp._queue_result_preview_remaining(
+                ready_at=10.0, now=11.0, minimum_ms=900),
+            0.0,
+        )
+        self.assertEqual(
+            ScenespyApp._queue_result_preview_remaining(None, now=10.0),
+            0.0,
+        )
+
+    def test_file_size_uses_the_correct_scaled_unit(self):
+        self.assertEqual(format_file_size(0), "0 B")
+        self.assertEqual(format_file_size(1023), "1023 B")
+        self.assertEqual(format_file_size(1024), "1 KB")
+        self.assertEqual(format_file_size(60 * 1024 ** 2), "60 MB")
+        self.assertEqual(format_file_size(1024 ** 3), "1 GB")
+        self.assertEqual(format_file_size(3 * 1024 ** 4), "3 TB")
+        self.assertEqual(format_file_size(2 * 1024 ** 8), "2 YB")
+        self.assertEqual(format_file_size(None), "")
+
+    def test_exported_path_size_sums_only_real_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "clips").mkdir()
+            (root / "scene_001.mp4").write_bytes(b"a" * 1024)
+            (root / "clips" / "scene_002.mp4").write_bytes(b"b" * 2048)
+            self.assertEqual(exported_path_size(root), 3072)
+            self.assertEqual(
+                exported_path_size(root / "scene_001.mp4"), 1024)
+            self.assertEqual(exported_path_size(root / "missing"), 0)
+
+    def test_primary_modifier_matches_operating_system_conventions(self):
+        self.assertEqual(
+            primary_modifier("darwin"), Qt.KeyboardModifier.MetaModifier)
+        self.assertEqual(
+            primary_modifier("win32"), Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(
+            primary_modifier("linux"), Qt.KeyboardModifier.ControlModifier)
+
+    def test_editor_timecodes_are_parseable(self):
+        self.assertEqual(parse_timecode("01:02:03.500"), 3723.5)
+        self.assertEqual(parse_timecode("02:10"), 130.0)
+        self.assertIsNone(parse_timecode("not-a-time"))
+        self.assertEqual(transport_timecode(3723.987), "01:02:03")
+
+    def test_player_timecode_preserves_millisecond_position(self):
+        displayed = player_timecode(65.9874, 120)
+        self.assertEqual(displayed, "01:05.987")
+        self.assertAlmostEqual(parse_timecode(displayed), 65.987, places=3)
+        self.assertEqual(player_timecode(3723.004, 4000), "01:02:03.004")
+        self.assertAlmostEqual(parse_timecode("01:05,250"), 65.25, places=3)
+
+    def test_editor_timecodes_hide_unused_hours_consistently(self):
+        self.assertEqual(transport_timecode(65, 3599), "01:05")
+        self.assertEqual(transport_timecode(59.9999, 120), "00:59")
+        self.assertEqual(timecode(65.25, 3599), "01:05.250")
+        self.assertEqual(transport_timecode(65, 3600), "00:01:05")
+        self.assertEqual(timecode(3599.999, 3599.999), "59:59.999")
+        self.assertEqual(timecode(3599.9996, 3599.9996), "01:00:00.000")
+
+    def test_scrub_timecodes_cover_very_short_and_long_media(self):
+        self.assertEqual(scrub_timecode(.125, .8), "00:00")
+        self.assertEqual(scrub_timecode(5, 30), "00:05")
+        self.assertEqual(scrub_timecode(3661, 360_000), "01:01:01")
+        self.assertEqual(scrub_timecode(360_000, 360_000), "100:00:00")
+
+    def test_final_face_crop_box_matches_export_framing(self):
+        self.assertEqual(final_face_crop_box([100, 100, 200, 200], 1920, 1080),
+                         [65, 58, 235, 248])
+        self.assertEqual(final_face_crop_box([0, 0, 100, 100], 200, 200),
+                         [0, 0, 170, 190])
+
+    def test_cuts_are_sorted_deduplicated_and_bounded(self):
+        media = MediaItem("video.mp4", 10, 30, 300, cuts=[
+            CutEvent(200), CutEvent(100), CutEvent(100), CutEvent(999), CutEvent(-4)
+        ])
+        media.normalize_cuts()
+        self.assertEqual([cut.frame for cut in media.cuts], [1, 100, 200, 299])
+        self.assertEqual(media.segments(), [(0, 1), (1, 100), (100, 200), (200, 299), (299, 300)])
+
+    def test_frame_and_player_time_conversion_is_precise_and_bounded(self):
+        media = MediaItem("video.mp4", 10.2, 29.97, 300)
+        self.assertAlmostEqual(media.seconds_for_frame(150), 150 / 29.97, places=9)
+        self.assertEqual(media.frame_for_seconds(150 / 29.97), 150)
+        self.assertEqual(media.frame_for_seconds(-5), 0)
+        self.assertEqual(media.frame_for_seconds(999), 300)
+        self.assertAlmostEqual(media.seconds_for_frame(300), 300 / 29.97, places=9)
+
+    def test_cfr_timeline_ignores_longer_container_audio_at_final_boundary(self):
+        media = MediaItem("video.mp4", 87.04, 24000 / 1001, 2086)
+
+        self.assertAlmostEqual(
+            media.seconds_for_frame(media.total_frames), 87.0035833333,
+            places=8)
+        self.assertAlmostEqual(
+            media.seconds_for_frame(2086) - media.seconds_for_frame(2080),
+            6 / (24000 / 1001), places=9)
+
+    def test_variable_frame_rate_uses_real_frame_timestamps(self):
+        times = [0.0, 0.033, 0.071, 0.100, 0.151]
+        media = MediaItem(
+            "phone.mp4", .2, 25.0, len(times),
+            variable_frame_rate=True, frame_times=times)
+
+        self.assertEqual(media.seconds_for_frame(2), .071)
+        self.assertEqual(media.frame_for_seconds(.068), 2)
+        self.assertEqual(media.frame_for_seconds(.123), 3)
+        self.assertEqual(media.seconds_for_frame(len(times)), .2)
+
+    def test_project_round_trip_preserves_variable_frame_timing(self):
+        media = MediaItem(
+            "phone.mp4", .16, 30.0, 4,
+            variable_frame_rate=True,
+            frame_times=[0.0, .031, .070, .109])
+        with tempfile.TemporaryDirectory() as folder:
+            path = ScenespyProject(media=[media]).save(
+                Path(folder, "vfr.scenespy"))
+            loaded = ScenespyProject.load(path).media[0]
+
+        self.assertTrue(loaded.variable_frame_rate)
+        self.assertEqual(loaded.frame_times, media.frame_times)
+        self.assertEqual(loaded.frame_for_seconds(.071), 2)
+
+    def test_project_round_trip_preserves_editor_events(self):
+        project = ScenespyProject(media=[MediaItem(
+            "video.mp4", 5, 24, 120,
+            mode="interval", sensitivity="High", interval=17,
+            acceleration="nvidia",
+            analyzed=True, exported=True,
+            cuts=[CutEvent(48, "manual", original_frame=42)],
+            faces=[FaceEvent(
+                12, 30, 20, "face.png", .9, .8, [1, 2, 3, 4], [0, 0, 8, 10],
+                review_frames=[
+                    {"frame": 19, "box": [1, 2, 3, 4], "crop_box": [0, 0, 8, 10]},
+                    {"frame": 20, "box": [1, 2, 3, 4], "crop_box": [0, 0, 8, 10]},
+                ],
+                original_best_frame=20,
+                original_box=[1, 2, 3, 4],
+                original_crop_box=[0, 0, 8, 10],
+                enabled=False,
+                rejection_reason="Automatic quality filter",
+                auto_included=False,
+            )],
+            excluded_segments=[2],
+            removed_segments=[3],
+        )], queue_mode=True)
+        with tempfile.TemporaryDirectory() as folder:
+            path = project.save(Path(folder, "review"))
+            loaded = ScenespyProject.load(path)
+        self.assertTrue(path.endswith(".scenespy"))
+        self.assertEqual(loaded.media[0].cuts[0].frame, 48)
+        self.assertEqual(loaded.media[0].cuts[0].original_frame, 42)
+        self.assertEqual(loaded.media[0].faces[0].box, [1, 2, 3, 4])
+        self.assertEqual(loaded.media[0].faces[0].crop_box, [0, 0, 8, 10])
+        self.assertEqual(len(loaded.media[0].faces[0].review_frames), 2)
+        self.assertEqual(loaded.media[0].faces[0].original_best_frame, 20)
+        self.assertEqual(loaded.media[0].faces[0].original_crop_box, [0, 0, 8, 10])
+        self.assertFalse(loaded.media[0].faces[0].enabled)
+        self.assertFalse(loaded.media[0].faces[0].auto_included)
+        self.assertEqual(loaded.media[0].faces[0].rejection_reason,
+                         "Automatic quality filter")
+        self.assertEqual(loaded.media[0].excluded_segments, [2])
+        self.assertEqual(loaded.media[0].removed_segments, [3])
+        self.assertTrue(loaded.media[0].analyzed)
+        self.assertTrue(loaded.media[0].exported)
+        self.assertEqual(loaded.media[0].mode, "interval")
+        self.assertEqual(loaded.media[0].sensitivity, "High")
+        self.assertEqual(loaded.media[0].interval, 17)
+        self.assertEqual(loaded.media[0].acceleration, "nvidia")
+        self.assertTrue(loaded.queue_mode)
+
+
+if __name__ == "__main__":
+    unittest.main()

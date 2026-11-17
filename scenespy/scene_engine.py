@@ -1,10 +1,14 @@
 from .shared import *
 from .scene_analysis import *
+from pathlib import Path
+import csv
 
 class SceneEngine:
     """Detects scene boundaries and exports video segments. Scene detection Pipeline!"""
     def __init__(self, video, output, cfg, logbox=None, progressbar=None,
-                 previewer=None, preview_enabled=True, preview_pool=None):
+                 previewer=None, preview_enabled=True, preview_pool=None,
+                 export_results=True, analysis_callback=None,
+                 preview_analysis_callback=None, preview_frames=None):
         self.video = video
         self.output = output
         self.cfg = cfg
@@ -13,6 +17,11 @@ class SceneEngine:
         self.previewer = previewer
         self.preview_enabled = preview_enabled
         self.preview_pool = preview_pool or [video]
+        self.export_results = bool(export_results)
+        self.analysis_callback = analysis_callback
+        self.preview_analysis_callback = preview_analysis_callback
+        self.preview_frames = tuple(int(frame) for frame in (preview_frames or ()))
+        self.analysis_scenes = []
         self._stop = False
         self.detected = 0
         self.total = 0
@@ -30,6 +39,8 @@ class SceneEngine:
         self._ffmpeg_proc_lock = threading.Lock()
         self._ui_alive = True
         self._duration = None
+        self._ffmpeg_preview_time = None
+        self._ffmpeg_preview_image = None
         self._last_preview_ratio = -1
         self._keyframes_cache = None
         self._has_audio_cache = None
@@ -37,7 +48,6 @@ class SceneEngine:
         self._preview_lock = threading.Lock()
         self._preview_thread = None
         self._preview_stop = False
-        self._analysis_mosaic = None
         self._analysis_status_step = 0
         self._last_analysis_stage_label = None
         self._video_obj = None
@@ -45,13 +55,126 @@ class SceneEngine:
         self._rejected_scene_candidates = []
         self._cut_failures = []
         self._cut_output_dir = None
+        self._cut_scene_records = []
+        self._cut_scene_records_by_number = {}
         self._temp_files = []
         self._last_cut_ui_update = 0.0
         self._cut_ui_update_interval = 0.15
+        self._last_preview_boundaries = ()
+        self._stage_timings = dict(self.cfg.get("PIPELINE_TIMINGS") or {})
+
+    def _publish_analysis_scenes(self, scenes):
+        """Publish only the finalized boundaries used by the result."""
+        if not self.analysis_callback or self._stop or not self._ui_alive:
+            return
+        try:
+            self.analysis_callback(list(scenes))
+        except Exception as error:
+            if self.cfg.get("DEBUG", False):
+                print(f"[DEBUG] Failed to publish analysis scenes: {error}")
+
+    def _publish_preview_scenes(self, scenes):
+        if not self.preview_analysis_callback or self._stop or not self._ui_alive:
+            return
+        try:
+            self.preview_analysis_callback(list(scenes))
+        except Exception as error:
+            if self.cfg.get("DEBUG", False):
+                print(f"[DEBUG] Failed to publish preview scenes: {error}")
+
+    def _publish_preview_boundaries(self, boundaries, total_frames, fps=None):
+        """Publish a deduplicated provisional layout at analysis milestones."""
+        normalized = tuple(sorted({
+            int(frame) for frame in boundaries
+            if 0 < int(frame) < int(total_frames)}))
+        if not normalized or normalized == self._last_preview_boundaries:
+            return
+        self._last_preview_boundaries = normalized
+        self._publish_preview_scenes(
+            self._scenes_from_boundaries(normalized, total_frames, fps=fps))
+
+    def _analysis_cache_key(self):
+        try:
+            path = os.path.abspath(self.video)
+            stat = os.stat(path)
+        except OSError:
+            return None
+        return {
+            "version": 1,
+            "source": path,
+            "source_size": int(stat.st_size),
+            "source_mtime_ns": int(stat.st_mtime_ns),
+            "profile": self.cfg.get("label", "NA"),
+            "base_threshold": self.cfg.get("base_threshold"),
+            "min_dur": self.cfg.get("min_dur"),
+            "dur_max_boost": self.cfg.get("dur_max_boost"),
+        }
+
+    def _load_analysis_cache(self):
+        path = self.cfg.get("ANALYSIS_CACHE_FILE")
+        key = self._analysis_cache_key()
+        if not path or key is None:
+            return None
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            if payload.get("key") != key:
+                return None
+            scenes = [tuple(map(int, item)) for item in payload.get("scenes", ())]
+            if not scenes or any(
+                    len(item) != 2 or item[0] < 0 or item[1] <= item[0]
+                    for item in scenes):
+                return None
+            if any(left[1] > right[0] for left, right in zip(scenes, scenes[1:])):
+                return None
+            return scenes
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
+
+    def _save_analysis_cache(self, scenes):
+        path = self.cfg.get("ANALYSIS_CACHE_FILE")
+        key = self._analysis_cache_key()
+        if not path or key is None or not scenes or self._stop:
+            return
+        target = Path(path)
+        temporary = target.with_name(
+            f"{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(json.dumps({
+                "key": key,
+                "scenes": [[int(start), int(end)] for start, end in scenes],
+            }, indent=2), encoding="utf-8")
+            os.replace(temporary, target)
+        except OSError:
+            pass
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def add_temp_file(self, path):
         if path and path not in self._temp_files:
             self._temp_files.append(path)
+
+    @staticmethod
+    def _close_video_stream(video):
+        """Close PySceneDetect backends across versions lacking close()."""
+        if video is None:
+            return
+        close = getattr(video, "close", None)
+        if callable(close):
+            close()
+            return
+        container = getattr(video, "_container", None)
+        if container is not None:
+            container.close()
+        capture = getattr(video, "_capture", None)
+        if capture is not None:
+            capture.release()
+        source_io = getattr(video, "_io", None)
+        if source_io is not None and hasattr(source_io, "close"):
+            source_io.close()
 
     def cleanup_temp_files(self):
         for path in list(self._temp_files):
@@ -77,7 +200,7 @@ class SceneEngine:
             pass
         try:
             if self._video_obj:
-                self._video_obj.close()
+                self._close_video_stream(self._video_obj)
         except Exception:
             pass
         self._video_obj = None
@@ -103,16 +226,58 @@ class SceneEngine:
         self._rejected_scene_candidates = []
         self._cut_failures = []
         self._cut_output_dir = None
-        if self._analysis_mosaic:
-            self._analysis_mosaic.stop()
-            self._analysis_mosaic = None
         self.cleanup_temp_files()
 
     def disable_preview(self):
         self.preview_enabled = False
-        if self._analysis_mosaic:
-            self._analysis_mosaic.stop()
-            self._analysis_mosaic = None
+        self.finish_preview()
+
+    def start_preview(self):
+        """Start the sparse, progress-driven preview independently of run()."""
+        if (not self.preview_enabled or not self.previewer or
+                (self._preview_thread and self._preview_thread.is_alive())):
+            return
+        self._preview_stop = False
+        self._ui_alive = True
+        self.last_preview = 0
+        self._last_preview_ratio = -1
+        try:
+            with self._preview_lock:
+                self._preview_cap = cv2.VideoCapture(self.video)
+        except Exception:
+            self._preview_cap = None
+        try:
+            preview_time = self._preview_time_for_ratio(0.0)
+            img = self._get_preview_frame_at(preview_time)
+            if img and self._ui_alive:
+                self.previewer.after(
+                    0, lambda img=img, seconds=preview_time: (
+                        self.previewer.update_image_at(img, seconds)
+                        if hasattr(self.previewer, "update_image_at") else
+                        self.previewer.update_image(img)))
+        except Exception:
+            pass
+        if self.cfg.get("STATIC_PREVIEW", False):
+            return
+        self._preview_thread = threading.Thread(
+            target=self._preview_loop, daemon=True)
+        self._preview_thread.start()
+
+    def finish_preview(self, show_final=False):
+        """Stop the preview worker, optionally publishing its final frame."""
+        if (show_final and self.preview_enabled and self.previewer and
+                self._ui_alive and getattr(self.previewer, "enabled", True)):
+            try:
+                preview_time = self._preview_time_for_ratio(1.0)
+                img = self._get_preview_frame_at(preview_time)
+                if img:
+                    self.previewer.after(
+                        0, lambda img=img, seconds=preview_time: (
+                            self.previewer.update_image_at(img, seconds)
+                            if hasattr(self.previewer, "update_image_at") else
+                            self.previewer.update_image(img)))
+            except Exception:
+                pass
         self._preview_stop = True
         if self._preview_thread and self._preview_thread.is_alive() and threading.current_thread() is not self._preview_thread:
             try:
@@ -127,6 +292,29 @@ class SceneEngine:
                 self._preview_cap = None
         except Exception:
             pass
+
+    def _preview_time_for_ratio(self, ratio):
+        ratio = max(0.0, min(1.0, float(ratio)))
+        if self.preview_frames:
+            index = min(
+                len(self.preview_frames) - 1,
+                int(ratio * len(self.preview_frames)))
+            return max(0.0, self.preview_frames[index] / max(
+                self._get_video_fps(), 0.001))
+        duration = max(0.0, float(self._get_video_duration()))
+        if duration <= 0:
+            return 0.0
+        # Seeking exactly to duration targets EOF and produces no image on
+        # many OpenCV/FFmpeg backends.  Keep every preview request on a real
+        # frame, including the final 100% update used by interval mode.
+        frame_duration = 1.0 / max(self._get_video_fps(), 0.001)
+        last_frame_time = max(0.0, duration - frame_duration)
+        total_frames = getattr(self, "_total_frames", None)
+        if total_frames:
+            last_frame_time = min(
+                last_frame_time,
+                max(0.0, (int(total_frames) - 1) * frame_duration))
+        return min(last_frame_time, ratio * duration)
 
     def total_time(self):
         if not self._start_time:
@@ -154,15 +342,40 @@ class SceneEngine:
     def _process_summary(self, outdir):
         end_time = self._end_time or time.time()
         elapsed = max(0.0, end_time - self._start_time) if self._start_time else 0.0
+        measured_pipeline = sum(
+            float(self._stage_timings.get(key, 0.0) or 0.0)
+            for key in ("analysis_proxy_seconds", "analysis_seconds", "export_seconds"))
         try:
             duration = round(float(self._get_video_duration()), 4)
         except Exception:
             duration = None
+        try:
+            fps = float(self._get_video_fps())
+        except Exception:
+            fps = 0.0
+        try:
+            total_frames = int(
+                self._total_frames or
+                self._get_video_total_frames(fps, duration))
+        except Exception:
+            total_frames = None
+        timeline_duration = (
+            total_frames / fps if total_frames is not None and fps > 0 else duration)
         return {
             "video": {
                 "file": os.path.basename(self.video),
                 "path": self.video,
                 "duration": duration,
+                "timeline_duration": (
+                    round(float(timeline_duration), 6)
+                    if timeline_duration is not None else None),
+                "container_duration_difference": (
+                    round(float(duration) - float(timeline_duration), 6)
+                    if duration is not None and timeline_duration is not None else None),
+                "fps": round(fps, 6),
+                "total_frames": total_frames,
+                "file_size_bytes": (
+                    os.path.getsize(self.video) if os.path.isfile(self.video) else None),
             },
             "process": {
                 "mode": "scene" if getattr(self, "scene_mode", True) else "interval",
@@ -172,6 +385,11 @@ class SceneEngine:
                 "finished_at": self._format_process_timestamp(end_time),
                 "elapsed": self._format_elapsed(elapsed),
                 "elapsed_seconds": round(elapsed, 2),
+                "timings": {
+                    **self._stage_timings,
+                    "operation_seconds": round(elapsed, 6),
+                    "measured_pipeline_seconds": round(measured_pipeline, 6),
+                },
             },
             "output": {
                 "folder": outdir,
@@ -194,9 +412,15 @@ class SceneEngine:
     def _analysis_eta_text(self, ratio=None):
         step = getattr(self, "_analysis_status_step", 0)
         self._analysis_status_step = step + 1
-        return "..."
+        return ""
 
     def _write_analysis_status(self, label, progress=None):
+        if progress is not None:
+            # Keep the sampled preview on the same percentage as the progress
+            # bar.  Scene detection has several post-scan stages, so the raw
+            # decoded-frame ratio alone is not the overall task ratio.
+            self._analysis_ratio = max(
+                self._analysis_ratio, max(0.0, min(1.0, float(progress))))
         if self.progress:
             if label and label != self._last_analysis_stage_label:
                 self._last_analysis_stage_label = label
@@ -226,27 +450,11 @@ class SceneEngine:
         self._rejected_scene_candidates = []
         self._cut_failures = []
         self._cut_output_dir = None
-        self._analysis_mosaic = None
         self._analysis_status_step = 0
         self._last_analysis_stage_label = None
+        self._last_preview_boundaries = ()
 
-        if self.previewer and self.preview_enabled:
-            try:
-                img = self._get_preview_frame_at(0)
-                if img and self._ui_alive:
-                    self.previewer.after(0, lambda img=img: self.previewer.update_image(img))
-            except Exception:
-                pass
-
-        if self.preview_enabled:
-            try:
-                with self._preview_lock:
-                    self._preview_cap = cv2.VideoCapture(self.video)
-            except Exception:
-                self._preview_cap = None
-
-        self._preview_thread = threading.Thread(target=self._preview_loop, daemon=True)
-        self._preview_thread.start()
+        self.start_preview()
 
         if self.previewer and not self._video_info_shown:
             info_text = self._get_video_info_text()
@@ -254,43 +462,38 @@ class SceneEngine:
             self._video_info_shown = True
 
         try:
-            if self.preview_enabled and self.previewer:
-                self._analysis_mosaic = AnalysisMosaicPreview(
-                    self.preview_pool, self.previewer, stop_cb=lambda: self._stop)
-                self._analysis_mosaic.start()
-            scenes = self._detect_scenes_progressive() if scene_mode else self._fixed_interval()
-            if self._analysis_mosaic:
-                self._analysis_mosaic.stop()
-                self._analysis_mosaic = None
+            analysis_started = time.perf_counter()
+            cached_scenes = self._load_analysis_cache() if scene_mode else None
+            if cached_scenes is not None:
+                scenes = cached_scenes
+                self.detected = len(scenes)
+                self._analysis_ratio = 1.0
+                self._stage_timings["analysis_cache_hit"] = True
+                self._write_analysis_status("reusing analysis", 1.0)
+            else:
+                scenes = (self._detect_scenes_progressive()
+                          if scene_mode else self._fixed_interval())
+                self._stage_timings["analysis_cache_hit"] = False
+                if scene_mode and scenes and not self._stop:
+                    self._save_analysis_cache(scenes)
+            self._stage_timings["analysis_seconds"] = round(
+                time.perf_counter() - analysis_started, 6)
             if not scenes or self._stop:
                 return False
+
+            self.analysis_scenes = list(scenes)
+            self._publish_analysis_scenes(self.analysis_scenes)
 
             if self.log:
                 self.log.after(0, lambda: self.log.write_status(detected=self.detected, cut=0, eta="--:--"))
 
-            self._cut_scenes(scenes)
+            if self.export_results:
+                self._cut_scenes(scenes)
             if self._stop:
                 return False
         finally:
-            if self._analysis_mosaic:
-                self._analysis_mosaic.stop()
-                self._analysis_mosaic = None
             self._ui_alive = False
-            self._preview_stop = True
-            if self._preview_thread and self._preview_thread.is_alive():
-                try:
-                    self._preview_thread.join(timeout=1.0)
-                except Exception:
-                    pass
-            self._preview_thread = None
-
-            try:
-                with self._preview_lock:
-                    if self._preview_cap:
-                        self._preview_cap.release()
-                    self._preview_cap = None
-            except Exception:
-                pass
+            self.finish_preview()
             self.cleanup_temp_files()
 
         self._end_time = time.time()
@@ -385,7 +588,7 @@ class SceneEngine:
         fps = self._get_video_fps()
 
         if self.progress:
-            self.progress.after(0, lambda: self.progress.set_status("Analyzing video..."))
+            self.progress.after(0, lambda: self.progress.set_status("Analyzing video"))
         if self.log:
             self.log.after(0, lambda: self.log.write_status(
                 detected=self.detected, cut=0, eta=self._analysis_eta_text()))
@@ -426,7 +629,7 @@ class SceneEngine:
             try:
                 _ = video.frame_rate
             except Exception:
-                video.close()
+                self._close_video_stream(video)
                 self._video_obj = None
                 raise RuntimeError("Failed to read video stream")
 
@@ -463,7 +666,11 @@ class SceneEngine:
                     self._total_frames = int(video.frame_rate * 1)
                 video_duration = max((self._total_frames or 1) / fps, 1.0)
 
+        published_cut_frames = ()
+        published_preview_ratio = -1.0
+
         def _progress_cb(frame_num, _):
+            nonlocal published_cut_frames, published_preview_ratio
             if self._stop:
                 raise RuntimeError("Stopped")
 
@@ -479,15 +686,37 @@ class SceneEngine:
                 return True
             self._last_ui_update = time.time()
 
+            if self.preview_analysis_callback:
+                try:
+                    cut_frames = tuple(
+                        int(cut.get_frames()) for cut in
+                        scene_manager.get_cut_list(show_warning=False))
+                    preview_ratio = frame_idx / max(self._total_frames or frame_idx, 1)
+                    should_publish = (
+                        cut_frames != published_cut_frames and cut_frames and
+                        (published_preview_ratio < 0 or
+                         preview_ratio - published_preview_ratio >= 0.025))
+                    if should_publish:
+                        published_cut_frames = cut_frames
+                        published_preview_ratio = preview_ratio
+                        self._publish_preview_boundaries(
+                            cut_frames,
+                            self._total_frames or max(frame_idx, 1), fps=fps)
+                except Exception:
+                    pass
+
             if video_duration and video_duration > 0:
                 ratio = min(current_time / video_duration, 1.0)
             else:
                 ratio = self.done / max(self.total, 1)
-            ratio = max(self._analysis_ratio, ratio)
+            # The initial frame scan occupies 40% of the scene-analysis bar.
+            # Preview timestamps must follow that displayed percentage rather
+            # than racing to the end of the video while the bar is at 40%.
+            ratio = max(self._analysis_ratio, ratio * 0.4)
             self._analysis_ratio = ratio
 
             if self.progress:
-                self.progress.after(0, lambda v=ratio * 0.4: self.progress.update(v))
+                self.progress.after(0, lambda v=ratio: self.progress.update(v))
 
             if self.log:
                 eta = self._analysis_eta_text(ratio)
@@ -524,16 +753,16 @@ class SceneEngine:
             if needs_retry and backend == "pyav":
                 try:
                     if video:
-                        video.close()
+                        self._close_video_stream(video)
                         self._video_obj = None
                 except Exception:
                     pass
                 fixed = self.video.rsplit(".", 1)[0] + "_fixed.mp4"
                 remove_temp_file(fixed)
                 self.add_temp_file(fixed)
-                print(f"Video has corrupted frames - re-encoding with ffmpeg...")
+                print("Video has corrupted frames - re-encoding with ffmpeg")
                 if self.progress:
-                    self.progress.after(0, lambda: self.progress.set_status("Fixing corrupted video..."))
+                    self.progress.after(0, lambda: self.progress.set_status("Fixing corrupted video"))
                 if self.log:
                     self.log.after(0, lambda: self.log.write_status(
                         detected=self.detected, cut=0, eta="--:--"))
@@ -553,7 +782,7 @@ class SceneEngine:
                 if os.path.exists(fixed):
                     print(f"Using fixed video: {fixed}")
                     if not is_valid_video_file(fixed, stop_cb=lambda: self._stop):
-                        print(f"Fixed file is corrupted, re-encoding again...")
+                        print("Fixed file is corrupted, re-encoding again")
                         remove_temp_file(fixed)
                         self._run_ffmpeg_tracked(
                             ["ffmpeg", "-y", "-err_detect", "ignore_err",
@@ -597,7 +826,7 @@ class SceneEngine:
                                 self.log.after(0, lambda: self.log.write_status(
                                     detected=self.detected, cut=0, eta="--:--"))
                             return []
-                    print(f"Video opened successfully, starting detection...")
+                    print("Video opened successfully, starting detection")
                     scene_manager = SceneManager(StatsManager())
                     scene_manager.auto_downscale = False
                     scene_manager.downscale = 2
@@ -608,6 +837,9 @@ class SceneEngine:
                                         weights=CompWeights(
                                             delta_hue=0.85, delta_sat=0.85, delta_lum=1.0, delta_edges=1.15))
                     )
+                    published_cut_frames = ()
+                    published_preview_ratio = -1.0
+                    self._last_preview_boundaries = ()
                     self._write_analysis_status("running scene detector", 0.05)
                     scene_manager.detect_scenes(video=video, callback=_progress_cb)
                     if self._stop:
@@ -620,7 +852,7 @@ class SceneEngine:
                         self.log.after(0, lambda d=self.detected: self.log.write_status(
                             detected=d, cut=0, eta="--:--"))
                     try:
-                        video.close()
+                        self._close_video_stream(video)
                         self._video_obj = None
                     except Exception:
                         pass
@@ -639,7 +871,7 @@ class SceneEngine:
         finally:
             try:
                 if video:
-                    video.close()
+                    self._close_video_stream(video)
                     self._video_obj = None
             except Exception:
                 pass
@@ -687,11 +919,19 @@ class SceneEngine:
             stop_cb=lambda: self._stop, features=feature_cache)
         if self._stop:
             return []
+        self._publish_preview_boundaries(
+            (candidate["frame"] for candidate in
+             hard_candidates + gradual_candidates),
+            total_frames, fps=fps)
         semantic_candidates = _detect_semantic_transitions(
             self.video, fps, total_frames, profile=profile,
             stop_cb=lambda: self._stop, features=feature_cache)
         if self._stop:
             return []
+        self._publish_preview_boundaries(
+            (candidate["frame"] for candidate in
+             hard_candidates + gradual_candidates + semantic_candidates),
+            total_frames, fps=fps)
         self._log_detection_stage("transition_candidates")
 
         min_gap = self._boundary_min_gap_frames(fps, min_dur, profile)
@@ -703,6 +943,9 @@ class SceneEngine:
             stop_cb=lambda: self._stop)
         if self._stop:
             return []
+        self._publish_preview_boundaries(
+            (candidate["frame"] for candidate in candidates),
+            total_frames, fps=fps)
         self._log_detection_stage("candidate_refine")
         self._write_analysis_status("refining cuts", 0.70)
         candidates = self._merge_candidates(candidates, min_gap, total_frames)
@@ -710,9 +953,15 @@ class SceneEngine:
             self.video, candidates, fps, total_frames, stop_cb=lambda: self._stop)
         if self._stop:
             return []
+        self._publish_preview_boundaries(
+            (candidate["frame"] for candidate in candidates),
+            total_frames, fps=fps)
         self._log_detection_stage("candidate_context")
         self._write_analysis_status("checking context", 0.82)
         candidates, rejected = self._classify_candidates(candidates, fps, total_frames, profile, min_dur)
+        self._publish_preview_boundaries(
+            (candidate["frame"] for candidate in candidates),
+            total_frames, fps=fps)
         self._log_detection_stage("candidate_classify")
         self._write_analysis_status("preparing cuts", 0.90)
         self._scene_candidates = candidates
@@ -906,7 +1155,53 @@ class SceneEngine:
                 scenes.append((start_frame, end_frame))
             t += interval
         self.detected = len(scenes)
+        self._pace_fixed_interval_preview()
+        self._analysis_ratio = 1.0
+        if self.progress:
+            self.progress.after(0, lambda: self.progress.update(1.0))
         return scenes
+
+    def _pace_fixed_interval_preview(self):
+        """Give the shared progress-driven preview time to display frames."""
+        if (not self.preview_enabled or not self.previewer or
+                not getattr(self.previewer, "enabled", True) or self._stop):
+            return
+        # Scene Detection naturally advances over time while decoding.  Fixed
+        # intervals are calculated immediately, so advance only their visual
+        # progress over a short window.  The existing preview thread remains
+        # solely responsible for frame decoding, sizing, and publication.
+        duration = max(0.0, float(
+            self.cfg.get("INTERVAL_PREVIEW_SECONDS", 1.0)))
+        if duration <= 0:
+            return
+        started = time.monotonic()
+        # Match the Scene Detection preview cadence.  Emitting on the 25 ms
+        # cancellation poll used to flood the Qt event queue, repeatedly
+        # restarting progress/playhead animations and causing lag or crashes.
+        steps = max(1, int(round(duration / PREVIEW_INTERVAL)))
+        for step in range(1, steps + 1):
+            if self._stop:
+                return
+            self._analysis_ratio = step / steps
+            if self.progress:
+                self.progress.after(
+                    0, lambda value=self._analysis_ratio:
+                    self.progress.update(value))
+            deadline = started + duration * step / steps
+            while not self._stop and time.monotonic() < deadline:
+                time.sleep(min(.025, deadline - time.monotonic()))
+        # The background worker may still be completing its previous seek when
+        # this instant analysis ends.  Publish the final sample through the
+        # same decoder/sizing/adapter path before run() shuts that worker down.
+        if not self._stop and getattr(self.previewer, "enabled", True):
+            preview_time = self._preview_time_for_ratio(1.0)
+            image = self._get_preview_frame_at(preview_time)
+            if image is not None and self._ui_alive:
+                self.previewer.after(
+                    0, lambda img=image, seconds=preview_time: (
+                        self.previewer.update_image_at(img, seconds)
+                        if hasattr(self.previewer, "update_image_at") else
+                        self.previewer.update_image(img)))
 
     def _record_cut_failure(self, task, error):
         idx, output_file, start_time, end_time, _aligned_start, _aligned_end, _start_frame, _end_frame, _precise = task
@@ -921,19 +1216,63 @@ class SceneEngine:
             "error": message[:1000],
         }
         self._cut_failures.append(failure)
+        record = getattr(self, "_cut_scene_records_by_number", {}).get(int(idx))
+        if record is not None:
+            record.update(
+                status="failed",
+                exported=False,
+                error_type=type(error).__name__,
+                error=message[:1000],
+            )
         self.failed = len(self._cut_failures)
         return failure
+
+    def _scene_export_records(self, scenes, scene_numbers, fps):
+        """Describe the exact half-open frame ranges shown and exported."""
+        records = []
+        for number, (start_frame, end_frame) in zip(scene_numbers, scenes):
+            number = int(number)
+            start_frame, end_frame = int(start_frame), int(end_frame)
+            start_time = self._time_for_frame(start_frame, fps)
+            end_time = self._time_for_frame(end_frame, fps)
+            records.append({
+                "scene_number": number,
+                "file": f"scene_{number}.mp4",
+                "start_frame": start_frame,
+                "end_frame": end_frame,
+                "last_frame": end_frame - 1,
+                "frame_count": max(0, end_frame - start_frame),
+                "start_time": round(float(start_time), 6),
+                "end_time": round(float(end_time), 6),
+                "duration": round(max(0.0, float(end_time) - float(start_time)), 6),
+                "actual_duration": None,
+                "file_size_bytes": None,
+                "status": "pending",
+                "exported": False,
+            })
+        return records
 
     def _write_cut_failure_report(self, outdir):
         if not self._cut_failures:
             return None
         path = os.path.join(outdir, "cut_errors.json")
-        report = self._process_summary(outdir)
-        report["results"] = {
+        process_metadata = self._process_summary(outdir)
+        results = {
             "failed_cuts": len(self._cut_failures),
             "failed_duration": round(sum(float(f.get("duration", 0.0)) for f in self._cut_failures), 4),
         }
-        report["failed_scenes"] = self._cut_failures
+        report = {
+            "summary": {
+                "status": "completed_with_errors",
+                "mode": process_metadata["process"]["mode"],
+                "failed_cuts": results["failed_cuts"],
+                "failed_duration": results["failed_duration"],
+                "action": "Check each failed_scenes error and retry the export.",
+            },
+            "failed_scenes": self._cut_failures,
+            "results": results,
+            **process_metadata,
+        }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2)
         return path
@@ -970,7 +1309,11 @@ class SceneEngine:
                     f"Output duration is too long ({actual_duration:.2f}s of {expected_duration:.2f}s)")
         return actual_duration
 
-    def _cut_scenes(self, scenes):
+    def _cut_progress_label(self, completed, total):
+        noun = "Scenes" if self.scene_mode else "Segments"
+        return f"{noun} cut: {int(completed)} / {int(total)}"
+
+    def _cut_scenes(self, scenes, scene_numbers=None):
         outdir = build_output_dir(
             self.output,
             mode="scene" if self.scene_mode else "interval",
@@ -985,19 +1328,33 @@ class SceneEngine:
         self.done = 0
         self.completed_attempts = 0
         self._cut_start_time = time.time()
+        export_started = time.perf_counter()
         self._cut_lock = threading.Lock()
         self._last_cut_ui_update = 0.0
         if self.progress:
-            label = "Cutting scenes..." if self.scene_mode else "Cutting segments..."
+            label = self._cut_progress_label(0, self.total)
             self.progress.after(0, self.progress.reset)
             self.progress.after(0, lambda text=label: self.progress.set_status(text))
 
         keyframes = self._get_keyframes() or [0.0]
+        numbers = (list(scene_numbers) if scene_numbers is not None else
+                   list(range(1, len(scenes) + 1)))
+        if len(numbers) != len(scenes):
+            raise ValueError("scene_numbers must match the number of scenes")
+        self._cut_scene_records = self._scene_export_records(
+            scenes, numbers, fps)
+        self._cut_scene_records_by_number = {
+            record["scene_number"]: record
+            for record in self._cut_scene_records
+        }
         tasks = []
-        for i, (start_frame, end_frame) in enumerate(scenes):
-            start_time = start_frame / fps
-            end_time = end_frame / fps
-            output_file = os.path.join(outdir, f"scene_{i:03d}.mp4")
+        for i, (start_frame, end_frame) in zip(numbers, scenes):
+            i = int(i)
+            if i < 1:
+                raise ValueError("scene numbers must start at 1")
+            start_time = self._time_for_frame(start_frame, fps)
+            end_time = self._time_for_frame(end_frame, fps)
+            output_file = os.path.join(outdir, f"scene_{i}.mp4")
             aligned_start = self._nearest_keyframe_before(start_time, keyframes)
             aligned_end = self._nearest_keyframe_after(end_time, keyframes)
             start_delta = abs(start_time - aligned_start)
@@ -1016,11 +1373,33 @@ class SceneEngine:
         def _cut_one(task):
             idx, output_file, start_time, end_time, aligned_start, aligned_end, start_frame, end_frame, precise = task
             if precise:
-                self._run_ffmpeg_precise_cut(
+                acceleration = self._run_ffmpeg_precise_cut(
                     self.video, start_frame, end_frame, output_file, aligned_start)
             else:
                 self._run_ffmpeg_copy(start_time, end_time, output_file)
-            self._validate_cut_output(output_file, end_time - start_time)
+                acceleration = {
+                    "requested": self.cfg.get("ENCODER", "cpu"),
+                    "used": "stream_copy",
+                    "fallback": False,
+                    "fallback_reason": None,
+                }
+            actual_duration = self._validate_cut_output(
+                output_file, end_time - start_time)
+            return actual_duration, acceleration
+
+        def _record_cut_success(task, cut_result):
+            actual_duration, acceleration = cut_result
+            record = self._cut_scene_records_by_number.get(int(task[0]))
+            if record is not None:
+                record.update(
+                    actual_duration=round(float(actual_duration), 6),
+                    file_size_bytes=(
+                        os.path.getsize(task[1])
+                        if os.path.isfile(task[1]) else None),
+                    status="exported",
+                    exported=True,
+                    acceleration=acceleration,
+                )
 
         def _schedule_cut_ui_update(force=False):
             now = time.time()
@@ -1034,13 +1413,35 @@ class SceneEngine:
             eta = self._calculate_eta()
             if self.progress and total > 0:
                 ratio = completed / total
+                label = self._cut_progress_label(done, total)
+                self.progress.after(
+                    0, lambda text=label: self.progress.set_status(text))
                 self.progress.after(0, lambda v=ratio: self.progress.update(v))
             if self.log:
                 self.log.after(0, lambda d=detected, c=done, e=eta: self.log.write_status(d, c, e))
 
-        if self.total <= 1:
+
+        def _grouped_progress(completed):
+            self.completed_attempts = max(
+                self.completed_attempts, int(completed))
+            self.done = self.completed_attempts
+            _schedule_cut_ui_update(
+                force=self.completed_attempts >= self.total)
+
+        grouped_results = self._run_grouped_interval_export(
+            tasks, outdir, fps, progress_cb=_grouped_progress)
+        if grouped_results is not None:
+            self._stage_timings["export_strategy"] = "grouped_interval"
+            for task, cut_result in zip(tasks, grouped_results):
+                _record_cut_success(task, cut_result)
+            self.done = self.total
+            self.completed_attempts = self.total
+            _schedule_cut_ui_update(force=True)
+        elif self.total <= 1:
+            self._stage_timings["export_strategy"] = "per_clip"
             try:
-                _cut_one(tasks[0])
+                cut_result = _cut_one(tasks[0])
+                _record_cut_success(tasks[0], cut_result)
                 self.done = 1
             except Exception as cut_error:
                 if self._stop or str(cut_error) == "Stopped":
@@ -1049,12 +1450,17 @@ class SceneEngine:
                 if self.log:
                     err_msg = str(cut_error)[:80] or "Unknown error"
                     err_type = failure["error_type"]
-                    self.log.after(0, lambda e=err_msg, t=err_type: self.log.append_message(
-                        f"Error: scene_000 could not be exported [{t}] ({e})", kind="error"))
+                    scene_name = failure["file"]
+                    self.log.after(0, lambda n=scene_name, e=err_msg, t=err_type: self.log.append_message(
+                        f"Error: {n} could not be exported [{t}] ({e})", kind="error"))
             self.completed_attempts = 1
             _schedule_cut_ui_update(force=True)
         else:
-            max_workers = 1 if not self.scene_mode else min(MAX_CUT_WORKERS, self.total)
+            self.done = 0
+            self.completed_attempts = 0
+            self._stage_timings["export_strategy"] = "per_clip"
+            max_workers = self._export_worker_count(self.total)
+            self._stage_timings["export_workers"] = max_workers
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {pool.submit(_cut_one, task): task for task in tasks}
                 for future in as_completed(futures):
@@ -1062,7 +1468,9 @@ class SceneEngine:
                         pool.shutdown(wait=False)
                         return
                     try:
-                        future.result()
+                        cut_result = future.result()
+                        _record_cut_success(
+                            futures[future], cut_result)
                         with self._cut_lock:
                             self.done += 1
                     except Exception as cut_error:
@@ -1084,24 +1492,259 @@ class SceneEngine:
                         _schedule_cut_ui_update(force=self.completed_attempts >= self.total)
 
         self._end_time = time.time()
+        self._stage_timings["export_seconds"] = round(
+            time.perf_counter() - export_started, 6)
         self._write_scene_metadata(outdir, scenes, fps)
         self._write_cut_failure_report(outdir)
 
         if self.done <= 0 and self._cut_failures and not self._stop:
             raise RuntimeError("No scenes could be exported. See cut_errors.json for details.")
 
+    def _export_worker_count(self, total):
+        total = max(1, int(total))
+        if not getattr(self, "scene_mode", True):
+            return min(2, total) if self.cfg.get("ENCODER") == "nvidia" else 1
+        encoder = self.cfg.get("ENCODER", "cpu")
+        if encoder == "nvidia":
+            # Two bounded NVENC sessions overlap short clip setup without the
+            # memory/driver pressure caused by the former generic worker count.
+            return min(2, total)
+        if encoder in {"amd", "intel", "apple"}:
+            # These backends vary considerably by driver and iGPU memory; one
+            # session is the portable, deterministic default.
+            return 1
+        return min(MAX_CUT_WORKERS, total)
+
+    def _grouped_interval_eligible(self, tasks, fps):
+        if (not self.cfg.get("ENABLE_GROUPED_INTERVAL_EXPORT", False) or
+                getattr(self, "scene_mode", True) or len(tasks) < 20 or
+                self.cfg.get("FRAME_TIMES") or fps <= 0):
+            return False
+        interval = float(self.cfg.get("FIXED_INTERVAL", 0) or 0)
+        if interval <= 0:
+            return False
+        for position, task in enumerate(tasks):
+            number, _path, start_time, end_time, _aligned_start, _aligned_end, start_frame, end_frame, _precise = task
+            if int(number) != position + 1 or end_frame <= start_frame:
+                return False
+            if position == 0 and start_frame != 0:
+                return False
+            if position and start_frame != tasks[position - 1][7]:
+                return False
+            if position < len(tasks) - 1 and abs(
+                    (end_time - start_time) - interval) > (1.1 / fps):
+                return False
+        return any(task[8] for task in tasks)
+
+    @staticmethod
+    def _codec_options(encoder):
+        if encoder == "cpu":
+            return ["-c:v", "libx264", "-crf", "16", "-preset", "medium", "-tune", "film"]
+        if encoder == "nvidia":
+            return ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "19",
+                    "-rc", "vbr", "-b:v", "0", "-spatial_aq", "1",
+                    "-temporal_aq", "1", "-rc-lookahead", "20"]
+        if encoder == "amd":
+            return ["-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr_peak"]
+        if encoder == "intel":
+            return ["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "20"]
+        if encoder == "apple":
+            return ["-c:v", "h264_videotoolbox", "-q:v", "65"]
+        return ["-c:v", "libx264", "-crf", "16", "-preset", "medium", "-tune", "film"]
+
+    def _run_grouped_interval_export(self, tasks, outdir, fps, progress_cb=None):
+        """Encode a regular CFR interval sequence once, then atomically publish it."""
+        if not self._grouped_interval_eligible(tasks, fps):
+            return None
+        encoder = self.cfg.get("ENCODER", "cpu")
+        interval = float(self.cfg["FIXED_INTERVAL"])
+        token = f"_grouped_{os.getpid()}_{threading.get_ident()}"
+        pattern = os.path.join(outdir, f"{token}_%d.mp4")
+        segment_list = os.path.join(outdir, f"{token}.csv")
+        expected_paths = [
+            os.path.join(outdir, f"{token}_{index}.mp4")
+            for index in range(1, len(tasks) + 1)]
+        codec = self._codec_options(encoder)
+        bitrate = self._get_video_bitrate()
+        rate_opts = (["-maxrate", str(bitrate), "-bufsize", str(bitrate * 2)]
+                     if bitrate and encoder == "cpu" else [])
+        command = [
+            "ffmpeg", "-y", "-v", "error", "-i", self.video,
+            "-map", "0:v:0", "-map", "0:a:0?", *codec, *rate_opts,
+            "-force_key_frames", f"expr:gte(t,n_forced*{interval:.12g})",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+            "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1",
+            "-f", "segment", "-segment_time", f"{interval:.12g}",
+            "-segment_time_delta", f"{0.5 / fps:.12g}",
+            "-reset_timestamps", "1", "-segment_start_number", "1",
+            "-segment_format", "mp4",
+            "-segment_format_options", "movflags=+faststart",
+            "-segment_list", segment_list, "-segment_list_type", "csv",
+            pattern,
+        ]
+        last_progress = [0.0]
+
+        def poll_outputs():
+            now = time.monotonic()
+            if now - last_progress[0] < 0.4:
+                return
+            last_progress[0] = now
+            completed = sum(os.path.isfile(path) for path in expected_paths)
+            if progress_cb is not None:
+                progress_cb(min(completed, len(tasks)))
+
+        timeout = max(600.0, tasks[-1][3] * 5.0)
+        try:
+            result = self._run_ffmpeg_tracked(
+                command, timeout=timeout, poll_callback=poll_outputs)
+            if self._ffmpeg_was_stopped(result):
+                raise RuntimeError("Stopped")
+            if result.returncode != 0:
+                return None
+            try:
+                with open(segment_list, newline="", encoding="utf-8") as handle:
+                    rows = list(csv.reader(handle))
+            except (OSError, csv.Error):
+                return None
+            if len(rows) != len(tasks):
+                return None
+            generated = {
+                os.path.normcase(os.path.abspath(path))
+                for path in expected_paths if os.path.isfile(path)}
+            if len(generated) != len(tasks):
+                return None
+            results = []
+            for task, source_path, row in zip(tasks, expected_paths, rows):
+                if (not os.path.isfile(source_path) or
+                        os.path.getsize(source_path) <= 0 or len(row) < 3):
+                    return None
+                listed_path = os.path.normcase(os.path.abspath(row[0]))
+                if listed_path != os.path.normcase(os.path.abspath(source_path)):
+                    return None
+                actual_duration = max(0.0, float(row[2]) - float(row[1]))
+                expected_duration = task[3] - task[2]
+                if (expected_duration > 0.2 and
+                        abs(actual_duration - expected_duration) > max(
+                            2.0 / fps, 0.08)):
+                    return None
+                results.append((actual_duration, source_path))
+            for task, (actual_duration, source_path) in zip(tasks, results):
+                os.replace(source_path, task[1])
+            if progress_cb is not None:
+                progress_cb(len(tasks))
+            acceleration = {
+                "requested": encoder,
+                "used": encoder,
+                "fallback": False,
+                "fallback_reason": None,
+                "grouped_export": True,
+            }
+            return [(duration, dict(acceleration)) for duration, _path in results]
+        except (OSError, ValueError):
+            return None
+        finally:
+            for path in expected_paths:
+                remove_temp_file(path)
+            try:
+                for name in os.listdir(outdir):
+                    if name.startswith(token + "_") and name.endswith(".mp4"):
+                        remove_temp_file(os.path.join(outdir, name))
+            except OSError:
+                pass
+            remove_temp_file(segment_list)
+
     def _write_scene_metadata(self, outdir, scenes, fps):
         try:
-            metadata = self._process_summary(outdir)
+            process_metadata = self._process_summary(outdir)
+            if not self._cut_scene_records:
+                numbers = list(range(1, len(scenes) + 1))
+                self._cut_scene_records = self._scene_export_records(
+                    scenes, numbers, fps)
+                self._cut_scene_records_by_number = {
+                    record["scene_number"]: record
+                    for record in self._cut_scene_records
+                }
             failed_cuts = len(getattr(self, "_cut_failures", []))
-            metadata["results"] = {
+            records = list(self._cut_scene_records)
+            exported_records = [record for record in records if record["exported"]]
+            acceleration_fallbacks = [
+                record for record in exported_records
+                if (record.get("acceleration") or {}).get("fallback")]
+            expected_duration = sum(record["duration"] for record in exported_records)
+            actual_duration = sum(
+                float(record["actual_duration"] or 0.0)
+                for record in exported_records)
+            valid_ranges = all(
+                record["start_frame"] >= 0 and
+                record["end_frame"] > record["start_frame"] and
+                record["last_frame"] == record["end_frame"] - 1 and
+                record["frame_count"] == record["end_frame"] - record["start_frame"]
+                for record in records)
+            chronological = all(
+                left["end_frame"] <= right["start_frame"]
+                for left, right in zip(records, records[1:]))
+            files_present = all(
+                os.path.isfile(os.path.join(outdir, record["file"]))
+                for record in exported_records)
+            unique_names = len({record["file"] for record in records}) == len(records)
+            issues = []
+            if failed_cuts:
+                issues.append(f"{failed_cuts} clip(s) failed to export")
+            if not valid_ranges:
+                issues.append("One or more clip frame ranges are invalid")
+            if not chronological:
+                issues.append("Clip frame ranges overlap or are out of order")
+            if not files_present:
+                issues.append("One or more exported clip files are missing")
+            if not unique_names:
+                issues.append("Duplicate clip filenames were generated")
+            audit_passed = not issues
+            results = {
                 "status": "completed_with_errors" if failed_cuts else "completed",
                 "total_cuts": len(scenes),
                 "successful_cuts": int(self.done),
                 "failed_cuts": failed_cuts,
             }
             if failed_cuts:
-                metadata["results"]["error_report"] = "cut_errors.json"
+                results["error_report"] = "cut_errors.json"
+            metadata = {
+                "summary": {
+                    "status": results["status"],
+                    "mode": process_metadata["process"]["mode"],
+                    "clips_requested": len(records),
+                    "clips_exported": len(exported_records),
+                    "clips_failed": failed_cuts,
+                    "acceleration_requested": self.cfg.get("ENCODER", "cpu"),
+                    "acceleration_fallbacks": len(acceleration_fallbacks),
+                    "source_duration": process_metadata["video"].get(
+                        "timeline_duration"),
+                    "container_duration": process_metadata["video"].get(
+                        "duration"),
+                    "exported_duration": round(actual_duration, 6),
+                    "frames_exported": sum(
+                        record["frame_count"] for record in exported_records),
+                    "audit_passed": audit_passed,
+                    "issues": issues,
+                },
+                "scenes": records,
+                "audit": {
+                    "frame_range_convention": (
+                        "start_frame is inclusive; end_frame is exclusive; last_frame is inclusive"
+                    ),
+                    "frame_ranges_valid": valid_ranges,
+                    "frame_ranges_chronological": chronological,
+                    "exported_files_present": files_present,
+                    "filenames_unique": unique_names,
+                    "expected_exported_duration": round(expected_duration, 6),
+                    "actual_exported_duration": round(actual_duration, 6),
+                    "duration_difference": round(actual_duration - expected_duration, 6),
+                    "exported_frame_count": sum(
+                        record["frame_count"] for record in exported_records),
+                    "acceleration_fallback_count": len(acceleration_fallbacks),
+                },
+                "results": results,
+                **process_metadata,
+            }
             with open(os.path.join(outdir, "scenes.json"), "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=2)
         except Exception as e:
@@ -1110,7 +1753,7 @@ class SceneEngine:
 
     def _get_progress_ratio(self):
         if self.total > 0:
-            return self.done / self.total
+            return getattr(self, "completed_attempts", self.done) / self.total
         return self._analysis_ratio
 
     def _calculate_eta(self):
@@ -1150,7 +1793,7 @@ class SceneEngine:
         explicit_counts = []
         duration_counts = []
         cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
-               "-show_entries", "stream=nb_frames:stream_tags=NUMBER_OF_FRAMES,DURATION",
+               "-show_entries", "stream=nb_frames,start_time:stream_tags=NUMBER_OF_FRAMES,DURATION",
                "-of", "json", self.video]
         try:
             data = json.loads(check_output_hidden_cancelable(
@@ -1167,6 +1810,11 @@ class SceneEngine:
             if tag_duration and fps > 0:
                 seconds = self._parse_duration_seconds(tag_duration)
                 if seconds and seconds > 0:
+                    try:
+                        seconds -= max(0.0, float(
+                            stream.get("start_time") or 0.0))
+                    except (TypeError, ValueError):
+                        pass
                     duration_counts.append(int(round(seconds * fps)))
         except Exception:
             pass
@@ -1295,7 +1943,7 @@ class SceneEngine:
         self._keyframes_cache = keyframes
         return keyframes
 
-    def _run_ffmpeg_tracked(self, cmd, timeout=300):
+    def _run_ffmpeg_tracked(self, cmd, timeout=300, poll_callback=None):
         if self._stop:
             return subprocess.CompletedProcess(cmd, -9, b"", b"Stopped")
         cmd = normalize_command(cmd)
@@ -1319,6 +1967,11 @@ class SceneEngine:
                     stdout, stderr = proc.communicate(timeout=0.1)
                     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
                 except subprocess.TimeoutExpired:
+                    if poll_callback is not None:
+                        try:
+                            poll_callback()
+                        except Exception:
+                            pass
                     if self._stop:
                         terminate_process(proc)
                         stdout, stderr = proc.communicate()
@@ -1376,33 +2029,24 @@ class SceneEngine:
         encoder = self.cfg.get("ENCODER", "cpu")
         bitrate = self._get_video_bitrate()
         fps = self._get_video_fps()
-        start_time = start_frame / fps
-        end_time = end_frame / fps
+        start_time = self._time_for_frame(start_frame, fps)
+        end_time = self._time_for_frame(end_frame, fps)
         local_start_frame = max(0, int(round((start_time - aligned_start) * fps)))
         local_end_frame = max(local_start_frame + 1, int(round((end_time - aligned_start) * fps)))
         local_audio_start = max(0.0, start_time - aligned_start)
         local_audio_end = max(local_audio_start + (1.0 / fps), end_time - aligned_start)
 
-        if encoder == "cpu":
-            codec = ["-c:v", "libx264", "-crf", "16", "-preset", "medium", "-tune", "film"]
-        elif encoder == "nvidia":
-            codec = ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "19",
-                     "-rc", "vbr", "-b:v", "0", "-spatial_aq", "1",
-                     "-temporal_aq", "1", "-rc-lookahead", "20"]
-        elif encoder == "amd":
-            codec = ["-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr_peak"]
-        elif encoder == "intel":
-            codec = ["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "20"]
-        elif encoder == "apple":
-            codec = ["-c:v", "h264_videotoolbox", "-q:v", "65"]
-        else:
-            codec = ["-c:v", "libx264", "-crf", "16"]
+        codec = self._codec_options(encoder)
 
         rate_opts = []
         if bitrate and encoder == "cpu":
             rate_opts = ["-maxrate", str(bitrate), "-bufsize", str(bitrate * 2)]
 
-        vf = f"trim=start_frame={local_start_frame}:end_frame={local_end_frame},setpts=PTS-STARTPTS"
+        if self.cfg.get("FRAME_TIMES"):
+            vf = (f"trim=start={local_audio_start:.9f}:"
+                  f"end={local_audio_end:.9f},setpts=PTS-STARTPTS")
+        else:
+            vf = f"trim=start_frame={local_start_frame}:end_frame={local_end_frame},setpts=PTS-STARTPTS"
         if self._has_audio_stream():
             filter_complex = (
                 f"[0:v]{vf}[v];"
@@ -1437,7 +2081,13 @@ class SceneEngine:
             if self._ffmpeg_was_stopped(result2):
                 raise RuntimeError("Stopped")
             if result2.returncode == 0:
-                return
+                reason = result.stderr.decode(errors="ignore").strip()
+                return {
+                    "requested": encoder,
+                    "used": "cpu",
+                    "fallback": True,
+                    "fallback_reason": reason[:500] or "Hardware encoder failed",
+                }
             print("FFMPEG ERROR:\n", result.stderr.decode(errors="ignore"))
             if self.log:
                 err_msg = result.stderr.decode(errors="ignore")[:80]
@@ -1446,10 +2096,25 @@ class SceneEngine:
             raise RuntimeError(result2.stderr.decode(errors="ignore")[:300] or "FFmpeg fallback failed")
         if result.returncode != 0:
             raise RuntimeError(result.stderr.decode(errors="ignore")[:300] or "FFmpeg precise cut failed")
+        return {
+            "requested": encoder,
+            "used": encoder if encoder in {"cpu", "nvidia", "amd", "intel", "apple"} else "cpu",
+            "fallback": False,
+            "fallback_reason": None,
+        }
 
     def _nearest_keyframe_before(self, t, keyframes):
         idx = bisect.bisect_right(keyframes, t)
         return keyframes[idx - 1] if idx > 0 else 0.0
+
+    def _time_for_frame(self, frame, fps=None):
+        times = self.cfg.get("FRAME_TIMES") or ()
+        frame = max(0, int(frame))
+        if times:
+            if frame >= len(times):
+                return self._get_video_duration()
+            return max(0.0, float(times[frame]))
+        return frame / max(float(fps or self._get_video_fps()), 0.001)
 
     def _nearest_keyframe_after(self, t, keyframes):
         if not keyframes:
@@ -1470,29 +2135,25 @@ class SceneEngine:
 
     def _preview_loop(self):
         while not self._preview_stop:
-            if self.previewer and self.preview_enabled:
+            if (self.previewer and self.preview_enabled and
+                    getattr(self.previewer, "enabled", True)):
                 now = time.time()
                 if now - self.last_preview >= PREVIEW_INTERVAL:
                     try:
-                        if self._analysis_mosaic:
-                            time.sleep(0.05)
-                            continue
-                        if self.total <= 0:
-                            time.sleep(0.05)
-                            continue
                         ratio = self._get_progress_ratio()
                         ratio = max(0.0, min(1.0, ratio))
                         if abs(ratio - self._last_preview_ratio) < 0.02:
                             time.sleep(0.02)
                             continue
                         self._last_preview_ratio = ratio
-                        duration = self._get_video_duration()
-                        t = ratio * duration
+                        t = self._preview_time_for_ratio(ratio)
                         img = self._get_preview_frame_at(t)
                         if img and self._ui_alive:
                             self.previewer.after(
-                                0, lambda img=img: (
-                                    self.previewer.update_image(img)
+                                0, lambda img=img, seconds=t: (
+                                    (self.previewer.update_image_at(img, seconds)
+                                     if hasattr(self.previewer, "update_image_at") else
+                                     self.previewer.update_image(img))
                                     if self._ui_alive else None))
                     except Exception:
                         pass
@@ -1500,15 +2161,28 @@ class SceneEngine:
             time.sleep(0.05)
 
     def _get_preview_frame_at(self, t):
+        frame = None
         try:
             with self._preview_lock:
-                if not self._preview_cap:
-                    return None
-                self._preview_cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
-                ret, frame = self._preview_cap.read()
-            if not ret or frame is None:
-                return None
-            return resize_for_preview(
-                Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
+                if self._preview_cap and self._preview_cap.isOpened():
+                    self._preview_cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+                    ret, frame = self._preview_cap.read()
+            if frame is not None and ret:
+                return resize_for_preview(
+                    Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
         except Exception:
-            return None
+            frame = None
+
+        # Some formats play in Qt/FFmpeg but are unsupported by the local
+        # OpenCV backend. Keep this fallback deliberately sparse and cached.
+        cached_at = self._ffmpeg_preview_time
+        if (self._ffmpeg_preview_image is not None and cached_at is not None and
+                abs(float(t) - cached_at) < 1.0):
+            return self._ffmpeg_preview_image.copy()
+        image = preview_frame_with_ffmpeg(
+            self.video, t, stop_cb=lambda: self._stop)
+        if image is not None:
+            self._ffmpeg_preview_time = float(t)
+            self._ffmpeg_preview_image = image
+            return image.copy()
+        return None

@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALLER="$ROOT/_internal/dependencies/install_runtime.py"
 TORCH_MODE="${TORCH_MODE:-auto}"
+SKIP_AI="${SKIP_AI:-0}"
+SKIP_FFMPEG="${SKIP_FFMPEG:-0}"
 PYTHON_STANDALONE_RELEASE="${PYTHON_STANDALONE_RELEASE:-20240726}"
 PYTHON_STANDALONE_VERSION="${PYTHON_STANDALONE_VERSION:-3.11.9}"
 
@@ -89,4 +91,11 @@ echo "Scenespy runtime installer"
 echo "This installs FFmpeg/FFprobe and Detect faces AI packages."
 echo "Private Python: $PRIVATE_PY"
 echo
-"$PYTHON" "$INSTALLER" --torch-mode "$TORCH_MODE"
+ARGS=("$INSTALLER" --torch-mode "$TORCH_MODE")
+if [[ "$SKIP_AI" == "1" ]]; then
+  ARGS+=(--skip-ai)
+fi
+if [[ "$SKIP_FFMPEG" == "1" ]]; then
+  ARGS+=(--skip-ffmpeg)
+fi
+"$PYTHON" "${ARGS[@]}"

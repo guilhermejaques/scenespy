@@ -1,0 +1,83 @@
+name: Build release installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            artifact: windows
+          - name: Linux x64
+            os: ubuntu-22.04
+            artifact: linux
+          - name: macOS x64
+            os: macos-15-intel
+            artifact: macos-x64
+          - name: macOS arm64
+            os: macos-15
+            artifact: macos-arm64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Verify tag matches app version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          APP_VERSION="$(python -c 'from scenespy import __version__; print(__version__)')"
+          test "v${APP_VERSION}" = "$GITHUB_REF_NAME" || {
+            echo "Tag $GITHUB_REF_NAME does not match scenespy version v${APP_VERSION}." >&2
+            exit 1
+          }
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk libegl1 libgl1
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        run: choco install innosetup --yes --no-progress
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./scripts/build_windows.ps1 -Zip
+      - name: Build Linux installer
+        if: runner.os == 'Linux'
+        run: bash ./scripts/build_linux.sh
+      - name: Build macOS installer
+        if: runner.os == 'macOS'
+        run: bash ./scripts/build_macos.sh
+      - name: Collect release files
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          if [[ "$RUNNER_OS" == "Windows" ]]; then cp release/*-setup.exe release/*.zip artifacts/; fi
+          if [[ "$RUNNER_OS" == "Linux" ]]; then cp release/*.run release/*.tar.gz artifacts/; fi
+          if [[ "$RUNNER_OS" == "macOS" ]]; then cp release/*.pkg artifacts/; fi
+          for file in artifacts/*; do
+            sha256sum "$file" > "${file}.sha256"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scenespy-${{ matrix.artifact }}
+          path: artifacts/*
+          if-no-files-found: error
+
+      - name: Publish files on tagged releases
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*

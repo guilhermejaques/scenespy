@@ -16,9 +16,11 @@ import traceback
 import faulthandler
 import random
 import importlib.util
+import io
 import shutil
 import site
 import platform
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image, ImageOps
 import numpy as np
@@ -285,6 +287,65 @@ def save_settings(video="", output=""):
         pass
 
 
+def total_physical_memory():
+    """Best-effort physical RAM detection using only platform APIs."""
+    try:
+        if sys.platform == "win32":
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [
+                    ("length", ctypes.c_ulong),
+                    ("memory_load", ctypes.c_ulong),
+                    ("total_physical", ctypes.c_ulonglong),
+                    ("available_physical", ctypes.c_ulonglong),
+                    ("total_page_file", ctypes.c_ulonglong),
+                    ("available_page_file", ctypes.c_ulonglong),
+                    ("total_virtual", ctypes.c_ulonglong),
+                    ("available_virtual", ctypes.c_ulonglong),
+                    ("available_extended_virtual", ctypes.c_ulonglong),
+                ]
+
+            status = MemoryStatus()
+            status.length = ctypes.sizeof(status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.total_physical)
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+        pages = int(os.sysconf("SC_PHYS_PAGES"))
+        return page_size * pages
+    except (AttributeError, OSError, TypeError, ValueError):
+        return 0
+
+
+def adaptive_cache_profile(cpu_count=None, memory_bytes=None):
+    """Return bounded cache/work limits appropriate for the host machine."""
+    cpus = max(1, int(cpu_count or os.cpu_count() or 4))
+    memory = int(total_physical_memory() if memory_bytes is None else memory_bytes)
+    gib = memory / (1024 ** 3) if memory > 0 else 0
+
+    if cpus <= 4 or (gib and gib < 8):
+        tier = "compact"
+        limits = (8, 384, 192, 8, 1)
+    elif cpus >= 12 and gib >= 24:
+        tier = "expanded"
+        limits = (32, 2048, 1024, 48, 3)
+    else:
+        tier = "balanced"
+        limits = (16, 1024, 512, 20, 2)
+    frame_cache, clip_cache, face_cache, thumbnail_batch, cut_workers = limits
+    return {
+        "tier": tier,
+        "cpu_count": cpus,
+        "memory_bytes": memory,
+        "frame_cache": frame_cache,
+        "clip_thumbnail_cache": clip_cache,
+        "face_thumbnail_cache": face_cache,
+        "thumbnail_batch": thumbnail_batch,
+        "cut_workers": cut_workers,
+    }
+
+
+CACHE_PROFILE = adaptive_cache_profile()
+
+
 PROFILES = {
     "Low": {"label": "Low", "base_threshold": 42, "min_dur": 5.0, "dur_max_boost": 5.0},
     "Normal": {"label": "Normal", "base_threshold": 27, "min_dur": 2.0, "dur_max_boost": 4.0},
@@ -294,13 +355,13 @@ PROFILES = {
 
 # User-tunable defaults and runtime limits.
 ACCEL_OPTIONS = ["cpu", "nvidia", "amd", "intel", "apple"]
-MAX_CUT_WORKERS = 2
+MAX_CUT_WORKERS = CACHE_PROFILE["cut_workers"]
 ENABLE_PREVIEW_DEFAULT = True
 PREVIEW_INTERVAL = 0.2
 INSTANCE_SOCKET = None
 INSTANCE_PORT = 54321
-PREVIEW_MAX_WIDTH = 420
-PREVIEW_MAX_HEIGHT = 280
+PREVIEW_MAX_WIDTH = 640
+PREVIEW_MAX_HEIGHT = 360
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 PROCESS_COOLDOWN_SECONDS = 1.25
 PROCESS_START_DELAY_SECONDS = 0.1
@@ -309,14 +370,14 @@ ANALYSIS_MOSAIC_INTERVAL_MAX = 20.0
 ANALYSIS_MOSAIC_MAX_SOURCES = 1
 ANALYSIS_MOSAIC_COLUMNS = 3
 ANALYSIS_MOSAIC_ROWS = 2
-ANALYSIS_MOSAIC_TILE_W = 144
-ANALYSIS_MOSAIC_TILE_H = 112
+ANALYSIS_MOSAIC_TILE_W = 208
+ANALYSIS_MOSAIC_TILE_H = 162
 ANALYSIS_MOSAIC_GAP = 4
 
 MODE_ACCEL_COMPAT = {
     "scene": {"encoder": {"cpu", "nvidia", "amd", "intel", "apple"}, "inference": {"cpu"}},
     "interval": {"encoder": {"cpu", "nvidia", "amd", "intel", "apple"}, "inference": {"cpu"}},
-    "faces": {"encoder": {"cpu"}, "inference": {"cpu", "nvidia"}},
+    "faces": {"encoder": {"cpu"}, "inference": {"cpu", "nvidia", "apple"}},
 }
 
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
@@ -358,17 +419,39 @@ DANGER = "#ef4444"
 
 
 def test_ffmpeg_encoder(encoder: str) -> bool:
+    options = {
+        "libx264": ["-crf", "16", "-preset", "medium", "-tune", "film"],
+        "h264_nvenc": [
+            "-preset", "p5", "-cq", "19", "-rc", "vbr", "-b:v", "0",
+            "-spatial_aq", "1", "-temporal_aq", "1", "-rc-lookahead", "20"],
+        "h264_amf": ["-quality", "balanced", "-rc", "vbr_peak"],
+        "h264_qsv": ["-preset", "medium", "-global_quality", "20"],
+        "h264_videotoolbox": ["-q:v", "65"],
+    }.get(encoder, [])
+    output = None
     try:
+        handle, output = tempfile.mkstemp(suffix=".mp4")
+        os.close(handle)
+        os.remove(output)
         result = run_hidden(
-            ["ffmpeg", "-y", "-f", "lavfi", "-i",
-             "color=c=black:s=160x120:d=0.1",
-             "-c:v", encoder, "-f", "null", "-"],
+            ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+             "color=c=black:s=320x180:r=30:d=0.2",
+             "-frames:v", "3", "-c:v", encoder, *options,
+             "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart",
+             output],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            text=True, timeout=5
+            text=True, timeout=10
         )
-        return result.returncode == 0
+        return (result.returncode == 0 and os.path.isfile(output) and
+                os.path.getsize(output) > 0)
     except Exception:
         return False
+    finally:
+        if output:
+            try:
+                os.remove(output)
+            except OSError:
+                pass
 
 
 def detect_available_accel():
@@ -390,8 +473,19 @@ def detect_available_encoder_accel():
 
 def detect_available_inference_accel():
     available = {"cpu"}
-    if importlib.util.find_spec("torch") and shutil.which("nvidia-smi"):
-        available.add("nvidia")
+    if importlib.util.find_spec("torch"):
+        try:
+            # Importing torch is the only reliable way to distinguish a CUDA
+            # build with a usable driver/device from a CPU-only installation.
+            import torch
+            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+                available.add("nvidia")
+            mps = getattr(getattr(torch, "backends", None), "mps", None)
+            if mps is not None and mps.is_available():
+                available.add("apple")
+        except Exception:
+            # Capability probing must never prevent the application starting.
+            pass
     return available
 
 
@@ -419,6 +513,22 @@ def face_detection_required_modules():
     if mediapipe_required():
         modules.append("mediapipe")
     return modules
+
+
+def missing_face_detection_modules():
+    """Return AI modules absent from the app's private runtime."""
+    return _missing_modules(*face_detection_required_modules())
+
+
+def refresh_ai_runtime():
+    """Make a newly installed private AI runtime visible to this process."""
+    global _AI_PACK_PATHS_ADDED, torch, TORCH_AVAILABLE
+    _AI_PACK_PATHS_ADDED = False
+    torch = None
+    TORCH_AVAILABLE = False
+    LAST_IMPORT_ERRORS.clear()
+    importlib.invalidate_caches()
+    add_ai_pack_to_path()
 
 
 def _missing_executables(*names):
@@ -497,19 +607,32 @@ def validate_runtime_dependencies():
     message = (
         "Scenespy requires FFmpeg and FFprobe to process videos.\n\n"
         f"Missing: {', '.join(missing)}\n\n"
-        "Run install_runtime next to Scenespy, install FFmpeg in PATH, "
-        "or place the binaries here:\n"
+        "The automatic runtime setup did not complete. Reinstall Scenespy "
+        "with an internet connection, or install FFmpeg in PATH.\n\n"
+        "Expected runtime path:\n"
         f"{runtime_dir}\n\n"
         f"Bundled fallback path:\n{bundled_dir}"
     )
     return False, message
 
 
-def build_output_dir(base_output, mode, profile, accel):
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+def next_output_path(base_output, mode, profile, accel, now=None):
+    """Return a readable second-based output path without reusing a folder."""
+    moment = now or datetime.datetime.now()
+    ts = moment.strftime("%Y%m%d_%H%M%S")
     mode_tag = MODE_ABBREV.get(mode, mode.upper())
-    path = os.path.join(base_output, f"{mode_tag}_{ts}_{profile}_{accel}")
-    os.makedirs(path, exist_ok=True)
+    name = f"{mode_tag}_{ts}_{profile}_{accel}"
+    path = os.path.join(base_output, name)
+    suffix = 2
+    while os.path.exists(path):
+        path = os.path.join(base_output, f"{name}_{suffix}")
+        suffix += 1
+    return path
+
+
+def build_output_dir(base_output, mode, profile, accel):
+    path = next_output_path(base_output, mode, profile, accel)
+    os.makedirs(path, exist_ok=False)
     return path
 
 
@@ -583,6 +706,24 @@ def resize_for_preview(img, max_w=PREVIEW_MAX_WIDTH, max_h=PREVIEW_MAX_HEIGHT):
     return img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.BILINEAR)
 
 
+def preview_frame_with_ffmpeg(path, seconds, stop_cb=None):
+    """Decode one small preview frame when OpenCV cannot handle the source codec."""
+    try:
+        data = check_output_hidden_cancelable(
+            ["ffmpeg", "-v", "error", "-ss", f"{max(0.0, float(seconds)):.3f}",
+             "-i", path, "-frames:v", "1", "-vf",
+             f"scale={PREVIEW_MAX_WIDTH}:{PREVIEW_MAX_HEIGHT}:force_original_aspect_ratio=decrease",
+             "-f", "image2pipe", "-vcodec", "png", "pipe:1"],
+            stop_cb=stop_cb,
+        )
+        if not data:
+            return None
+        with Image.open(io.BytesIO(data)) as image:
+            return image.convert("RGB").copy()
+    except Exception:
+        return None
+
+
 class AnalysisMosaicPreview:
     """Shows random video thumbnails while scene analysis is running."""
     def __init__(self, videos, previewer, stop_cb=None):
@@ -612,6 +753,9 @@ class AnalysisMosaicPreview:
                 pass
         self._thread = None
         self._release_caps()
+
+    def is_running(self):
+        return bool(self._thread and self._thread.is_alive())
 
     def _release_caps(self):
         with self._lock:
@@ -714,6 +858,9 @@ class AnalysisMosaicPreview:
             return
 
         while not self._stop and not self.stop_cb():
+            if not getattr(self.previewer, "enabled", True):
+                time.sleep(0.1)
+                continue
             image = self._compose()
             if image and self.previewer:
                 self.previewer.after(0, lambda img=image: self.previewer.update_image(img))
@@ -882,11 +1029,11 @@ def unregister_child_process(proc):
 
 def terminate_process(proc, grace_seconds=0.5):
     if not proc or proc.poll() is not None:
-        return
+        return True
     try:
         proc.terminate()
         proc.wait(timeout=grace_seconds)
-        return
+        return proc.poll() is not None
     except Exception:
         pass
     try:
@@ -895,21 +1042,29 @@ def terminate_process(proc, grace_seconds=0.5):
             proc.wait(timeout=grace_seconds)
     except Exception:
         pass
+    return proc.poll() is not None
 
 
 def terminate_all_child_processes(grace_seconds=0.5):
     with _CHILD_PROCS_LOCK:
         procs = list(_CHILD_PROCS)
-    for proc in procs:
-        terminate_process(proc, grace_seconds=grace_seconds)
+    stopped = {
+        proc for proc in procs
+        if terminate_process(proc, grace_seconds=grace_seconds)
+    }
     with _CHILD_PROCS_LOCK:
-        _CHILD_PROCS.difference_update(procs)
+        # Keep resistant live processes registered so close/atexit can retry.
+        _CHILD_PROCS.difference_update(stopped)
 
 
-def run_hidden_cancelable(cmd, stop_cb=None, poll_interval=0.05, **kwargs):
+def run_hidden_cancelable(cmd, stop_cb=None, poll_interval=0.05,
+                          low_priority=False, **kwargs):
     cmd = normalize_command(cmd)
     if sys.platform == "win32":
-        kwargs.setdefault("creationflags", CREATE_NO_WINDOW)
+        flags = CREATE_NO_WINDOW
+        if low_priority:
+            flags |= 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
+        kwargs.setdefault("creationflags", flags)
     capture_output = kwargs.pop("capture_output", False)
     timeout = kwargs.pop("timeout", None)
     check = kwargs.pop("check", False)
