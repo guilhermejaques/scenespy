@@ -1,6 +1,6 @@
 # Scenespy
 
-Scenespy is a desktop app designed to detect different scenes in a video and automatically separate them. It can detect scene changes, cut videos by fixed time intervals, or extract faces found in the video. It helps streamline the content creation workflow for people who work with video, requires very little from your computer, and does not run heavy AI models.
+Scenespy is a desktop app designed to detect different scenes in a video and automatically separate them. It can detect scene changes, cut videos by fixed time intervals, or extract faces found in the video. It helps streamline the content creation workflow for people who work with video. Its core editing and cutting modes are lightweight, while optional AI packages are used for face detection.
 
 The goal is simple: choose a video, choose an output folder, select the cutting mode, and let the app process it.
 
@@ -80,7 +80,7 @@ IMPORTANT: Every video is unique, so if one sensitivity mode worked for a specif
 - **NVIDIA**: can accelerate encoding through FFmpeg/NVENC and can also accelerate face mode through CUDA if PyTorch with CUDA support is installed.
 - **AMD**: can accelerate video encoding through FFmpeg/AMF on compatible systems. Does not accelerate face mode.
 - **Intel**: can accelerate video encoding through FFmpeg/QSV on compatible systems. Does not accelerate face mode.
-- **Apple**: can accelerate video encoding through FFmpeg/VideoToolbox on macOS. Does not accelerate face mode.
+- **Apple**: can accelerate video encoding through FFmpeg/VideoToolbox on macOS. On compatible Apple Silicon systems, face detection can also use PyTorch MPS.
 
 Today, the most relevant way to accelerate processing is with NVIDIA CUDA, but the app will work fine even if you do not use CUDA.
 
@@ -104,11 +104,14 @@ MKV supports multiple audio tracks and may present container issues, so for diff
 
 ## Quick installation | GitHub Releases
 
-Use the ready-to-use version of Scenespy from the GitHub **Releases** tab. Do not use the **Code > Download ZIP** button if you only want to install and use the app. A release package already exists for each supported operating system:
+Use the ready-to-use version of Scenespy from the GitHub **Releases** tab. Do not use the **Code > Download ZIP** button if you only want to install and use the app. Release `v0.2.1` provides an installer for each supported operating system and architecture:
 
-- Windows: [Scenespy-Windows-x64](https://github.com/guilhermejaques/scenespy/releases/tag/0.1.0)
-- Linux: [Scenespy-Linux-x64](https://github.com/guilhermejaques/scenespy/releases/tag/0.1.0)
-- macOS: [Scenespy-MacOS-x64](https://github.com/guilhermejaques/scenespy/releases/tag/0.1.0)
+- Windows x64: [`Scenespy-0.2.1-windows-x64-setup.exe`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.1/Scenespy-0.2.1-windows-x64-setup.exe)
+- Linux x64: [`Scenespy-0.2.1-linux-x64.run`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.1/Scenespy-0.2.1-linux-x64.run)
+- macOS Intel: [`Scenespy-0.2.1-macos-x64.pkg`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.1/Scenespy-0.2.1-macos-x64.pkg)
+- macOS Apple Silicon: [`Scenespy-0.2.1-macos-arm64.pkg`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.1/Scenespy-0.2.1-macos-arm64.pkg)
+
+All downloads and their SHA-256 checksum files are available on the [Scenespy v0.2.1 release page](https://github.com/guilhermejaques/scenespy/releases/tag/v0.2.1).
 
 Download and open the installer for your system. A single English-language
 setup installs Scenespy and automatically downloads FFmpeg, the private Python
@@ -118,8 +121,9 @@ no terminal commands or additional scripts are required.
 The installer offers AI face detection as a large optional download and selects
 it by default. When selected, it automatically chooses CPU, NVIDIA/CUDA, or
 Apple MPS for the current hardware. You may deselect it to save download and
-disk space; the core video workflow remains available, but AI face detection is
-not installed.
+disk space; the core video workflow remains available. If face detection is
+opened later, Scenespy explains which packages are missing and can install them
+inside its private environment without requiring a full app reinstall.
 
 Allow approximately 1 GB for the core installation, up to 3 GB with CPU AI
 features, or up to 6 GB when the NVIDIA/CUDA runtime is selected automatically.
@@ -146,7 +150,7 @@ Open terminal
 |---|---|
 | Windows | `Win + R` → `cmd` |
 | PowerShell | Search for “PowerShell” |
-| MacOS | `Command + Space` → `Terminal` |
+| macOS | `Command + Space` → `Terminal` |
 | Linux | `Ctrl + Alt + T` |
 
 Check which folder you are in
@@ -155,7 +159,7 @@ Check which folder you are in
 |---|---|
 | Windows CMD | `cd` |
 | PowerShell | `pwd` |
-| MacOS/Linux | `pwd` |
+| macOS/Linux | `pwd` |
 
 List files
 
@@ -163,14 +167,14 @@ List files
 |---|---|
 | Windows CMD | `dir` |
 | PowerShell | `ls` |
-| MacOS/Linux | `ls` |
+| macOS/Linux | `ls` |
 
 Enter a folder
 
 | System | Command |
 |---|---|
 | Windows | `cd Downloads` |
-| MacOS/Linux | `cd Downloads` |
+| macOS/Linux | `cd Downloads` |
 
 Go back one folder
 
@@ -182,7 +186,8 @@ Run a file
 
 | System | Command |
 |---|---|
-| All | `./filename.sh` |
+| PowerShell | `.\filename.ps1` |
+| macOS/Linux | `./filename.sh` |
 
 ---
 
@@ -345,9 +350,9 @@ ffmpeg -hide_banner -encoders | Select-String h264_qsv
 
 ---
 
-### Apple Silicon and MacOS
+### Apple Silicon and macOS
 
-On MacOS, the app can use VideoToolbox encoding (`h264_videotoolbox`) when the installed FFmpeg provides this encoder.
+On macOS, the app can use VideoToolbox encoding (`h264_videotoolbox`) when the installed FFmpeg provides this encoder.
 
 The installation process is standard (with Python 3.11, FFmpeg, and FFprobe installed).
 ```bash
@@ -360,20 +365,20 @@ Encoder test:
 ffmpeg -hide_banner -encoders | grep h264_videotoolbox
 ```
 
-Note: **Detect faces** mode uses PyTorch on CPU on macOS in this app version. The **Apple** option is for video encoding, not facial inference.
+On compatible Apple Silicon systems, **Detect faces** can use the PyTorch MPS backend. If MPS is unavailable, face detection continues on CPU. The **Apple** option also enables VideoToolbox for compatible video-encoding operations.
 
 # FFmpeg and FFprobe
 
 Scenespy requires FFmpeg and FFprobe to read, validate, and cut videos.
 
-In the ready-to-use versions from the **Releases** tab, the runtime installer automatically downloads or installs FFmpeg/FFprobe.
+In the ready-to-use installers from the **Releases** tab, setup automatically downloads or installs FFmpeg/FFprobe. A system-wide FFmpeg installation is not required before installing Scenespy.
 
-On Windows, `install_runtime_windows.bat` installs the FFmpeg essentials build binaries from Gyan.dev into `%LOCALAPPDATA%/Scenespy/runtime/`.
+On Windows, setup installs the FFmpeg essentials build binaries from Gyan.dev into Scenespy's private runtime under `%LOCALAPPDATA%/Scenespy/`.
 
 See the [FFmpeg](https://ffmpeg.org/) website for more information.
 
 
-On Linux and MacOS, the recommendation is to install through the system:
+When running from source on Linux or macOS, install FFmpeg through the system package manager if it is not already available:
 
 ```bash
 sudo apt install ffmpeg
@@ -383,7 +388,7 @@ sudo apt install ffmpeg
 brew install ffmpeg
 ```
 
-When starting, Scenespy first searches in `bin/<system>/`. If not found, it searches in the system `PATH`.
+When starting, Scenespy searches its bundled/private locations and then the system `PATH`.
 
 # Common problems
 
@@ -393,7 +398,7 @@ Install FFmpeg and make sure the executables are available in the `PATH`, or pla
 
 ### Detect faces mode does not open
 
-Check whether `torch`, `ultralytics`, `mediapipe`, and the `models/yolov8n-face.pt` model exist.
+The packaged app displays an **Install dependencies** option when optional AI packages are missing. For a source installation, check whether `torch`, `ultralytics`, `mediapipe`, and the `models/yolov8n-face.pt` model exist.
 
 ```bash
 python -c "import torch, ultralytics, mediapipe; print('ok')"
