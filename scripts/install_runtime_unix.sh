@@ -84,17 +84,63 @@ ensure_private_python() {
   chmod +x "$PRIVATE_PY"
 }
 
-ensure_private_python
-PYTHON="$PRIVATE_PY"
+select_runtime_python() {
+  if [[ -x "$PRIVATE_PY" ]]; then
+    RUNTIME_PYTHON="$PRIVATE_PY"
+    return
+  fi
+
+  local candidate version
+  for candidate in python3.11 python3 python; do
+    if ! command -v "$candidate" >/dev/null 2>&1; then
+      continue
+    fi
+    candidate="$(command -v "$candidate")"
+    version="$($candidate -c 'import ensurepip, sys, venv; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true)"
+    if [[ "$version" == "3.11" ]]; then
+      RUNTIME_PYTHON="$candidate"
+      echo "Using compatible Python 3.11 already installed: $RUNTIME_PYTHON"
+      return
+    fi
+  done
+
+  ensure_private_python
+  RUNTIME_PYTHON="$PRIVATE_PY"
+}
 
 echo "Scenespy runtime installer"
 echo "This installs FFmpeg/FFprobe and Detect faces AI packages."
-echo "Private Python: $PRIVATE_PY"
 echo
-ARGS=("$INSTALLER" --torch-mode "$TORCH_MODE")
+
+# FFmpeg setup does not require the large private Python/AI runtime.  Keeping
+# this path separate makes the base installer quick and prevents an optional
+# multi-gigabyte download from looking like a frozen installer.
 if [[ "$SKIP_AI" == "1" ]]; then
-  ARGS+=(--skip-ai)
+  if [[ "$SKIP_FFMPEG" == "1" ]]; then
+    echo "No runtime components were selected."
+    exit 0
+  fi
+  # Current macOS versions do not guarantee a system Python.  Reuse a
+  # compatible 3.11 when present, otherwise provide the private interpreter.
+  if [[ "$OS_NAME" == "Darwin" ]]; then
+    select_runtime_python
+    SYSTEM_PYTHON="$RUNTIME_PYTHON"
+  elif command -v python3 >/dev/null 2>&1; then
+    SYSTEM_PYTHON="$(command -v python3)"
+  elif command -v python >/dev/null 2>&1; then
+    SYSTEM_PYTHON="$(command -v python)"
+  else
+    echo "Python 3 is required to install FFmpeg automatically." >&2
+    exit 1
+  fi
+  "$SYSTEM_PYTHON" "$INSTALLER" --torch-mode "$TORCH_MODE" --skip-ai
+  exit 0
 fi
+
+select_runtime_python
+PYTHON="$RUNTIME_PYTHON"
+echo "AI setup Python: $PYTHON"
+ARGS=("$INSTALLER" --torch-mode "$TORCH_MODE")
 if [[ "$SKIP_FFMPEG" == "1" ]]; then
   ARGS+=(--skip-ffmpeg)
 fi

@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+VERSION="$(sed -n 's/^__version__ = "\([^"]*\)"/\1/p' scenespy/__init__.py)"
 
 PYTHON="python"
 if [[ -x .venv/bin/python ]]; then
@@ -29,8 +30,10 @@ cp scripts/install_runtime_unix.sh release/Scenespy-linux-x64/install_runtime.sh
 chmod +x release/Scenespy-linux-x64/install_runtime.sh
 
 tar -C release -czf release/Scenespy-linux-x64.tar.gz Scenespy-linux-x64
-bash ./scripts/build_linux_installer.sh
+bash ./scripts/build_linux_installer.sh "$VERSION"
+bash ./scripts/build_linux_deb.sh "$VERSION"
 rm -rf build dist
 
 echo "Linux distribution folder ready: $ROOT/release/Scenespy-linux-x64"
 echo "Linux archive ready: $ROOT/release/Scenespy-linux-x64.tar.gz"
+echo "Linux Debian package ready: $ROOT/release/Scenespy-${VERSION}-linux-amd64.deb"

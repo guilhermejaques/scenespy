@@ -59,7 +59,7 @@ echo "Launch it from the application menu or run: scenespy"
 echo "Downloading and installing Scenespy runtime components..."
 INSTALL_AI="yes"
 if [[ -t 0 ]]; then
-  read -r -p "Install AI face detection features (recommended; up to 6 GB total disk space)? [Y/n] " ANSWER
+  read -r -p "Install optional AI face detection now (up to 6 GB; selected by default)? [Y/n] " ANSWER
   case "${ANSWER:-y}" in
     n|N|no|NO|No) INSTALL_AI="no" ;;
   esac

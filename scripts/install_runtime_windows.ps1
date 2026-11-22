@@ -51,13 +51,42 @@ function Ensure-PrivatePython {
     }
 }
 
+function Find-CompatiblePython {
+    $pyLauncher = Get-Command "py.exe" -ErrorAction SilentlyContinue
+    if ($pyLauncher) {
+        try {
+            $path = (& $pyLauncher.Source -3.11 -c "import ensurepip, sys, venv; print(sys.executable)" 2>$null | Select-Object -Last 1)
+            if ($LASTEXITCODE -eq 0 -and $path -and (Test-Path $path)) {
+                return $path
+            }
+        } catch {}
+    }
+    foreach ($name in @("python3.11.exe", "python.exe")) {
+        $command = Get-Command $name -ErrorAction SilentlyContinue
+        if (-not $command) { continue }
+        try {
+            $version = (& $command.Source -c "import ensurepip, sys, venv; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null | Select-Object -Last 1)
+            if ($LASTEXITCODE -eq 0 -and $version -eq "3.11") {
+                return $command.Source
+            }
+        } catch {}
+    }
+    return $null
+}
+
 Write-Host "Scenespy runtime installer"
 Write-Host "This installs FFmpeg/FFprobe and Detect faces AI packages in your user profile."
 Write-Host "Install target: $AppData"
 Write-Host ""
 
-Ensure-PrivatePython
+$RuntimePython = Find-CompatiblePython
+if ($RuntimePython) {
+    Write-Host "Using compatible Python 3.11 already installed: $RuntimePython"
+} else {
+    Ensure-PrivatePython
+    $RuntimePython = $PrivatePython
+}
 $RuntimeArgs = @($Installer, "--torch-mode", $TorchMode)
 if ($SkipAI) { $RuntimeArgs += "--skip-ai" }
 if ($SkipFFmpeg) { $RuntimeArgs += "--skip-ffmpeg" }
-& $PrivatePython @RuntimeArgs
+& $RuntimePython @RuntimeArgs

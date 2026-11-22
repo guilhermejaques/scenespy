@@ -15,7 +15,7 @@ class UpdateSupportTests(unittest.TestCase):
         )
         self.assertEqual(
             update_asset_suffix("linux", "x86_64"),
-            "-linux-x64.run",
+            "-linux-amd64.deb",
         )
         self.assertEqual(
             update_asset_suffix("darwin", "arm64"),

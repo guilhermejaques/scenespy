@@ -59,7 +59,12 @@ fi
 
 USER_HOME="$(dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory | awk '{print $2}')"
 RUNTIME_SCRIPT="/Applications/Scenespy.app/Contents/Resources/scenespy-runtime/install_runtime.sh"
-/usr/bin/sudo -u "$CONSOLE_USER" /usr/bin/env HOME="$USER_HOME" TORCH_MODE=auto SKIP_FFMPEG=1 /bin/bash "$RUNTIME_SCRIPT"
+if ! /usr/bin/sudo -u "$CONSOLE_USER" /usr/bin/env HOME="$USER_HOME" TORCH_MODE=auto SKIP_FFMPEG=1 /bin/bash "$RUNTIME_SCRIPT"; then
+  # Optional AI downloads must never roll back an otherwise usable app.  The
+  # same installer can be retried later from Detect faces inside Scenespy.
+  echo "Optional Scenespy AI setup did not complete; it can be retried from the app." >&2
+fi
+exit 0
 POSTINSTALL
 chmod +x "$AI_SCRIPTS/postinstall"
 
@@ -91,7 +96,7 @@ cat > "$WORK/distribution.xml" <<DISTRIBUTION
   <choice id="core" title="Scenespy" description="Required application and video runtime" visible="false" start_selected="true">
     <pkg-ref id="com.scenespy.app.core"/>
   </choice>
-  <choice id="ai" title="AI face detection features" description="Recommended; up to 6 GB total disk space. Hardware acceleration is selected automatically." start_selected="true">
+  <choice id="ai" title="AI face detection features" description="Optional and selected by default; downloads up to 6 GB. It can also be installed later from inside Scenespy." start_selected="true">
     <pkg-ref id="com.scenespy.app.ai"/>
   </choice>
   <pkg-ref id="com.scenespy.app.core" version="${VERSION}" auth="Root">ScenespyCore.pkg</pkg-ref>

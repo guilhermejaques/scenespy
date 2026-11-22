@@ -107,21 +107,19 @@ MKV supports multiple audio tracks and may present container issues, so for diff
 Use the ready-to-use version of Scenespy from the GitHub **Releases** tab. Do not use the **Code > Download ZIP** button if you only want to install and use the app. Release `v0.2.1` provides an installer for each supported operating system and architecture:
 
 - Windows x64: [`Scenespy-0.2.1-windows-x64-setup.exe`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.1/Scenespy-0.2.1-windows-x64-setup.exe)
-- Linux x64: [`Scenespy-0.2.1-linux-x64.run`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.1/Scenespy-0.2.1-linux-x64.run)
+- Linux Ubuntu/Debian x64: [`Scenespy-0.2.1-linux-amd64.deb`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.1/Scenespy-0.2.1-linux-amd64.deb)
 - macOS Intel: [`Scenespy-0.2.1-macos-x64.pkg`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.1/Scenespy-0.2.1-macos-x64.pkg)
 - macOS Apple Silicon: [`Scenespy-0.2.1-macos-arm64.pkg`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.1/Scenespy-0.2.1-macos-arm64.pkg)
 
 All downloads and their SHA-256 checksum files are available on the [Scenespy v0.2.1 release page](https://github.com/guilhermejaques/scenespy/releases/tag/v0.2.1).
 
-Download and open the installer for your system. A single English-language
-setup installs Scenespy and automatically downloads FFmpeg, the private Python
-runtime, and the AI packages. An internet connection is required during setup;
-no terminal commands or additional scripts are required (different from version 0.1.0).
+Download and open the installer for your system. The base setup installs
+Scenespy and FFmpeg. AI face detection is a separate, optional download that
+can be selected during setup or installed later from inside Scenespy.
 
 The installer offers AI face detection as a large optional download and selects
 it by default. When selected, it automatically chooses CPU, NVIDIA/CUDA, or
-Apple MPS for the current hardware. You may deselect it to save download and
-disk space; the core video workflow remains available. If face detection is
+Apple MPS for the current hardware. If face detection is
 opened later, Scenespy explains which packages are missing and can install them
 inside its private environment without requiring a full app reinstall.
 
@@ -129,7 +127,8 @@ Allow approximately 1 GB for the core installation, up to 3 GB with CPU AI
 features, or up to 6 GB when the NVIDIA/CUDA runtime is selected automatically.
 
 - Windows: run the `*-setup.exe` installer.
-- Linux: make the downloaded `.run` file executable and open it.
+- Linux Ubuntu/Debian: open the `.deb` with the system Software app. A `.run`
+  and portable `.tar.gz` are also published for advanced/manual installation.
 - macOS: open the `.pkg` for Intel or Apple Silicon.
 
 After setup completes, launch Scenespy from the operating system's application

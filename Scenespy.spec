@@ -7,6 +7,11 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 
 root = Path.cwd()
+version = next(
+    line.split('"', 2)[1]
+    for line in (root / "scenespy" / "__init__.py").read_text(encoding="utf-8").splitlines()
+    if line.startswith("__version__ = ")
+)
 if sys.platform == "win32":
     dist_name = "Scenespy-windows-x64"
 elif sys.platform == "darwin":
@@ -104,4 +109,9 @@ if sys.platform == "darwin":
         name="Scenespy.app",
         icon=str(root / "scenespy" / "assets" / "images" / "x.icns"),
         bundle_identifier="com.scenespy.app",
+        info_plist={
+            "LSMinimumSystemVersion": "12.0",
+            "CFBundleShortVersionString": version,
+            "CFBundleVersion": version,
+        },
     )

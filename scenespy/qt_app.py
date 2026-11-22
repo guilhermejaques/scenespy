@@ -9,6 +9,7 @@ import os
 import platform
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -31,7 +32,7 @@ from PySide6.QtGui import (QAction, QBrush, QColor, QDesktopServices, QFont, QFo
                            QFontMetrics,
                            QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath,
                            QPen, QPixmap, QPolygonF)
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGraphicsItem, QGraphicsLineItem,
@@ -107,7 +108,7 @@ def update_asset_suffix(system=None, machine=None):
     if system.startswith("win"):
         return "-windows-x64-setup.exe"
     if system.startswith("linux"):
-        return "-linux-x64.run"
+        return "-linux-amd64.deb"
     if system == "darwin":
         arch = "arm64" if machine in {"arm64", "aarch64"} else "x64"
         return f"-macos-{arch}.pkg"
@@ -654,6 +655,77 @@ class FaceMarkerVideoWidget(QVideoWidget):
         event.accept()
 
 
+class SoftwareVideoWidget(QLabel):
+    """CPU-painted video surface for virtualized macOS graphics."""
+    rightClicked = Signal(QPointF)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._video_sink = QVideoSink(self)
+        self._source_pixmap = None
+        self.face_overlay = FaceBoxOverlay(self)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._video_sink.videoFrameChanged.connect(self._show_video_frame)
+
+    def videoSink(self):
+        return self._video_sink
+
+    def setAspectRatioMode(self, _mode):
+        # This widget always letterboxes frames using KeepAspectRatio.
+        pass
+
+    def stack_face_overlay_on(self, parent):
+        previous = self.face_overlay
+        self.face_overlay = FaceBoxOverlay(self, parent)
+        previous.dispose()
+
+    def _show_video_frame(self, frame):
+        image = frame.toImage()
+        if image.isNull():
+            return
+        self._source_pixmap = QPixmap.fromImage(image)
+        self._fit_pixmap()
+
+    def _fit_pixmap(self):
+        if self._source_pixmap and not self._source_pixmap.isNull():
+            self.setPixmap(self._source_pixmap.scaled(
+                self.size(), Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_pixmap()
+        self.face_overlay.refresh_geometry()
+
+    def contextMenuEvent(self, event):
+        self.rightClicked.emit(QPointF(event.pos()))
+        event.accept()
+
+
+def use_software_video_output():
+    """Return whether native Qt video rendering is unsafe on this machine."""
+    override = os.environ.get("SCENESPY_SOFTWARE_VIDEO", "").strip().lower()
+    if override:
+        return override not in {"0", "false", "no", "off"}
+    if sys.platform != "darwin":
+        return False
+    try:
+        result = subprocess.run(
+            ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+            capture_output=True, text=True, timeout=2, check=False)
+        identity = f"{result.stdout}\n{result.stderr}".lower()
+        markers = ("virtualbox", "oracle vm", "innotek", "vbox")
+        if any(marker in identity for marker in markers):
+            return True
+        result = subprocess.run(
+            ["system_profiler", "SPHardwareDataType", "SPDisplaysDataType"],
+            capture_output=True, text=True, timeout=5, check=False)
+        identity = f"{result.stdout}\n{result.stderr}".lower()
+        return any(marker in identity for marker in markers)
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 class ProcessingPreviewLabel(QLabel):
     """Letterboxed preview which always keeps the complete source frame visible."""
     def __init__(self, parent=None):
@@ -1132,7 +1204,7 @@ class UpdateDownloadTask(QThread):
             if digest.hexdigest().lower() != expected_hash:
                 raise RuntimeError("The downloaded update failed SHA-256 verification.")
             os.replace(partial, target)
-            if sys.platform.startswith("linux"):
+            if sys.platform.startswith("linux") and target.suffix == ".run":
                 target.chmod(target.stat().st_mode | 0o700)
             self.completed.emit(str(target))
         except InterruptedError:
@@ -2169,12 +2241,13 @@ class TimelineView(QGraphicsView):
         self._hover_time_bubble.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._hover_time_bubble.setAttribute(
-            Qt.WidgetAttribute.WA_TranslucentBackground)
+            Qt.WidgetAttribute.WA_StyledBackground)
         self._hover_time_bubble.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._hover_time_bubble.setFixedHeight(19)
+        self._hover_time_bubble.setFixedHeight(23)
         self._hover_time_bubble.setStyleSheet(
-            "QLabel { background:transparent; color:rgba(229,231,235,180); "
-            "border:0; padding:1px 3px; font-size:9px; font-weight:600; }")
+            "QLabel { background-color:#292c30; color:#e5e7eb; "
+            "border:1px solid #50545b; border-radius:3px; "
+            "padding:2px 5px; font-size:9px; font-weight:600; }")
         self._clip_duration_timer = QTimer(self)
         self._clip_duration_timer.setSingleShot(True)
         self._clip_duration_timer.timeout.connect(self.clear_clip_duration)
@@ -3488,14 +3561,17 @@ class ScenespyApp(QMainWindow):
         self.audio.setMuted(False)
         self.player = QMediaPlayer(self)
         self.player.setAudioOutput(self.audio)
-        self.video = FaceMarkerVideoWidget()
+        self._software_video_output = use_software_video_output()
+        self.video = (SoftwareVideoWidget() if self._software_video_output
+                      else FaceMarkerVideoWidget())
         self.video.rightClicked.connect(self.show_video_context_menu)
         self.video.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
         self.video.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.video.setStyleSheet("background: transparent;")
         self.video.setMinimumSize(500, 280)
         self.video.hide()
-        self.player.setVideoOutput(self.video)
+        self.player.setVideoOutput(
+            self.video.videoSink() if self._software_video_output else self.video)
         self.player.positionChanged.connect(self._position_changed)
         self.player.durationChanged.connect(self._duration_changed)
         self.player.playbackStateChanged.connect(self._update_play_button)
@@ -9078,7 +9154,9 @@ class ScenespyApp(QMainWindow):
         elif sys.platform == "darwin":
             launched = QProcess.startDetached("/usr/bin/open", [path])
         else:
-            launched = QProcess.startDetached("/bin/bash", [path])
+            # The Linux release is a Debian package; hand it to the desktop's
+            # package/software application instead of treating it as a script.
+            launched = QProcess.startDetached("xdg-open", [path])
         if isinstance(launched, tuple):
             launched = launched[0]
         if not launched:

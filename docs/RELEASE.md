@@ -80,7 +80,8 @@ Scenespy-windows-x64/
 
 The user runs `install_runtime_windows.bat` once. It installs:
 
-- a private Python 3.11 under `%LOCALAPPDATA%/Scenespy/python311/`;
+- an existing compatible Python 3.11, or a private Python 3.11 under
+  `%LOCALAPPDATA%/Scenespy/python311/` when needed;
 - FFmpeg/FFprobe from the Gyan.dev essentials build into `%LOCALAPPDATA%/Scenespy/runtime/`;
 - Torch CPU or CUDA plus AI packages into `%LOCALAPPDATA%/Scenespy/ai-pack/`.
 
@@ -102,11 +103,16 @@ The release is:
 ```text
 release/Scenespy-linux-x64/
 release/Scenespy-linux-x64.tar.gz
+release/Scenespy-<version>-linux-amd64.deb
 release/Scenespy-<version>-linux-x64.run
 ```
 
-User installation (the app itself is installed per-user; the runtime may ask
-for administrator permission to install FFmpeg through the system package manager):
+For Ubuntu/Debian, users should open the `.deb` in the system Software app. It
+installs Scenespy under `/opt/scenespy`, adds the application-menu entry, and
+declares FFmpeg as a package dependency so the system package manager handles it.
+
+The `.run` remains a manual per-user alternative and may ask for administrator
+permission to install FFmpeg through the system package manager:
 
 ```bash
 chmod +x Scenespy-<version>-linux-x64.run
@@ -115,7 +121,8 @@ chmod +x Scenespy-<version>-linux-x64.run
 
 This installs the app in `~/.local/opt/scenespy`, creates a launcher under
 `~/.local/share/applications`, links `scenespy` in `~/.local/bin`, and then
-automatically installs FFmpeg and the AI runtime.
+automatically installs FFmpeg and offers the optional AI runtime selected by
+default. It can also be installed later from Detect faces inside Scenespy.
 The tarball remains available as a portable alternative.
 
 Portable installation:
@@ -129,11 +136,16 @@ cd Scenespy-linux-x64
 
 The runtime installer installs:
 
-- a private Python 3.11 from `python-build-standalone` under `~/.config/scenespy/python311/`;
+- an existing compatible Python 3.11, or a private Python 3.11 from
+  `python-build-standalone` under `~/.config/scenespy/python311/` when needed;
 - FFmpeg/FFprobe through `apt`, `dnf`, or `pacman`;
 - Torch CPU or CUDA plus AI packages into `~/.config/scenespy/ai-pack/`.
 
 ## macOS
+
+The packaged app targets macOS 12 Monterey or later. Keep the macOS-specific
+PySide6 pin in `requirements-macos-build.txt`; newer Qt releases may raise the
+minimum deployment target even when the application code is unchanged.
 
 Run this on macOS:
 
@@ -152,8 +164,9 @@ release/Scenespy-<version>-macos-arm64.pkg
 ```
 
 User installation: open the PKG and follow the installer. It installs
-`Scenespy.app` in Applications and automatically downloads FFmpeg and the AI
-runtime for the signed-in user.
+`Scenespy.app` in Applications and automatically downloads FFmpeg for the
+signed-in user. The optional AI runtime is selected by default and can also be
+installed later from inside Scenespy.
 
 Unsigned local builds may require Control-click > Open. Public distribution
 should use an Apple Developer ID certificate and notarization.
@@ -168,8 +181,9 @@ open Scenespy.app
 
 The runtime installer installs:
 
-- a private Python 3.11 from `python-build-standalone` under
-  `~/Library/Application Support/Scenespy/python311/`;
+- an existing compatible Python 3.11, or a private Python 3.11 from
+  `python-build-standalone` under
+  `~/Library/Application Support/Scenespy/python311/` when needed;
 - FFmpeg/FFprobe through Homebrew when they are not already in PATH;
 - Torch CPU plus AI packages into `~/Library/Application Support/Scenespy/ai-pack/`.
 

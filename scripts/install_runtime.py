@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import argparse
+import gzip
+import hashlib
 import json
 import os
 import shutil
@@ -20,9 +22,28 @@ CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu121"
 CPU_INDEX_URL = "https://download.pytorch.org/whl/cpu"
 WINDOWS_FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 WINDOWS_VC_REDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
-MACOS_FFMPEG_URLS = {
-    "ffmpeg": "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip",
-    "ffprobe": "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip",
+MACOS_FFMPEG_RELEASE = "b6.1.1"
+MACOS_FFMPEG_ASSETS = {
+    "arm64": {
+        "ffmpeg": (
+            "ffmpeg-darwin-arm64.gz",
+            "8923876afa8db5585022d7860ec7e589af192f441c56793971276d450ed3bbfa",
+        ),
+        "ffprobe": (
+            "ffprobe-darwin-arm64.gz",
+            "d986a8ec7b030899fe66a8a288ed809a3543338705a3ce178cfb85869c5d80be",
+        ),
+    },
+    "x64": {
+        "ffmpeg": (
+            "ffmpeg-darwin-x64.gz",
+            "929b375c1182d956c51f7ac25e0b2b0411fb01f6f407aa15c9758efeb4242106",
+        ),
+        "ffprobe": (
+            "ffprobe-darwin-x64.gz",
+            "d4da574d6e2e197bd259b47d69cf262df9e312af24ad960444f6d806d3d4c186",
+        ),
+    },
 }
 CUDA_MIN_DRIVER_LINUX = (530, 30, 2)
 CUDA_MIN_DRIVER_WINDOWS = (531, 14)
@@ -33,6 +54,21 @@ AI_PACK_PACKAGES = [
     "jax==0.7.1",
     "jaxlib==0.7.1",
 ]
+
+
+def configure_ai_installer_resources():
+    """Keep dependency setup usable on low-resource computers and VMs."""
+    threads = str(os.environ.get("SCENESPY_AI_INSTALL_THREADS") or "1")
+    for name in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "MAX_JOBS",
+    ):
+        os.environ.setdefault(name, threads)
+    print(f"AI installer CPU threads: {threads}")
 
 
 def user_data_dir():
@@ -401,6 +437,19 @@ def download_file(url, target):
         shutil.copyfileobj(response, output)
 
 
+def verify_sha256(path, expected):
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    actual = digest.hexdigest().lower()
+    if actual != expected.lower():
+        raise RuntimeError(
+            f"SHA-256 verification failed for {Path(path).name}: "
+            f"expected {expected}, got {actual}."
+        )
+
+
 def install_ffmpeg_windows():
     dest = platform_bin_dir()
     ffmpeg = dest / "ffmpeg.exe"
@@ -436,21 +485,22 @@ def install_ffmpeg_macos_static():
         print(f"FFmpeg already installed: {dest}")
         return
 
+    arch = "arm64" if machine().lower() in {"arm64", "aarch64"} else "x64"
+    assets = MACOS_FFMPEG_ASSETS[arch]
+    base_url = (
+        "https://github.com/eugeneware/ffmpeg-static/releases/download/"
+        f"{MACOS_FFMPEG_RELEASE}"
+    )
     dest.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="scenespy-ffmpeg-") as tmp_name:
         tmp = Path(tmp_name)
-        for name, url in MACOS_FFMPEG_URLS.items():
-            archive = tmp / f"{name}.zip"
-            download_file(url, archive)
-            extract_dir = tmp / name
-            extract_dir.mkdir()
-            with zipfile.ZipFile(archive) as zf:
-                zf.extractall(extract_dir)
-            matches = [p for p in extract_dir.rglob(name) if p.is_file()]
-            if not matches:
-                raise RuntimeError(f"Downloaded FFmpeg archive did not contain {name}.")
+        for name, (asset, expected_sha256) in assets.items():
+            archive = tmp / asset
+            download_file(f"{base_url}/{asset}", archive)
+            verify_sha256(archive, expected_sha256)
             target = dest / name
-            shutil.copy2(matches[0], target)
+            with gzip.open(archive, "rb") as source, open(target, "wb") as output:
+                shutil.copyfileobj(source, output)
             target.chmod(target.stat().st_mode | 0o755)
 
 
@@ -565,6 +615,7 @@ def main():
         ensure_ffmpeg()
         verify_ffmpeg()
     if not args.skip_ai:
+        configure_ai_installer_resources()
         ensure_windows_vc_runtime()
         torch_mode = ensure_ai_pack_with_fallback(args.torch_mode)
         print(f"Installed PyTorch mode: {torch_mode}")
