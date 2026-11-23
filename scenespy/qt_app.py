@@ -4086,10 +4086,15 @@ class ScenespyApp(QMainWindow):
         analysis_scroll.setWidgetResizable(True)
         analysis_scroll.setFrameShape(QFrame.Shape.NoFrame)
         analysis_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        analysis_scroll.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # An explicitly painted viewport is required when the Linux XCB GL
+        # integration is disabled (for example in VirtualBox).  A translucent
+        # scroll viewport can otherwise become an unpainted black rectangle
+        # and hide the complete analysis panel.
+        analysis_scroll.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground, False)
         analysis_scroll.viewport().setAttribute(
-            Qt.WidgetAttribute.WA_TranslucentBackground)
-        analysis_scroll.viewport().setAutoFillBackground(False)
+            Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        analysis_scroll.viewport().setAutoFillBackground(True)
         analysis_scroll.setWidget(right)
         analysis_scroll.setMinimumWidth(220)
         root.addWidget(analysis_scroll)
@@ -4384,7 +4389,7 @@ class ScenespyApp(QMainWindow):
         QListWidget#mediaList QScrollBar::add-line:vertical, QListWidget#mediaList QScrollBar::sub-line:vertical {{ background:transparent; border:0; height:0; }}
         QListWidget#mediaList::corner {{ background:#292b2f; border:0; }}
         QScrollArea#analysisScroll,
-        QScrollArea#analysisScroll QWidget#qt_scrollarea_viewport {{ background:transparent; border:0; }}
+        QScrollArea#analysisScroll QWidget#qt_scrollarea_viewport {{ background:{BG_MAIN}; border:0; }}
         QScrollArea#analysisScroll QScrollBar:vertical,
         QScrollArea#analysisScroll QWidget#qt_scrollarea_vcontainer {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #323438, stop:1 #292b2f); border:0; }}
         QScrollArea#analysisScroll QScrollBar::add-page:vertical,
