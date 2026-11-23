@@ -23,7 +23,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg python3-tk libpulse0
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg python3-tk libegl1 libgl1 libpulse0
       - name: Install CPU PyTorch
         run: >-
           python -m pip install
