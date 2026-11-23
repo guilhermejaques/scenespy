@@ -2,6 +2,7 @@ import os
 import sys
 
 from .shared import (AI_PACK_DIR, _ensure_mediapipe, _ensure_torch, _ensure_yolo,
+                     configure_linux_virtual_machine_graphics,
                      install_crash_logging, mediapipe_required,
                      runtime_import_error_message, single_instance,
                      validate_runtime_dependencies)
@@ -24,6 +25,7 @@ def _runtime_selftest():
 
 def main():
     install_crash_logging()
+    configure_linux_virtual_machine_graphics()
     if os.environ.get("SCENESPY_RUNTIME_SELFTEST") == "1":
         _runtime_selftest()
     from PySide6.QtWidgets import QMessageBox

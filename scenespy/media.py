@@ -7,7 +7,7 @@ import statistics
 import subprocess
 
 from .project import MediaItem
-from .shared import CREATE_NO_WINDOW, resolve_executable
+from .shared import CREATE_NO_WINDOW, external_process_env, resolve_executable
 
 
 def _rate(value: str) -> float:
@@ -37,7 +37,8 @@ def _frame_times(path: str) -> list[float]:
         "-show_frames", "-show_entries", "frame=best_effort_timestamp_time",
         "-of", "csv=p=0", path,
     ]
-    kwargs = {"capture_output": True, "text": True, "check": True}
+    kwargs = {"capture_output": True, "text": True, "check": True,
+              "env": external_process_env()}
     if CREATE_NO_WINDOW:
         kwargs["creationflags"] = CREATE_NO_WINDOW
     result = subprocess.run(command, **kwargs)
@@ -70,7 +71,8 @@ def probe_media(path: str) -> MediaItem:
         "-show_entries", "stream=width,height,avg_frame_rate,r_frame_rate,nb_frames,duration,start_time:stream_tags=DURATION,NUMBER_OF_FRAMES:format=duration",
         "-of", "json", path,
     ]
-    kwargs = {"capture_output": True, "text": True, "check": True}
+    kwargs = {"capture_output": True, "text": True, "check": True,
+              "env": external_process_env()}
     if CREATE_NO_WINDOW:
         kwargs["creationflags"] = CREATE_NO_WINDOW
     result = subprocess.run(command, **kwargs)

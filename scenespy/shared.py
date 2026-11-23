@@ -979,8 +979,42 @@ def single_instance():
     return True
 
 
+def external_process_env(base=None):
+    """Return an environment which is safe for non-bundled executables.
+
+    PyInstaller prepends its private library directory to LD_LIBRARY_PATH on
+    Linux.  Passing that path to system programs such as FFmpeg can make them
+    load the bundled GLib instead of the distribution's matching version.
+    """
+    env = dict(os.environ if base is None else base)
+    if sys.platform.startswith("linux") and getattr(sys, "frozen", False):
+        original = env.get("LD_LIBRARY_PATH_ORIG")
+        if original:
+            env["LD_LIBRARY_PATH"] = original
+        else:
+            env.pop("LD_LIBRARY_PATH", None)
+    return env
+
+
+def configure_linux_virtual_machine_graphics():
+    """Avoid Qt's fatal GLX path on VirtualBox Linux guests."""
+    if not sys.platform.startswith("linux"):
+        return
+    identity = ""
+    for path in ("/sys/class/dmi/id/product_name", "/sys/class/dmi/id/sys_vendor"):
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                identity += " " + handle.read().lower()
+        except OSError:
+            continue
+    if any(marker in identity for marker in ("virtualbox", "innotek", "oracle vm")):
+        os.environ.setdefault("QT_XCB_GL_INTEGRATION", "none")
+        os.environ.setdefault("QT_OPENGL", "software")
+
+
 def run_hidden(cmd, **kwargs):
     cmd = normalize_command(cmd)
+    kwargs.setdefault("env", external_process_env())
     if sys.platform == "win32":
         kwargs.setdefault("creationflags", CREATE_NO_WINDOW)
     capture_output = kwargs.pop("capture_output", False)
@@ -1060,6 +1094,7 @@ def terminate_all_child_processes(grace_seconds=0.5):
 def run_hidden_cancelable(cmd, stop_cb=None, poll_interval=0.05,
                           low_priority=False, **kwargs):
     cmd = normalize_command(cmd)
+    kwargs.setdefault("env", external_process_env())
     if sys.platform == "win32":
         flags = CREATE_NO_WINDOW
         if low_priority:

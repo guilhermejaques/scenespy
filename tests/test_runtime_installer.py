@@ -1,10 +1,17 @@
 import unittest
+from pathlib import Path
 
 from scripts.install_runtime import (CPU_INDEX_URL, CUDA_INDEX_URL,
                                      torch_index_url)
 
 
 class RuntimeInstallerTests(unittest.TestCase):
+    def test_linux_self_extracting_installer_does_not_default_to_ai(self):
+        script = (Path(__file__).parents[1] / "scripts" /
+                  "build_linux_installer.sh").read_text(encoding="utf-8")
+        self.assertIn('INSTALL_AI="${SCENESPY_INSTALL_AI:-no}"', script)
+        self.assertIn('[y/N]', script)
+
     def test_macos_uses_pypi_for_official_pytorch_wheels(self):
         self.assertIsNone(torch_index_url("cpu", "darwin"))
 

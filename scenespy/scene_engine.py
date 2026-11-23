@@ -1950,6 +1950,7 @@ class SceneEngine:
         kwargs = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = CREATE_NO_WINDOW
+        kwargs["env"] = external_process_env()
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,

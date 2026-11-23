@@ -57,11 +57,12 @@ chmod +x "$TARGET/uninstall.sh"
 echo "Scenespy installed in $TARGET"
 echo "Launch it from the application menu or run: scenespy"
 echo "Downloading and installing Scenespy runtime components..."
-INSTALL_AI="yes"
+INSTALL_AI="${SCENESPY_INSTALL_AI:-no}"
 if [[ -t 0 ]]; then
-  read -r -p "Install optional AI face detection now (up to 6 GB; selected by default)? [Y/n] " ANSWER
-  case "${ANSWER:-y}" in
-    n|N|no|NO|No) INSTALL_AI="no" ;;
+  read -r -p "Install optional AI face detection now (up to 6 GB)? [y/N] " ANSWER
+  case "${ANSWER:-n}" in
+    y|Y|yes|YES|Yes) INSTALL_AI="yes" ;;
+    *) INSTALL_AI="no" ;;
   esac
 fi
 if [[ "$INSTALL_AI" == "yes" ]]; then
