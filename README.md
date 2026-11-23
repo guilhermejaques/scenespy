@@ -111,6 +111,10 @@ Use the ready-to-use version of Scenespy from the GitHub **Releases** tab. Do no
 - macOS Intel: [`Scenespy-0.2.1-macos-x64.pkg`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.1/Scenespy-0.2.1-macos-x64.pkg)
 - macOS Apple Silicon: [`Scenespy-0.2.1-macos-arm64.pkg`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.1/Scenespy-0.2.1-macos-arm64.pkg)
 
+Supported systems are Windows 10 version 1809 or later (x64), Ubuntu 22.04 or
+later or Debian 12 or later (x64), and macOS 12 Monterey or later (Intel or
+Apple Silicon).
+
 All downloads and their SHA-256 checksum files are available on the [Scenespy v0.2.1 release page](https://github.com/guilhermejaques/scenespy/releases/tag/v0.2.1).
 
 Download and open the installer for your system. The base setup installs
@@ -175,10 +179,17 @@ python -m pip install -r requirements.txt
 
 ### CPU-only installation 
 
-If you want to guarantee a strictly CPU-only PyTorch installation:
+On Windows and Linux, use the official CPU-only PyTorch index:
 
 ```bash
 python -m pip install --force-reinstall torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
+```
+
+On macOS, use the regular PyPI wheels. They provide CPU support and MPS on
+compatible Apple Silicon systems:
+
+```bash
+python -m pip install --force-reinstall torch==2.5.1 torchvision==0.20.1
 ```
 
 With CPU:

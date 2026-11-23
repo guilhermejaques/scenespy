@@ -47,6 +47,20 @@ if (-not (Test-Path (Join-Path $ReleaseApp "_internal\models\yolov8n-face.pt")))
     throw "Build finished, but yolov8n-face.pt was not found in $ReleaseApp\_internal\models"
 }
 
+$PreviousQpaPlatform = $env:QT_QPA_PLATFORM
+$PreviousAppSelfTest = $env:SCENESPY_APP_SELFTEST
+try {
+    $env:QT_QPA_PLATFORM = "offscreen"
+    $env:SCENESPY_APP_SELFTEST = "1"
+    & (Join-Path $ReleaseApp "Scenespy.exe")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Packaged Windows application self-test failed with exit code $LASTEXITCODE"
+    }
+} finally {
+    $env:QT_QPA_PLATFORM = $PreviousQpaPlatform
+    $env:SCENESPY_APP_SELFTEST = $PreviousAppSelfTest
+}
+
 New-Item -ItemType Directory -Force -Path $DependenciesDir | Out-Null
 Copy-Item -Path (Join-Path $Root "scripts\install_runtime.py") -Destination $DependenciesDir -Force
 Copy-Item -Path (Join-Path $Root "scripts\install_runtime_windows.ps1") -Destination $ReleaseApp -Force

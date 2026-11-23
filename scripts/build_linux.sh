@@ -24,6 +24,9 @@ if [[ ! -x release/Scenespy-linux-x64/Scenespy ]]; then
   exit 1
 fi
 
+QT_QPA_PLATFORM=offscreen SCENESPY_APP_SELFTEST=1 \
+  release/Scenespy-linux-x64/Scenespy
+
 mkdir -p release/Scenespy-linux-x64/_internal/dependencies
 cp scripts/install_runtime.py release/Scenespy-linux-x64/_internal/dependencies/install_runtime.py
 cp scripts/install_runtime_unix.sh release/Scenespy-linux-x64/install_runtime.sh

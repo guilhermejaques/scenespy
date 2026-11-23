@@ -31,6 +31,23 @@ cp scripts/install_runtime.py release/Scenespy-macos/_internal/dependencies/inst
 cp scripts/install_runtime_unix.sh release/Scenespy-macos/install_runtime.sh
 chmod +x release/Scenespy-macos/install_runtime.sh
 
+APP="release/Scenespy-macos/Scenespy.app"
+RUNTIME_DIR="$APP/Contents/Resources/scenespy-runtime"
+mkdir -p "$RUNTIME_DIR/_internal/dependencies"
+cp scripts/install_runtime.py "$RUNTIME_DIR/_internal/dependencies/install_runtime.py"
+cp scripts/install_runtime_unix.sh "$RUNTIME_DIR/install_runtime.sh"
+chmod +x "$RUNTIME_DIR/install_runtime.sh"
+
+# Adding runtime resources changes the bundle after PyInstaller's signing
+# phase. Seal the final bundle again so macOS never receives a modified or
+# invalid ad-hoc signature. Public Developer ID signing/notarization is a
+# separate release step because it requires owner-provided Apple credentials.
+codesign --force --deep --sign - "$APP"
+codesign --verify --deep --strict "$APP"
+
+QT_QPA_PLATFORM=offscreen SCENESPY_APP_SELFTEST=1 \
+  "$APP/Contents/MacOS/Scenespy"
+
 bash ./scripts/build_macos_installer.sh
 
 rm -rf build dist

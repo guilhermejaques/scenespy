@@ -26,10 +26,11 @@ mkdir -p "$PAYLOAD/Applications" "$CORE_SCRIPTS" "$AI_SCRIPTS"
 cp -R "$SOURCE/Scenespy.app" "$PAYLOAD/Applications/Scenespy.app"
 
 RUNTIME_DIR="$PAYLOAD/Applications/Scenespy.app/Contents/Resources/scenespy-runtime"
-mkdir -p "$RUNTIME_DIR/_internal/dependencies"
-cp "$SOURCE/install_runtime.sh" "$RUNTIME_DIR/install_runtime.sh"
-cp "$SOURCE/_internal/dependencies/install_runtime.py" "$RUNTIME_DIR/_internal/dependencies/install_runtime.py"
-chmod +x "$RUNTIME_DIR/install_runtime.sh"
+if [[ ! -x "$RUNTIME_DIR/install_runtime.sh" ||
+      ! -f "$RUNTIME_DIR/_internal/dependencies/install_runtime.py" ]]; then
+  echo "The final app bundle does not contain its runtime installer." >&2
+  exit 1
+fi
 
 cat > "$CORE_SCRIPTS/postinstall" <<'POSTINSTALL'
 #!/usr/bin/env bash
@@ -89,6 +90,9 @@ cat > "$WORK/distribution.xml" <<DISTRIBUTION
 <installer-gui-script minSpecVersion="2">
   <title>Scenespy ${VERSION}</title>
   <options customize="always" require-scripts="false" hostArchitectures="${ARCH/x64/x86_64}"/>
+  <allowed-os-versions>
+    <os-version min="12.0"/>
+  </allowed-os-versions>
   <choices-outline>
     <line choice="core"/>
     <line choice="ai"/>

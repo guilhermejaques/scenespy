@@ -35,7 +35,7 @@ Version: ${VERSION}
 Section: video
 Priority: optional
 Architecture: amd64
-Depends: ffmpeg, ca-certificates, curl
+Depends: libc6 (>= 2.35), ffmpeg, ca-certificates, curl, libegl1, libgl1, libxkbcommon-x11-0, libxcb-cursor0
 Maintainer: Scenespy
 Description: Desktop video scene detection and editing
  Scenespy detects scene changes, cuts videos by intervals, and offers optional

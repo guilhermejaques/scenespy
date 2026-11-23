@@ -17,6 +17,7 @@ $PrivatePython = Join-Path $PrivatePythonDir "python.exe"
 $DownloadsDir = Join-Path $AppData "downloads"
 $PythonInstaller = Join-Path $DownloadsDir "python-$PythonVersion-amd64.exe"
 $PythonUrl = "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-amd64.exe"
+$PythonSha256 = "5EE42C4EEE1E6B4464BB23722F90B45303F79442DF63083F05322F1785F5FDDE"
 
 if (-not (Test-Path $Installer)) {
     throw "install_runtime.py was not found in _internal\dependencies."
@@ -27,9 +28,21 @@ function Ensure-PrivatePython {
         return
     }
     New-Item -ItemType Directory -Force -Path $DownloadsDir | Out-Null
+    if (Test-Path $PythonInstaller) {
+        $CachedHash = (Get-FileHash -LiteralPath $PythonInstaller -Algorithm SHA256).Hash
+        if ($CachedHash -ne $PythonSha256) {
+            Write-Host "Removing incomplete or invalid cached Python installer."
+            Remove-Item -LiteralPath $PythonInstaller -Force
+        }
+    }
     if (-not (Test-Path $PythonInstaller)) {
         Write-Host "Downloading Python $PythonVersion for Scenespy..."
         Invoke-WebRequest -Uri $PythonUrl -OutFile $PythonInstaller
+    }
+    $DownloadedHash = (Get-FileHash -LiteralPath $PythonInstaller -Algorithm SHA256).Hash
+    if ($DownloadedHash -ne $PythonSha256) {
+        Remove-Item -LiteralPath $PythonInstaller -Force
+        throw "Python installer SHA-256 verification failed."
     }
     Write-Host "Installing private Python $PythonVersion for Scenespy..."
     $args = @(

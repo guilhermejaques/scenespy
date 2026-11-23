@@ -29,6 +29,19 @@ def main():
     from PySide6.QtWidgets import QMessageBox
     from .qt_app import ScenespyApp, create_application
     application = create_application(sys.argv)
+    if os.environ.get("SCENESPY_APP_SELFTEST") == "1":
+        # Exercise the frozen Qt application, plugins, bundled resources and
+        # main-window construction without requiring FFmpeg or a display. The
+        # release jobs run this before an installer can be published.
+        window = ScenespyApp()
+        if window.menuBar().isNativeMenuBar():
+            print("Application self-test failed: native menu bar is enabled.",
+                  file=sys.stderr)
+            raise SystemExit(1)
+        print("Scenespy packaged application self-test passed.")
+        window.deleteLater()
+        application.processEvents()
+        raise SystemExit(0)
     ok, message = validate_runtime_dependencies()
     if not ok:
         QMessageBox.critical(None, "Missing Required Dependencies", message)

@@ -247,7 +247,14 @@ def selected_torch_mode(requested):
     return "cpu"
 
 
-def torch_index_url(mode):
+def torch_index_url(mode, system=None):
+    """Return the wheel index used by the current operating system."""
+    system = system or sys.platform
+    # Official macOS PyTorch wheels are published on PyPI, not in the
+    # Linux/Windows CPU wheel index. The regular wheels include MPS support on
+    # compatible Apple Silicon machines.
+    if system == "darwin":
+        return None
     return CUDA_INDEX_URL if mode == "cuda" else CPU_INDEX_URL
 
 
@@ -361,9 +368,10 @@ def install_torch_packages(py, torch_mode, force=False):
     cmd.extend([
         f"torch=={torch_version}",
         f"torchvision=={torchvision_version}",
-        "--index-url",
-        torch_index_url(torch_mode),
     ])
+    index_url = torch_index_url(torch_mode)
+    if index_url:
+        cmd.extend(["--index-url", index_url])
     run(cmd)
 
 

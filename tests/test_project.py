@@ -8,9 +8,12 @@ from PySide6.QtCore import Qt
 
 from scenespy.project import CutEvent, FaceEvent, MediaItem, ScenespyProject
 from scenespy.shared import next_output_path
-from scenespy.qt_app import (ScenespyApp, exported_path_size, final_face_crop_box,
-                             format_file_size, parse_timecode, player_timecode,
-                             primary_modifier, scrub_timecode, timecode,
+from scenespy.qt_app import (ScenespyApp, configure_menu_bar,
+                             exported_path_size, final_face_crop_box,
+                             floating_time_bubble_flags, format_file_size,
+                             parse_timecode, player_timecode, primary_modifier,
+                             scrub_timecode, timecode,
+                             zoom_shortcut_modifier,
                              valid_faces_output_name,
                              transport_timecode)
 
@@ -135,6 +138,29 @@ class ProjectModelTests(unittest.TestCase):
             primary_modifier("win32"), Qt.KeyboardModifier.ControlModifier)
         self.assertEqual(
             primary_modifier("linux"), Qt.KeyboardModifier.ControlModifier)
+
+    def test_zoom_shortcut_modifier_is_font_safe_on_every_platform(self):
+        self.assertEqual(zoom_shortcut_modifier("darwin"), "Command")
+        self.assertEqual(zoom_shortcut_modifier("win32"), "Ctrl")
+        self.assertEqual(zoom_shortcut_modifier("linux"), "Ctrl")
+
+    def test_menu_bar_is_kept_inside_the_application_window(self):
+        class MenuBar:
+            native = None
+
+            def setNativeMenuBar(self, native):
+                self.native = native
+
+        menu_bar = MenuBar()
+        configure_menu_bar(menu_bar)
+        self.assertFalse(menu_bar.native)
+
+    def test_time_bubbles_use_app_styling_instead_of_native_tooltips(self):
+        flags = floating_time_bubble_flags()
+        self.assertEqual(
+            flags & Qt.WindowType.WindowType_Mask, Qt.WindowType.Tool)
+        self.assertTrue(flags & Qt.WindowType.FramelessWindowHint)
+        self.assertTrue(flags & Qt.WindowType.WindowDoesNotAcceptFocus)
 
     def test_editor_timecodes_are_parseable(self):
         self.assertEqual(parse_timecode("01:02:03.500"), 3723.5)

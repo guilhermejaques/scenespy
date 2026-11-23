@@ -160,6 +160,27 @@ def primary_shortcut(key, shift=False, platform=None):
     return QKeySequence(modifier | key)
 
 
+def zoom_shortcut_modifier(platform=None):
+    """Return a font-safe label for the timeline zoom gesture."""
+    return "Command" if (platform or sys.platform) == "darwin" else "Ctrl"
+
+
+def configure_menu_bar(menu_bar):
+    """Keep application menus and custom corner widgets inside the window."""
+    # Qt promotes a QMainWindow menu bar to macOS's global menu bar by
+    # default.  Global menu bars cannot display our GitHub corner widget and
+    # bypass the app's menu styling.  A non-native bar gives every platform
+    # the same in-window layout, including while macOS is in full screen.
+    menu_bar.setNativeMenuBar(False)
+
+
+def floating_time_bubble_flags():
+    """Use an app-styled floating window instead of a native OS tooltip."""
+    return (Qt.WindowType.Tool |
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowDoesNotAcceptFocus)
+
+
 def timecode(seconds, duration=None):
     total = max(0, int(round(float(seconds or 0) * 1000)))
     reference_total = max(0, int(round(float(duration or 0) * 1000)))
@@ -379,8 +400,11 @@ class ScrubSlider(QSlider):
         super().__init__(orientation, parent)
         self.show_milliseconds = True
         self.setMouseTracking(True)
-        self._time_bubble = QLabel(None, Qt.WindowType.ToolTip)
+        self._time_bubble = QLabel(None, floating_time_bubble_flags())
         self._time_bubble.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self._time_bubble.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._time_bubble.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self._time_bubble.setStyleSheet(
             "QLabel { background:#35383d; color:#f3f4f6; border:1px solid #69717c; "
             "border-radius:0; padding:4px 7px; font-weight:700; }")
@@ -2235,7 +2259,7 @@ class TimelineView(QGraphicsView):
         self._live_segment_load_thumbnails = False
         self._clip_duration_label = None
         self._hover_guide = None
-        self._hover_time_bubble = QLabel(None, Qt.WindowType.ToolTip)
+        self._hover_time_bubble = QLabel(None, floating_time_bubble_flags())
         self._hover_time_bubble.setAttribute(
             Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self._hover_time_bubble.setAttribute(
@@ -4153,6 +4177,7 @@ class ScenespyApp(QMainWindow):
                 ("Interval", self.interval), ("Acceleration", self.accel))
 
     def _build_actions(self):
+        configure_menu_bar(self.menuBar())
         self.import_action = QAction("Import Video", self)
         self.import_action.setShortcut(QKeySequence.StandardKey.Open)
         self.import_action.triggered.connect(self.import_videos)
@@ -4181,7 +4206,7 @@ class ScenespyApp(QMainWindow):
         reset_layout_action = QAction("Reset Layout", self)
         reset_layout_action.setShortcut(primary_shortcut(Qt.Key.Key_R, shift=True))
         reset_layout_action.triggered.connect(self.reset_layout)
-        zoom_modifier = "⌘" if sys.platform == "darwin" else "Ctrl"
+        zoom_modifier = zoom_shortcut_modifier()
         zoom_in_action = QAction(
             f"Zoom In\t{zoom_modifier}+Scroll Up", self)
         zoom_in_action.triggered.connect(

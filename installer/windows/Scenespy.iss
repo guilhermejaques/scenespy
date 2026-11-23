@@ -32,6 +32,7 @@ WizardStyle=modern
 ExtraDiskSpaceRequired=629145600
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+MinVersion=10.0.17763
 CloseApplications=yes
 
 [Languages]
@@ -49,8 +50,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "aifeatures"; Description: "Install AI face detection features (recommended; up to 6 GB total disk space)"; GroupDescription: "Optional features:"; Flags: checkedonce
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install_runtime_windows.ps1"" -TorchMode auto"; StatusMsg: "Downloading required components and AI features..."; Flags: runhidden waituntilterminated; Tasks: aifeatures
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install_runtime_windows.ps1"" -TorchMode cpu -SkipAI"; StatusMsg: "Downloading and installing required Scenespy components..."; Flags: runhidden waituntilterminated; Tasks: not aifeatures
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install_runtime_windows.ps1"" -TorchMode cpu -SkipAI"; StatusMsg: "Downloading and installing required Scenespy components..."; Flags: runhidden waituntilterminated
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install_runtime_windows.ps1"" -TorchMode auto -SkipFFmpeg"; StatusMsg: "Downloading optional AI face detection features..."; Flags: runhidden waituntilterminated; Tasks: aifeatures
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [Code]

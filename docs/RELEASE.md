@@ -6,6 +6,15 @@ macOS releases from one OS. Pushing a tag such as `v0.2.1` runs
 GitHub Release. The tag and `scenespy.__version__` should match. SHA-256 files
 are published beside every artifact and are required by the in-app updater.
 
+Supported release targets:
+
+- Windows 10 version 1809 or later, x64.
+- Ubuntu 22.04 or later and Debian 12 or later, x64.
+- macOS 12 Monterey or later, Intel x64 and Apple Silicon arm64.
+
+The installers reject older operating systems where the pinned Qt and native
+libraries are not covered by the release builds.
+
 At startup, packaged apps check the latest GitHub Release without blocking the
 interface. A newer platform-specific installer is offered in-app, downloaded
 over HTTPS, verified against its release SHA-256 file, and opened only after
