@@ -17,13 +17,13 @@ jobs:
         python-version: ["3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg python3-tk
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg python3-tk libpulse0
       - name: Install CPU PyTorch
         run: >-
           python -m pip install

@@ -30,8 +30,8 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -46,7 +46,7 @@ jobs:
           }
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y python3-tk libegl1 libgl1
+        run: sudo apt-get update && sudo apt-get install -y python3-tk libegl1 libgl1 libpulse0
       - name: Install application build dependencies
         run: python scripts/install_build_dependencies.py
       - name: Run test suite
@@ -74,7 +74,7 @@ jobs:
           for file in artifacts/*; do
             sha256sum "$file" > "${file}.sha256"
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: scenespy-${{ matrix.artifact }}
           path: artifacts/*
