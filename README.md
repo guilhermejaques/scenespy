@@ -7,13 +7,13 @@ The goal is simple: choose a video, choose an output folder, select the cutting 
 ---
 Face detection and cropping from video:
 
-<img width="65%" alt="Image" src="https://github.com/user-attachments/assets/222c8977-bdea-41b0-8aa6-9ab088195f5f" />
+<img width="65%" alt="Image" src="https://github.com/user-attachments/assets/6744038e-e578-4fa3-9332-5c229494dffd" />
 <img width="65%" alt="Image" src="https://github.com/user-attachments/assets/8bdfd2b3-a0b2-4244-97c0-bc078a1ff509" />
 
 ---
 Detection and cutting of video scenes:
 
-<img width="65%" alt="Image" src="https://github.com/user-attachments/assets/649c86c9-1149-4148-a3ef-d1ecda397edd" />
+<img width="65%" alt="Image" src="https://github.com/user-attachments/assets/e272c297-7a35-4383-a9bb-5b7dce1e6cd5" />
 <img width="65%" alt="Image" src="https://github.com/user-attachments/assets/ae2498f9-720c-4b2e-b678-757703e9219d" />
 
 ---
