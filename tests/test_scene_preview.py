@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -8,6 +9,85 @@ from scenespy.scene_engine import SceneEngine
 
 
 class ScenePreviewTests(unittest.TestCase):
+    def test_scene_scan_progress_uses_stream_position_between_cut_events(self):
+        progress = []
+
+        class Progress:
+            def after(self, _delay, callback):
+                callback()
+
+            def update(self, value):
+                progress.append(float(value))
+
+            def set_status(self, _text):
+                pass
+
+        class Position:
+            def __init__(self, frames):
+                self.frames = frames
+
+            def get_frames(self):
+                return self.frames
+
+        class Video:
+            frame_rate = 10.0
+
+            def __init__(self):
+                self.position = Position(0)
+
+        video = Video()
+
+        class Manager:
+            def __init__(self, _stats):
+                self.auto_downscale = True
+                self.downscale = 1
+
+            def add_detector(self, _detector):
+                pass
+
+            def detect_scenes(self, video, callback):
+                for frame in (20, 40, 60, 80):
+                    video.position = Position(frame)
+                    time.sleep(0.22)
+                # PySceneDetect supplies image first and frame number second.
+                callback(object(), Position(80))
+
+            def get_cut_list(self, show_warning=False):
+                return []
+
+            def get_scene_list(self):
+                return [(Position(0), Position(100))]
+
+            def stop(self):
+                pass
+
+        engine = SceneEngine(
+            "video.mp4", "output", {}, progressbar=Progress())
+        engine._get_video_fps = lambda: 10.0
+        engine._get_video_duration = lambda: 10.0
+        engine._get_video_total_frames = lambda _fps, _duration: 100
+        engine._map_threshold = lambda: (27, 2.0)
+        engine._compose_scene_list = lambda scenes, _fps, _min_dur: scenes
+        engine._analysis_ratio = 0.0
+
+        fake_modules = (
+            lambda *_args, **_kwargs: video,
+            Manager,
+            lambda **_kwargs: object(),
+            object,
+            lambda **_kwargs: object(),
+        )
+        with patch("scenespy.scene_engine._ensure_scenedetect",
+                   return_value=fake_modules):
+            scenes = engine._detect_scenes_progressive()
+
+        scan_updates = [value for value in progress if 0.05 < value <= 0.4]
+        self.assertTrue(scan_updates)
+        self.assertGreater(max(scan_updates), 0.2)
+        self.assertEqual(
+            [(start.get_frames(), end.get_frames()) for start, end in scenes],
+            [(0, 100)])
+
     def test_cut_progress_labels_distinguish_scenes_and_intervals(self):
         engine = SceneEngine("video.mp4", "output", {})
         engine.scene_mode = True

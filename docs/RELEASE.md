@@ -1,7 +1,7 @@
 # Scenespy release builds
 
 Build each platform on that same platform. Do not build Windows, Linux, and
-macOS releases from one OS. Pushing a tag such as `v0.2.1` runs
+macOS releases from one OS. Pushing a tag such as `v0.2.2` runs
 `.github/workflows/release-installers.yml` and attaches all installers to the
 GitHub Release. The tag and `scenespy.__version__` should match. SHA-256 files
 are published beside every artifact and are required by the in-app updater.

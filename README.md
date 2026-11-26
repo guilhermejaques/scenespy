@@ -104,18 +104,18 @@ MKV supports multiple audio tracks and may present container issues, so for diff
 
 ## Quick installation | GitHub Releases
 
-Use the ready-to-use version of Scenespy from the GitHub **Releases** tab. Do not use the **Code > Download ZIP** button if you only want to install and use the app. Release `v0.2.1` provides an installer for each supported operating system and architecture:
+Use the ready-to-use version of Scenespy from the GitHub **Releases** tab. Do not use the **Code > Download ZIP** button if you only want to install and use the app. Release `v0.2.2` provides an installer for each supported operating system and architecture:
 
-- Windows x64: [`Scenespy-0.2.1-windows-x64-setup.exe`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.1/Scenespy-0.2.1-windows-x64-setup.exe)
-- Linux Ubuntu/Debian x64: [`Scenespy-0.2.1-linux-amd64.deb`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.1/Scenespy-0.2.1-linux-amd64.deb)
-- macOS Intel: [`Scenespy-0.2.1-macos-x64.pkg`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.1/Scenespy-0.2.1-macos-x64.pkg)
-- macOS Apple Silicon: [`Scenespy-0.2.1-macos-arm64.pkg`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.1/Scenespy-0.2.1-macos-arm64.pkg)
+- Windows x64: [`Scenespy-0.2.2-windows-x64-setup.exe`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.2/Scenespy-0.2.2-windows-x64-setup.exe)
+- Linux Ubuntu/Debian x64: [`Scenespy-0.2.2-linux-amd64.deb`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.2/Scenespy-0.2.2-linux-amd64.deb)
+- macOS Intel: [`Scenespy-0.2.2-macos-x64.pkg`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.2/Scenespy-0.2.2-macos-x64.pkg)
+- macOS Apple Silicon: [`Scenespy-0.2.2-macos-arm64.pkg`](https://github.com/guilhermejaques/scenespy/releases/download/v0.2.2/Scenespy-0.2.2-macos-arm64.pkg)
 
 Supported systems are Windows 10 version 1809 or later (x64), Ubuntu 22.04 or
 later or Debian 12 or later (x64), and macOS 12 Monterey or later (Intel or
 Apple Silicon).
 
-All downloads and their SHA-256 checksum files are available on the [Scenespy v0.2.1 release page](https://github.com/guilhermejaques/scenespy/releases/tag/v0.2.1).
+All downloads and their SHA-256 checksum files are available on the [Scenespy v0.2.2 release page](https://github.com/guilhermejaques/scenespy/releases/tag/v0.2.2).
 
 Download and open the installer for your system. The base setup installs
 Scenespy and FFmpeg. AI face detection is a separate, optional download that

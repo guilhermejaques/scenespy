@@ -669,10 +669,10 @@ class SceneEngine:
         published_cut_frames = ()
         published_preview_ratio = -1.0
 
-        def _progress_cb(frame_num, _):
+        def _publish_scan_progress(frame_num, publish_boundaries=False):
             nonlocal published_cut_frames, published_preview_ratio
             if self._stop:
-                raise RuntimeError("Stopped")
+                return
 
             try:
                 frame_idx = _safe_frame_index(frame_num)
@@ -686,7 +686,7 @@ class SceneEngine:
                 return True
             self._last_ui_update = time.time()
 
-            if self.preview_analysis_callback:
+            if publish_boundaries and self.preview_analysis_callback:
                 try:
                     cut_frames = tuple(
                         int(cut.get_frames()) for cut in
@@ -722,12 +722,50 @@ class SceneEngine:
                 eta = self._analysis_eta_text(ratio)
                 self.log.after(0, lambda d=self.detected, c=self.done, e=eta:
                 self.log.write_status(detected=d, cut=c, eta=e))
-            return True
+
+        def _scene_event_cb(_frame_image, frame_num):
+            """Publish newly detected boundaries using PySceneDetect's callback order."""
+            _publish_scan_progress(frame_num, publish_boundaries=True)
+
+        def _run_detector():
+            """Track decoded-frame progress while PySceneDetect runs synchronously."""
+            monitor_stop = threading.Event()
+
+            def _monitor_position():
+                while not monitor_stop.wait(0.2):
+                    if self._stop:
+                        try:
+                            scene_manager.stop()
+                        except Exception:
+                            pass
+                        return
+                    try:
+                        _publish_scan_progress(video.position)
+                    except Exception:
+                        # A backend can briefly make its position unavailable
+                        # while opening or closing.  The next poll will retry.
+                        pass
+
+            monitor = threading.Thread(
+                target=_monitor_position,
+                name="ScenespySceneProgress",
+                daemon=True)
+            monitor.start()
+            try:
+                return scene_manager.detect_scenes(
+                    video=video, callback=_scene_event_cb)
+            finally:
+                monitor_stop.set()
+                monitor.join(timeout=1.0)
+                try:
+                    _publish_scan_progress(video.position)
+                except Exception:
+                    pass
 
         scene_list = []
         try:
             self._write_analysis_status("running scene detector", 0.05)
-            scene_manager.detect_scenes(video=video, callback=_progress_cb)
+            _run_detector()
             if self._stop:
                 return []
 
@@ -841,7 +879,7 @@ class SceneEngine:
                     published_preview_ratio = -1.0
                     self._last_preview_boundaries = ()
                     self._write_analysis_status("running scene detector", 0.05)
-                    scene_manager.detect_scenes(video=video, callback=_progress_cb)
+                    _run_detector()
                     if self._stop:
                         return []
                     scene_list = scene_manager.get_scene_list()
